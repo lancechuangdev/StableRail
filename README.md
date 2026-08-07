@@ -71,3 +71,24 @@ For race detection and static analysis:
 go test -race ./...
 go vet ./...
 ```
+
+## Phase 2: distributed payments
+
+Phase 2 is being delivered incrementally. Step 1 adds the Kafka boundary: a
+versioned event envelope, a producer interface, and a shared Kafka producer
+that can publish to multiple topics. Create one producer per application
+process and pass the destination topic to each publish call; do not create a
+producer per message.
+Payment state changes are not wired directly to Kafka because that would create
+a dual-write consistency gap. The next step will introduce a transactional
+outbox and connect payment transactions to event publication safely.
+
+Start the local single-node Kafka broker with:
+
+```bash
+docker compose up -d kafka
+```
+
+The default development broker address is `localhost:9092`. Kafka topics are
+auto-created in this local setup; production environments should provision and
+configure topics explicitly.
