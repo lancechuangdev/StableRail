@@ -1,4 +1,20 @@
 services:
+  postgres:
+    image: postgres:18.0
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: stablerail
+      POSTGRES_USER: stablerail
+      POSTGRES_PASSWORD: stablerail
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U stablerail -d stablerail"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - postgres-data:/var/lib/postgresql
+
   kafka:
     image: apache/kafka:4.1.1
     ports:
@@ -15,3 +31,6 @@ services:
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+
+volumes:
+  postgres-data:
