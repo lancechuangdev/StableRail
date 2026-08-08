@@ -38,6 +38,28 @@ func TestCreateAndSettlePaymentLifecycle(t *testing.T) {
 	if payment.State != StateSettled {
 		t.Fatalf("expected state %q, got %q", StateSettled, payment.State)
 	}
+	if len(payment.LedgerEntries) != 4 {
+		t.Fatalf("expected four ledger lines, got %d", len(payment.LedgerEntries))
+	}
+	processingDebit, processingCredit := payment.LedgerEntries[0], payment.LedgerEntries[1]
+	if processingDebit.AccountCode != CashOperatingAccount || processingDebit.Side != EntryDebit ||
+		processingCredit.AccountCode != SettlementAccount || processingCredit.Side != EntryCredit {
+		t.Fatalf("unexpected processing journal: %+v %+v", processingDebit, processingCredit)
+	}
+	settlementDebit, settlementCredit := payment.LedgerEntries[2], payment.LedgerEntries[3]
+	if settlementDebit.AccountCode != SettlementAccount || settlementDebit.Side != EntryDebit ||
+		settlementCredit.AccountCode != CashOperatingAccount || settlementCredit.Side != EntryCredit {
+		t.Fatalf("unexpected settlement journal: %+v %+v", settlementDebit, settlementCredit)
+	}
+	for _, entry := range payment.LedgerEntries {
+		if entry.AmountMinor != payment.AmountMinor || entry.Currency != payment.Currency || entry.PaymentID != payment.ID {
+			t.Fatalf("ledger entry does not balance to payment: %+v", entry)
+		}
+	}
+	if processingDebit.TransactionID != processingCredit.TransactionID || settlementDebit.TransactionID != settlementCredit.TransactionID {
+		t.Fatal("debit and credit lines must share a journal transaction")
+	}
+	assertBalancedJournal(t, payment.LedgerEntries)
 
 	if len(payment.AuditLog) < 3 {
 		t.Fatalf("expected at least 3 audit events, got %d", len(payment.AuditLog))
@@ -46,6 +68,27 @@ func TestCreateAndSettlePaymentLifecycle(t *testing.T) {
 	timeline := service.Timeline(payment.ID)
 	if len(timeline) < 3 {
 		t.Fatalf("expected at least 3 timeline entries, got %d", len(timeline))
+	}
+}
+
+func assertBalancedJournal(t *testing.T, entries []LedgerEntry) {
+	t.Helper()
+	totals := make(map[string]struct{ debit, credit int64 })
+	for _, entry := range entries {
+		total := totals[entry.TransactionID]
+		if entry.Side == EntryDebit {
+			total.debit += entry.AmountMinor
+		} else if entry.Side == EntryCredit {
+			total.credit += entry.AmountMinor
+		} else {
+			t.Fatalf("unknown ledger side %q", entry.Side)
+		}
+		totals[entry.TransactionID] = total
+	}
+	for transactionID, total := range totals {
+		if total.debit != total.credit {
+			t.Fatalf("journal %s is unbalanced: debits=%d credits=%d", transactionID, total.debit, total.credit)
+		}
 	}
 }
 

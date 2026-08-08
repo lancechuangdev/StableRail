@@ -66,11 +66,11 @@ func (s *PostgresService) CreatePayment(
 	result, err := tx.ExecContext(ctx, `
 		INSERT INTO payments
 			(id, external_reference, currency, amount_minor, customer_id, state,
-			 ledger_balance, idempotency_key, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9)
+			 idempotency_key, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)
 		ON CONFLICT (idempotency_key) DO NOTHING`,
 		payment.ID, payment.ExternalReference, payment.Currency, payment.AmountMinor,
-		payment.CustomerID, payment.State, payment.LedgerBalance, payment.IdempotencyKey, now,
+		payment.CustomerID, payment.State, payment.IdempotencyKey, now,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert payment: %w", err)
@@ -137,9 +137,10 @@ func (s *PostgresService) transition(
 
 	var current PaymentState
 	var amountMinor int64
+	var currency string
 	if err := tx.QueryRowContext(ctx,
-		`SELECT state, amount_minor FROM payments WHERE id = $1 FOR UPDATE`, paymentID,
-	).Scan(&current, &amountMinor); err != nil {
+		`SELECT state, amount_minor, currency FROM payments WHERE id = $1 FOR UPDATE`, paymentID,
+	).Scan(&current, &amountMinor, &currency); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return fmt.Errorf("payment %s not found", paymentID)
 		}
@@ -151,10 +152,17 @@ func (s *PostgresService) transition(
 
 	now := s.now()
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE payments SET state = $1, ledger_balance = $2, updated_at = $3 WHERE id = $4`,
-		to, amountMinor, now, paymentID,
+		`UPDATE payments SET state = $1, updated_at = $2 WHERE id = $3`,
+		to, now, paymentID,
 	); err != nil {
 		return fmt.Errorf("update payment: %w", err)
+	}
+	debitAccount, creditAccount, err := transitionAccounts(to)
+	if err != nil {
+		return err
+	}
+	if err := s.insertJournal(ctx, tx, paymentID, "payment."+string(to), debitAccount, creditAccount, amountMinor, currency, now); err != nil {
+		return err
 	}
 	if err := insertHistory(ctx, tx, paymentID, auditEvent, auditMessage, to, timelineNote, now); err != nil {
 		return err
@@ -170,6 +178,53 @@ func (s *PostgresService) transition(
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit payment transition: %w", err)
+	}
+	return nil
+}
+
+func transitionAccounts(state PaymentState) (string, string, error) {
+	switch state {
+	case StateProcessing:
+		return CashOperatingAccount, SettlementAccount, nil
+	case StateSettled:
+		return SettlementAccount, CashOperatingAccount, nil
+	default:
+		return "", "", fmt.Errorf("no ledger posting defined for state %s", state)
+	}
+}
+
+func (s *PostgresService) insertJournal(
+	ctx context.Context, tx *sql.Tx, paymentID, eventType, debitAccount, creditAccount string,
+	amountMinor int64, currency string, now time.Time,
+) error {
+	journalID, err := s.newID("jrn_")
+	if err != nil {
+		return fmt.Errorf("generate journal ID: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO ledger_transactions (id, payment_id, event_type, occurred_at)
+		VALUES ($1, $2, $3, $4)`,
+		journalID, paymentID, eventType, now,
+	); err != nil {
+		return fmt.Errorf("insert ledger transaction: %w", err)
+	}
+
+	lines := []struct {
+		id, account string
+		side        EntrySide
+	}{
+		{journalID + ":debit", debitAccount, EntryDebit},
+		{journalID + ":credit", creditAccount, EntryCredit},
+	}
+	for _, line := range lines {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO ledger_entries
+				(id, transaction_id, account_code, side, amount_minor, currency)
+			VALUES ($1, $2, $3, $4, $5, $6)`,
+			line.id, journalID, line.account, line.side, amountMinor, currency,
+		); err != nil {
+			return fmt.Errorf("insert %s ledger line: %w", line.side, err)
+		}
 	}
 	return nil
 }
@@ -214,12 +269,12 @@ func getPaymentByIdempotencyKey(ctx context.Context, tx *sql.Tx, key string) (*P
 	payment := &Payment{}
 	err := tx.QueryRowContext(ctx, `
 		SELECT id, external_reference, currency, amount_minor, customer_id, state,
-		       ledger_balance, idempotency_key, created_at, updated_at
+		       idempotency_key, created_at, updated_at
 		FROM payments WHERE idempotency_key = $1`, key,
 	).Scan(
 		&payment.ID, &payment.ExternalReference, &payment.Currency, &payment.AmountMinor,
-		&payment.CustomerID, &payment.State, &payment.LedgerBalance,
-		&payment.IdempotencyKey, &payment.CreatedAt, &payment.UpdatedAt,
+		&payment.CustomerID, &payment.State, &payment.IdempotencyKey,
+		&payment.CreatedAt, &payment.UpdatedAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("get idempotent payment: %w", err)

@@ -47,7 +47,7 @@ Settled
 Implemented capabilities:
 
 - Payment state machine with created → processing → settled
-- Simple per-payment ledger balance tracking
+- Immutable double-entry ledger postings for processing and settlement
 - Idempotency-key protection for duplicate submissions
 - Audit log for lifecycle events
 - Timeline API for payment history
@@ -86,9 +86,17 @@ Payment state changes are not wired directly to Kafka because that would create
 a dual-write consistency gap.
 
 Step 2 adds PostgreSQL-backed payment commands and a transactional outbox.
-`PostgresService` writes the payment, audit history, timeline, and versioned
-outbox event in one database transaction. Kafka publication remains outside the
-request transaction and will be performed by the relay in the next step.
+`PostgresService` writes the payment, double-entry ledger posting, audit
+history, timeline, and versioned outbox event in one database transaction.
+Kafka publication remains outside the request transaction and will be
+performed by the relay in the next step.
+
+The initial chart of accounts defines operating cash as an asset and settlement
+payable as a liability. Payment processing debits operating cash and credits
+settlement payable, recognizing cash received and the matching obligation.
+Settlement debits the payable and credits operating cash, clearing both.
+Each journal transaction contains separate, equal debit and credit lines.
+Corrections should be represented by reversing journal transactions.
 
 ### Phase 2 delivery plan
 
@@ -99,7 +107,7 @@ request transaction and will be performed by the relay in the next step.
 2. **Transactional outbox — complete**
    - PostgreSQL-backed payment commands
    - Atomic payment and outbox writes
-   - Persistent audit history and timeline
+   - Persistent double-entry ledger, audit history, and timeline
 3. **Outbox relay — planned**
    - Poll pending outbox rows in bounded batches
    - Lock rows safely across multiple worker instances

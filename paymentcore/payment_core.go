@@ -25,13 +25,44 @@ type Payment struct {
 	AmountMinor       int64 // The payment amount expressed in the currency’s smallest unit
 	CustomerID        string
 	State             PaymentState
-	LedgerBalance     int64
+	LedgerEntries     []LedgerEntry
 	AuditLog          []AuditEvent
 	Timeline          []TimelineEntry
 	CreatedAt         time.Time
 	UpdatedAt         time.Time
 	IdempotencyKey    string
 }
+
+type AccountType string
+
+const (
+	AccountAsset     AccountType = "asset"
+	AccountLiability AccountType = "liability"
+)
+
+type EntrySide string
+
+const (
+	EntryDebit  EntrySide = "debit"
+	EntryCredit EntrySide = "credit"
+)
+
+// LedgerEntry is one debit or credit line in a balanced journal transaction.
+type LedgerEntry struct {
+	ID            string
+	TransactionID string
+	AccountCode   string
+	Side          EntrySide
+	AmountMinor   int64
+	Currency      string
+	PaymentID     string
+	At            time.Time
+}
+
+const (
+	CashOperatingAccount = "cash:operating"
+	SettlementAccount    = "settlement:payable"
+)
 
 // AuditEvent records a state transition or domain event.
 type AuditEvent struct {
@@ -85,7 +116,6 @@ func (s *Service) CreatePayment(externalRef, currency string, amountMinor int64,
 		AmountMinor:       amountMinor,
 		CustomerID:        customerID,
 		State:             StateCreated,
-		LedgerBalance:     0,
 		CreatedAt:         now,
 		UpdatedAt:         now,
 		IdempotencyKey:    idempotencyKey,
@@ -114,7 +144,10 @@ func (s *Service) Process(paymentID string) error {
 	now := time.Now().UTC()
 	payment.State = StateProcessing
 	payment.UpdatedAt = now
-	payment.LedgerBalance = payment.AmountMinor
+	payment.LedgerEntries = append(payment.LedgerEntries,
+		newLedgerLine(payment, "processing", CashOperatingAccount, EntryDebit, now),
+		newLedgerLine(payment, "processing", SettlementAccount, EntryCredit, now),
+	)
 	payment.AuditLog = append(payment.AuditLog, AuditEvent{Event: "processing", Message: "payment processing started", At: now})
 	payment.Timeline = append(payment.Timeline, TimelineEntry{State: StateProcessing, At: now, Note: "payment processing"})
 	return nil
@@ -135,10 +168,22 @@ func (s *Service) Settle(paymentID string) error {
 	now := time.Now().UTC()
 	payment.State = StateSettled
 	payment.UpdatedAt = now
-	payment.LedgerBalance = payment.AmountMinor
+	payment.LedgerEntries = append(payment.LedgerEntries,
+		newLedgerLine(payment, "settled", SettlementAccount, EntryDebit, now),
+		newLedgerLine(payment, "settled", CashOperatingAccount, EntryCredit, now),
+	)
 	payment.AuditLog = append(payment.AuditLog, AuditEvent{Event: "settled", Message: "payment settled successfully", At: now})
 	payment.Timeline = append(payment.Timeline, TimelineEntry{State: StateSettled, At: now, Note: "payment settled"})
 	return nil
+}
+
+func newLedgerLine(payment *Payment, transition, account string, side EntrySide, at time.Time) LedgerEntry {
+	transactionID := fmt.Sprintf("jrn_%s_%s", payment.ID, transition)
+	return LedgerEntry{
+		ID: fmt.Sprintf("led_%s_%s", transactionID, side), TransactionID: transactionID,
+		AccountCode: account, Side: side, AmountMinor: payment.AmountMinor,
+		Currency: payment.Currency, PaymentID: payment.ID, At: at,
+	}
 }
 
 // Timeline returns the timeline entries for a payment.
@@ -165,6 +210,7 @@ func (s *Service) GetPayment(paymentID string) (*Payment, error) {
 
 func clonePayment(payment *Payment) *Payment {
 	clone := *payment
+	clone.LedgerEntries = append([]LedgerEntry(nil), payment.LedgerEntries...)
 	clone.AuditLog = append([]AuditEvent(nil), payment.AuditLog...)
 	clone.Timeline = append([]TimelineEntry(nil), payment.Timeline...)
 	return &clone
