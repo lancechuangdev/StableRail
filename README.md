@@ -121,7 +121,7 @@ Corrections should be represented by reversing journal transactions.
    - Move permanently failed events to a Kafka DLQ
    - Preserve the original event and failure metadata
    - Provide an operator-controlled redrive path
-6. **Consumer inbox — planned**
+6. **Consumer inbox — complete**
    - Store consumed event IDs before applying side effects
    - Make duplicate Kafka deliveries harmless
    - Commit inbox records and consumer state changes atomically
@@ -155,6 +155,8 @@ psql postgresql://stablerail:stablerail@localhost:5432/stablerail \
   -f migrations/001_payment_core.sql
 psql postgresql://stablerail:stablerail@localhost:5432/stablerail \
   -f migrations/002_outbox.sql
+psql postgresql://stablerail:stablerail@localhost:5432/stablerail \
+  -f migrations/003_consumer_inbox.sql
 ```
 
 Create the persistent payment service with the shared connection pool:
@@ -203,6 +205,29 @@ attempt count, error, and failure time, then marked failed. They continue to
 block later events for the same payment until an operator calls
 `relay.Redrive(ctx, eventID)`. Redrive clears the failure state and starts a new
 retry window; it does not bypass normal per-payment ordering.
+
+Consumers can make at-least-once Kafka delivery idempotent with the inbox
+processor. The handler receives the transaction containing the inbox record,
+so all consumer state changes must use that transaction:
+
+```go
+processor, err := inbox.NewProcessor(db)
+if err != nil {
+	return err
+}
+
+processed, err := processor.Process(ctx, "settlement", event,
+	func(ctx context.Context, tx *sql.Tx, event eventbus.Event) error {
+		_, err := tx.ExecContext(ctx,
+			"UPDATE settlements SET confirmed = TRUE WHERE payment_id = $1",
+			event.AggregateID,
+		)
+		return err
+	})
+```
+
+`processed` is false for a duplicate event already handled by the named
+consumer. Different consumers can process the same event independently.
 
 The default development broker address is `localhost:9092`. Kafka topics are
 auto-created in this local setup; production environments should provision and
