@@ -155,8 +155,6 @@ psql postgresql://stablerail:stablerail@localhost:5432/stablerail \
   -f migrations/001_payment_core.sql
 psql postgresql://stablerail:stablerail@localhost:5432/stablerail \
   -f migrations/002_outbox.sql
-psql postgresql://stablerail:stablerail@localhost:5432/stablerail \
-  -f migrations/003_dead_letter_queue.sql
 ```
 
 Create the persistent payment service with the shared connection pool:

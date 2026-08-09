@@ -26,3 +26,7 @@ CREATE INDEX outbox_events_pending_idx
 CREATE INDEX outbox_events_aggregate_pending_idx
     ON outbox_events (aggregate_type, aggregate_id, sequence_number)
     WHERE published_at IS NULL;
+
+CREATE INDEX outbox_events_dead_lettered_idx
+    ON outbox_events (failed_at, sequence_number)
+    WHERE failed_at IS NOT NULL;
