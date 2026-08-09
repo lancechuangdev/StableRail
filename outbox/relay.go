@@ -4,6 +4,7 @@ package outbox
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -12,37 +13,42 @@ import (
 )
 
 const (
-	defaultBatchSize      = 100
-	defaultPollInterval   = time.Second
-	defaultInitialBackoff = time.Second
-	defaultMaxBackoff     = time.Minute
-	defaultMaxAttempts    = 10
-	defaultMaxAge         = 24 * time.Hour
+	defaultBatchSize       = 100
+	defaultPollInterval    = time.Second
+	defaultInitialBackoff  = time.Second
+	defaultMaxBackoff      = time.Minute
+	defaultMaxAttempts     = 10
+	defaultMaxAge          = 24 * time.Hour
+	defaultDeadLetterTopic = eventbus.Topic("stablerail-dead-letter")
 )
+
+var ErrEventNotDeadLettered = errors.New("outbox event is not dead-lettered")
 
 // Config controls how much work a relay claims and how often an idle relay polls.
 type Config struct {
-	BatchSize      int
-	PollInterval   time.Duration
-	InitialBackoff time.Duration
-	MaxBackoff     time.Duration
-	MaxAttempts    int
-	MaxAge         time.Duration
+	BatchSize       int
+	PollInterval    time.Duration
+	InitialBackoff  time.Duration
+	MaxBackoff      time.Duration
+	MaxAttempts     int
+	MaxAge          time.Duration
+	DeadLetterTopic eventbus.Topic
 }
 
 // Relay moves pending rows from PostgreSQL to an event producer. The producer
 // is owned by the caller and is not closed by Relay.
 type Relay struct {
-	db             *sql.DB
-	producer       eventbus.Producer
-	batchSize      int
-	pollInterval   time.Duration
-	initialBackoff time.Duration
-	maxBackoff     time.Duration
-	maxAttempts    int
-	maxAge         time.Duration
-	now            func() time.Time
-	jitter         func(time.Duration) time.Duration
+	db              *sql.DB
+	producer        eventbus.Producer
+	batchSize       int
+	pollInterval    time.Duration
+	initialBackoff  time.Duration
+	maxBackoff      time.Duration
+	maxAttempts     int
+	maxAge          time.Duration
+	deadLetterTopic eventbus.Topic
+	now             func() time.Time
+	jitter          func(time.Duration) time.Duration
 }
 
 func NewRelay(db *sql.DB, producer eventbus.Producer, config Config) (*Relay, error) {
@@ -79,6 +85,9 @@ func NewRelay(db *sql.DB, producer eventbus.Producer, config Config) (*Relay, er
 	if config.MaxAge == 0 {
 		config.MaxAge = defaultMaxAge
 	}
+	if config.DeadLetterTopic == "" {
+		config.DeadLetterTopic = defaultDeadLetterTopic
+	}
 	if config.MaxBackoff < config.InitialBackoff {
 		return nil, errors.New("outbox maximum backoff cannot be less than initial backoff")
 	}
@@ -87,7 +96,8 @@ func NewRelay(db *sql.DB, producer eventbus.Producer, config Config) (*Relay, er
 		pollInterval:   config.PollInterval,
 		initialBackoff: config.InitialBackoff, maxBackoff: config.MaxBackoff,
 		maxAttempts: config.MaxAttempts, maxAge: config.MaxAge,
-		now: func() time.Time { return time.Now().UTC() },
+		deadLetterTopic: config.DeadLetterTopic,
+		now:             func() time.Time { return time.Now().UTC() },
 		jitter: func(delay time.Duration) time.Duration {
 			return delay/2 + time.Duration(time.Now().UnixNano()%int64(delay/2+1))
 		},
@@ -109,7 +119,7 @@ func (r *Relay) RelayOnce(ctx context.Context) (int, error) {
 		SELECT candidate.id, candidate.topic, candidate.event_type,
 		       candidate.event_version, candidate.aggregate_id,
 		       candidate.aggregate_type, candidate.payload, candidate.occurred_at,
-		       candidate.attempt_count, candidate.created_at
+		       candidate.attempt_count, COALESCE(candidate.redriven_at, candidate.created_at)
 		FROM outbox_events AS candidate
 		WHERE candidate.published_at IS NULL
 		  AND candidate.failed_at IS NULL
@@ -220,8 +230,23 @@ func (r *Relay) recordFailure(ctx context.Context, tx *sql.Tx, pending pendingEv
 	attempts := pending.attemptCount + 1
 	exhausted := attempts >= r.maxAttempts || now.Sub(pending.createdAt) >= r.maxAge
 	if exhausted {
-		_, err := tx.ExecContext(ctx, `UPDATE outbox_events
-			SET attempt_count = $1, last_error = $2, failed_at = $3
+		payload, err := json.Marshal(DeadLetterPayload{
+			OriginalTopic: pending.topic, OriginalEvent: pending.event,
+			AttemptCount: attempts, LastError: publishErr.Error(), FailedAt: now,
+		})
+		if err != nil {
+			return fmt.Errorf("encode dead-letter event %s: %w", pending.event.ID, err)
+		}
+		deadLetter := eventbus.Event{
+			ID: pending.event.ID + ".dlq", Type: "outbox.dead_lettered", Version: 1,
+			AggregateID: pending.event.AggregateID, AggregateType: pending.event.AggregateType,
+			OccurredAt: now, Payload: payload,
+		}
+		if err := r.producer.Publish(ctx, r.deadLetterTopic, deadLetter); err != nil {
+			return fmt.Errorf("publish outbox event %s to dead-letter topic: %w", pending.event.ID, err)
+		}
+		_, err = tx.ExecContext(ctx, `UPDATE outbox_events
+			SET attempt_count = $1, last_error = $2, failed_at = $3, dlq_published_at = $3
 			WHERE id = $4 AND published_at IS NULL`, attempts, publishErr.Error(), now, pending.event.ID)
 		if err != nil {
 			return fmt.Errorf("mark outbox event %s failed: %w", pending.event.ID, err)
@@ -242,6 +267,41 @@ func (r *Relay) recordFailure(ctx context.Context, tx *sql.Tx, pending pendingEv
 		WHERE id = $4 AND published_at IS NULL`, attempts, publishErr.Error(), nextAttempt, pending.event.ID)
 	if err != nil {
 		return fmt.Errorf("schedule outbox event %s retry: %w", pending.event.ID, err)
+	}
+	return nil
+}
+
+// DeadLetterPayload preserves the rejected event and the delivery failure that
+// exhausted its retry policy.
+type DeadLetterPayload struct {
+	OriginalTopic string         `json:"original_topic"`
+	OriginalEvent eventbus.Event `json:"original_event"`
+	AttemptCount  int            `json:"attempt_count"`
+	LastError     string         `json:"last_error"`
+	FailedAt      time.Time      `json:"failed_at"`
+}
+
+// Redrive makes a dead-lettered event eligible for delivery again. It is an
+// explicit operator action; successfully published and pending events cannot
+// be redriven.
+func (r *Relay) Redrive(ctx context.Context, eventID string) error {
+	if eventID == "" {
+		return errors.New("outbox event ID is required")
+	}
+	now := r.now()
+	result, err := r.db.ExecContext(ctx, `UPDATE outbox_events
+		SET attempt_count = 0, next_attempt_at = $1, last_error = NULL,
+		    failed_at = NULL, dlq_published_at = NULL, redriven_at = $1
+		WHERE id = $2 AND published_at IS NULL AND failed_at IS NOT NULL`, now, eventID)
+	if err != nil {
+		return fmt.Errorf("redrive outbox event %s: %w", eventID, err)
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("inspect outbox event %s redrive: %w", eventID, err)
+	}
+	if updated != 1 {
+		return fmt.Errorf("%w: %s", ErrEventNotDeadLettered, eventID)
 	}
 	return nil
 }

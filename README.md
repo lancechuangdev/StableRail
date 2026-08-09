@@ -117,7 +117,7 @@ Corrections should be represented by reversing journal transactions.
    - Record failed delivery attempts
    - Retry transient failures with exponential backoff and jitter
    - Apply configurable attempt and age limits
-5. **Dead letter queue — planned**
+5. **Dead letter queue — complete**
    - Move permanently failed events to a Kafka DLQ
    - Preserve the original event and failure metadata
    - Provide an operator-controlled redrive path
@@ -152,7 +152,11 @@ Start PostgreSQL and apply the schema with:
 ```bash
 docker compose up -d postgres
 psql postgresql://stablerail:stablerail@localhost:5432/stablerail \
-  -f migrations/001_payments_and_outbox.sql
+  -f migrations/001_payment_core.sql
+psql postgresql://stablerail:stablerail@localhost:5432/stablerail \
+  -f migrations/002_outbox.sql
+psql postgresql://stablerail:stablerail@localhost:5432/stablerail \
+  -f migrations/003_dead_letter_queue.sql
 ```
 
 Create the persistent payment service with the shared connection pool:
@@ -172,18 +176,19 @@ Kafka producer:
 
 ```go
 relay, err := outbox.NewRelay(db, producer, outbox.Config{
-    BatchSize:    100,
-    PollInterval: time.Second,
-	InitialBackoff: time.Second,
-	MaxBackoff:     time.Minute,
-	MaxAttempts:    10,
-	MaxAge:         24 * time.Hour,
+	BatchSize:       100,
+	PollInterval:    time.Second,
+	InitialBackoff:  time.Second,
+	MaxBackoff:      time.Minute,
+	MaxAttempts:     10,
+	MaxAge:          24 * time.Hour,
+	DeadLetterTopic: "stablerail-dead-letter",
 })
 if err != nil {
-    return err
+	return err
 }
 if err := relay.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
-    return err
+	return err
 }
 ```
 
@@ -194,9 +199,12 @@ must tolerate a duplicate if the process stops after Kafka accepts an event but
 before its `published_at` update commits.
 
 Failed publications are retried with exponential backoff and jitter. Attempt
-and event-age limits are configurable; exhausted events remain marked as failed
-and block later events for the same payment until the dead-letter workflow is
-implemented in the next phase.
+and event-age limits are configurable. Exhausted events are published to the
+configured Kafka dead-letter topic with the original topic, event envelope,
+attempt count, error, and failure time, then marked failed. They continue to
+block later events for the same payment until an operator calls
+`relay.Redrive(ctx, eventID)`. Redrive clears the failure state and starts a new
+retry window; it does not bypass normal per-payment ordering.
 
 The default development broker address is `localhost:9092`. Kafka topics are
 auto-created in this local setup; production environments should provision and

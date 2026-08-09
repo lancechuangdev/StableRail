@@ -20,7 +20,7 @@ type recordingProducer struct {
 }
 
 func (p *recordingProducer) Publish(_ context.Context, topic eventbus.Topic, event eventbus.Event) error {
-	if p.err != nil {
+	if p.err != nil && topic != defaultDeadLetterTopic {
 		return p.err
 	}
 	p.topics = append(p.topics, topic)
@@ -188,8 +188,50 @@ func TestRelayOnceMarksEventFailedAtAttemptLimit(t *testing.T) {
 	if count, err := relay.RelayOnce(context.Background()); err != nil || count != 0 {
 		t.Fatalf("RelayOnce = (%d, %v), want (0, nil)", count, err)
 	}
+	producer := relay.producer.(*recordingProducer)
+	if len(producer.events) != 1 || producer.topics[0] != defaultDeadLetterTopic {
+		t.Fatalf("unexpected dead-letter publications: topics=%v events=%v", producer.topics, producer.events)
+	}
+	var payload DeadLetterPayload
+	if err := json.Unmarshal(producer.events[0].Payload, &payload); err != nil {
+		t.Fatalf("decode dead-letter payload: %v", err)
+	}
+	if payload.OriginalEvent.ID != "evt-1" || payload.OriginalTopic != "payment-events" || payload.AttemptCount != 3 || payload.LastError != "rejected" {
+		t.Fatalf("unexpected dead-letter payload: %+v", payload)
+	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet database expectations: %v", err)
+	}
+}
+
+func TestRedriveResetsDeadLetteredEvent(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("create SQL mock: %v", err)
+	}
+	defer db.Close()
+	relay := testRelay(t, db, &recordingProducer{}, 1)
+	mock.ExpectExec("UPDATE outbox_events").WithArgs(relay.now(), "evt-1").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	if err := relay.Redrive(context.Background(), "evt-1"); err != nil {
+		t.Fatalf("Redrive returned error: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet database expectations: %v", err)
+	}
+}
+
+func TestRedriveRejectsEventThatIsNotDeadLettered(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("create SQL mock: %v", err)
+	}
+	defer db.Close()
+	relay := testRelay(t, db, &recordingProducer{}, 1)
+	mock.ExpectExec("UPDATE outbox_events").WithArgs(relay.now(), "evt-1").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	if err := relay.Redrive(context.Background(), "evt-1"); !errors.Is(err, ErrEventNotDeadLettered) {
+		t.Fatalf("Redrive error = %v, want ErrEventNotDeadLettered", err)
 	}
 }
 
