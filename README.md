@@ -113,7 +113,7 @@ Corrections should be represented by reversing journal transactions.
    - Lock rows safely across multiple worker instances
    - Publish events to Kafka and mark successful rows as published
    - Preserve per-payment event ordering
-4. **Retry queue and worker — planned**
+4. **Retry queue and worker — complete**
    - Record failed delivery attempts
    - Retry transient failures with exponential backoff and jitter
    - Apply configurable attempt and age limits
@@ -174,6 +174,10 @@ Kafka producer:
 relay, err := outbox.NewRelay(db, producer, outbox.Config{
     BatchSize:    100,
     PollInterval: time.Second,
+	InitialBackoff: time.Second,
+	MaxBackoff:     time.Minute,
+	MaxAttempts:    10,
+	MaxAge:         24 * time.Hour,
 })
 if err != nil {
     return err
@@ -188,6 +192,11 @@ Multiple relay processes can run concurrently. Pending rows are claimed with
 is eligible, preserving per-payment order. Delivery is at least once: consumers
 must tolerate a duplicate if the process stops after Kafka accepts an event but
 before its `published_at` update commits.
+
+Failed publications are retried with exponential backoff and jitter. Attempt
+and event-age limits are configurable; exhausted events remain marked as failed
+and block later events for the same payment until the dead-letter workflow is
+implemented in the next phase.
 
 The default development broker address is `localhost:9092`. Kafka topics are
 auto-created in this local setup; production environments should provision and

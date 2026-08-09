@@ -71,12 +71,16 @@ CREATE TABLE outbox_events (
     payload         JSONB NOT NULL,
     occurred_at     TIMESTAMPTZ NOT NULL,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    published_at    TIMESTAMPTZ
+    published_at    TIMESTAMPTZ,
+    attempt_count   INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+    next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_error      TEXT,
+    failed_at       TIMESTAMPTZ
 );
 
 CREATE INDEX outbox_events_pending_idx
-    ON outbox_events (sequence_number)
-    WHERE published_at IS NULL;
+    ON outbox_events (next_attempt_at, sequence_number)
+    WHERE published_at IS NULL AND failed_at IS NULL;
 
 CREATE INDEX outbox_events_aggregate_pending_idx
     ON outbox_events (aggregate_type, aggregate_id, sequence_number)

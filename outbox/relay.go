@@ -12,24 +12,37 @@ import (
 )
 
 const (
-	defaultBatchSize    = 100
-	defaultPollInterval = time.Second
+	defaultBatchSize      = 100
+	defaultPollInterval   = time.Second
+	defaultInitialBackoff = time.Second
+	defaultMaxBackoff     = time.Minute
+	defaultMaxAttempts    = 10
+	defaultMaxAge         = 24 * time.Hour
 )
 
 // Config controls how much work a relay claims and how often an idle relay polls.
 type Config struct {
-	BatchSize    int
-	PollInterval time.Duration
+	BatchSize      int
+	PollInterval   time.Duration
+	InitialBackoff time.Duration
+	MaxBackoff     time.Duration
+	MaxAttempts    int
+	MaxAge         time.Duration
 }
 
 // Relay moves pending rows from PostgreSQL to an event producer. The producer
 // is owned by the caller and is not closed by Relay.
 type Relay struct {
-	db           *sql.DB
-	producer     eventbus.Producer
-	batchSize    int
-	pollInterval time.Duration
-	now          func() time.Time
+	db             *sql.DB
+	producer       eventbus.Producer
+	batchSize      int
+	pollInterval   time.Duration
+	initialBackoff time.Duration
+	maxBackoff     time.Duration
+	maxAttempts    int
+	maxAge         time.Duration
+	now            func() time.Time
+	jitter         func(time.Duration) time.Duration
 }
 
 func NewRelay(db *sql.DB, producer eventbus.Producer, config Config) (*Relay, error) {
@@ -45,16 +58,39 @@ func NewRelay(db *sql.DB, producer eventbus.Producer, config Config) (*Relay, er
 	if config.PollInterval < 0 {
 		return nil, errors.New("outbox poll interval cannot be negative")
 	}
+	if config.InitialBackoff < 0 || config.MaxBackoff < 0 || config.MaxAge < 0 || config.MaxAttempts < 0 {
+		return nil, errors.New("outbox retry settings cannot be negative")
+	}
 	if config.BatchSize == 0 {
 		config.BatchSize = defaultBatchSize
 	}
 	if config.PollInterval == 0 {
 		config.PollInterval = defaultPollInterval
 	}
+	if config.InitialBackoff == 0 {
+		config.InitialBackoff = defaultInitialBackoff
+	}
+	if config.MaxBackoff == 0 {
+		config.MaxBackoff = defaultMaxBackoff
+	}
+	if config.MaxAttempts == 0 {
+		config.MaxAttempts = defaultMaxAttempts
+	}
+	if config.MaxAge == 0 {
+		config.MaxAge = defaultMaxAge
+	}
+	if config.MaxBackoff < config.InitialBackoff {
+		return nil, errors.New("outbox maximum backoff cannot be less than initial backoff")
+	}
 	return &Relay{
 		db: db, producer: producer, batchSize: config.BatchSize,
-		pollInterval: config.PollInterval,
-		now:          func() time.Time { return time.Now().UTC() },
+		pollInterval:   config.PollInterval,
+		initialBackoff: config.InitialBackoff, maxBackoff: config.MaxBackoff,
+		maxAttempts: config.MaxAttempts, maxAge: config.MaxAge,
+		now: func() time.Time { return time.Now().UTC() },
+		jitter: func(delay time.Duration) time.Duration {
+			return delay/2 + time.Duration(time.Now().UnixNano()%int64(delay/2+1))
+		},
 	}, nil
 }
 
@@ -72,9 +108,12 @@ func (r *Relay) RelayOnce(ctx context.Context) (int, error) {
 	rows, err := tx.QueryContext(ctx, `
 		SELECT candidate.id, candidate.topic, candidate.event_type,
 		       candidate.event_version, candidate.aggregate_id,
-		       candidate.aggregate_type, candidate.payload, candidate.occurred_at
+		       candidate.aggregate_type, candidate.payload, candidate.occurred_at,
+		       candidate.attempt_count, candidate.created_at
 		FROM outbox_events AS candidate
 		WHERE candidate.published_at IS NULL
+		  AND candidate.failed_at IS NULL
+		  AND candidate.next_attempt_at <= $2
 		  AND NOT EXISTS (
 		      SELECT 1
 		      FROM outbox_events AS earlier
@@ -85,7 +124,7 @@ func (r *Relay) RelayOnce(ctx context.Context) (int, error) {
 		  )
 		ORDER BY candidate.sequence_number
 		FOR UPDATE OF candidate SKIP LOCKED
-		LIMIT $1`, r.batchSize)
+		LIMIT $1`, r.batchSize, r.now())
 	if err != nil {
 		return 0, fmt.Errorf("claim outbox events: %w", err)
 	}
@@ -97,7 +136,7 @@ func (r *Relay) RelayOnce(ctx context.Context) (int, error) {
 			&pending.event.ID, &pending.topic, &pending.event.Type,
 			&pending.event.Version, &pending.event.AggregateID,
 			&pending.event.AggregateType, &pending.event.Payload,
-			&pending.event.OccurredAt,
+			&pending.event.OccurredAt, &pending.attemptCount, &pending.createdAt,
 		); err != nil {
 			rows.Close()
 			return 0, fmt.Errorf("scan outbox event: %w", err)
@@ -111,9 +150,13 @@ func (r *Relay) RelayOnce(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("read outbox events: %w", err)
 	}
 
+	published := 0
 	for _, pending := range events {
 		if err := r.producer.Publish(ctx, eventbus.Topic(pending.topic), pending.event); err != nil {
-			return 0, fmt.Errorf("publish outbox event %s: %w", pending.event.ID, err)
+			if recordErr := r.recordFailure(ctx, tx, pending, err); recordErr != nil {
+				return 0, recordErr
+			}
+			continue
 		}
 		result, err := tx.ExecContext(ctx, `
 			UPDATE outbox_events
@@ -129,12 +172,13 @@ func (r *Relay) RelayOnce(ctx context.Context) (int, error) {
 		if updated != 1 {
 			return 0, fmt.Errorf("mark outbox event %s published: updated %d rows", pending.event.ID, updated)
 		}
+		published++
 	}
 
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("commit outbox relay transaction: %w", err)
 	}
-	return len(events), nil
+	return published, nil
 }
 
 // Run polls until the context is canceled. A batch error is returned so the
@@ -165,6 +209,39 @@ func (r *Relay) Run(ctx context.Context) error {
 }
 
 type pendingEvent struct {
-	topic string
-	event eventbus.Event
+	topic        string
+	event        eventbus.Event
+	attemptCount int
+	createdAt    time.Time
+}
+
+func (r *Relay) recordFailure(ctx context.Context, tx *sql.Tx, pending pendingEvent, publishErr error) error {
+	now := r.now()
+	attempts := pending.attemptCount + 1
+	exhausted := attempts >= r.maxAttempts || now.Sub(pending.createdAt) >= r.maxAge
+	if exhausted {
+		_, err := tx.ExecContext(ctx, `UPDATE outbox_events
+			SET attempt_count = $1, last_error = $2, failed_at = $3
+			WHERE id = $4 AND published_at IS NULL`, attempts, publishErr.Error(), now, pending.event.ID)
+		if err != nil {
+			return fmt.Errorf("mark outbox event %s failed: %w", pending.event.ID, err)
+		}
+		return nil
+	}
+	delay := r.initialBackoff
+	for i := 1; i < attempts && delay < r.maxBackoff; i++ {
+		if delay > r.maxBackoff/2 {
+			delay = r.maxBackoff
+		} else {
+			delay *= 2
+		}
+	}
+	nextAttempt := now.Add(r.jitter(delay))
+	_, err := tx.ExecContext(ctx, `UPDATE outbox_events
+		SET attempt_count = $1, last_error = $2, next_attempt_at = $3
+		WHERE id = $4 AND published_at IS NULL`, attempts, publishErr.Error(), nextAttempt, pending.event.ID)
+	if err != nil {
+		return fmt.Errorf("schedule outbox event %s retry: %w", pending.event.ID, err)
+	}
+	return nil
 }

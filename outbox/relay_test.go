@@ -41,19 +41,20 @@ func TestRelayOncePublishesAndMarksClaimedEvents(t *testing.T) {
 	relay := testRelay(t, db, producer, 2)
 	occurredAt := time.Date(2026, time.August, 8, 10, 0, 0, 0, time.UTC)
 	publishedAt := relay.now()
+	createdAt := occurredAt.Add(-time.Minute)
 
 	mock.ExpectBegin()
 	mock.ExpectQuery("SELECT candidate.id").
-		WithArgs(2).
+		WithArgs(2, publishedAt).
 		WillReturnRows(sqlmock.NewRows([]string{
 			"id", "topic", "event_type", "event_version", "aggregate_id",
-			"aggregate_type", "payload", "occurred_at",
+			"aggregate_type", "payload", "occurred_at", "attempt_count", "created_at",
 		}).AddRow(
 			"evt-1", "payment-events", "payment.created", 1, "pay-1",
-			"payment", []byte(`{"amount_minor":2500}`), occurredAt,
+			"payment", []byte(`{"amount_minor":2500}`), occurredAt, 0, createdAt,
 		).AddRow(
 			"evt-2", "payment-events", "payment.created", 1, "pay-2",
-			"payment", []byte(`{"amount_minor":5000}`), occurredAt,
+			"payment", []byte(`{"amount_minor":5000}`), occurredAt, 0, createdAt,
 		))
 	mock.ExpectExec("UPDATE outbox_events").
 		WithArgs(publishedAt, "evt-1").
@@ -84,7 +85,7 @@ func TestRelayOncePublishesAndMarksClaimedEvents(t *testing.T) {
 	}
 }
 
-func TestRelayOnceRollsBackWhenPublishFails(t *testing.T) {
+func TestRelayOnceSchedulesRetryWhenPublishFails(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatalf("create SQL mock: %v", err)
@@ -93,24 +94,26 @@ func TestRelayOnceRollsBackWhenPublishFails(t *testing.T) {
 
 	producer := &recordingProducer{err: errors.New("broker unavailable")}
 	relay := testRelay(t, db, producer, 10)
+	relay.jitter = func(delay time.Duration) time.Duration { return delay }
+	now := relay.now()
 	mock.ExpectBegin()
 	mock.ExpectQuery("SELECT candidate.id").
-		WithArgs(10).
+		WithArgs(10, now).
 		WillReturnRows(sqlmock.NewRows([]string{
 			"id", "topic", "event_type", "event_version", "aggregate_id",
-			"aggregate_type", "payload", "occurred_at",
+			"aggregate_type", "payload", "occurred_at", "attempt_count", "created_at",
 		}).AddRow(
 			"evt-1", "payment-events", "payment.created", 1, "pay-1",
-			"payment", []byte(`{}`), time.Now().UTC(),
+			"payment", []byte(`{}`), now, 1, now.Add(-time.Minute),
 		))
-	mock.ExpectRollback()
+	mock.ExpectExec("UPDATE outbox_events").
+		WithArgs(2, "broker unavailable", now.Add(2*time.Second), "evt-1").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
 
 	count, err := relay.RelayOnce(context.Background())
-	if err == nil {
-		t.Fatal("expected publish error")
-	}
-	if count != 0 {
-		t.Fatalf("expected zero committed events, got %d", count)
+	if err != nil || count != 0 {
+		t.Fatalf("RelayOnce = (%d, %v), want (0, nil)", count, err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet database expectations: %v", err)
@@ -126,10 +129,10 @@ func TestRelayOnceCommitsEmptyBatch(t *testing.T) {
 
 	relay := testRelay(t, db, &recordingProducer{}, 5)
 	mock.ExpectBegin()
-	mock.ExpectQuery("SELECT candidate.id").WithArgs(5).
+	mock.ExpectQuery("SELECT candidate.id").WithArgs(5, relay.now()).
 		WillReturnRows(sqlmock.NewRows([]string{
 			"id", "topic", "event_type", "event_version", "aggregate_id",
-			"aggregate_type", "payload", "occurred_at",
+			"aggregate_type", "payload", "occurred_at", "attempt_count", "created_at",
 		}))
 	mock.ExpectCommit()
 
@@ -159,6 +162,34 @@ func TestNewRelayValidatesDependenciesAndAppliesDefaults(t *testing.T) {
 	}
 	if relay.batchSize != defaultBatchSize || relay.pollInterval != defaultPollInterval {
 		t.Fatalf("defaults not applied: batch=%d interval=%s", relay.batchSize, relay.pollInterval)
+	}
+	if relay.initialBackoff != defaultInitialBackoff || relay.maxBackoff != defaultMaxBackoff ||
+		relay.maxAttempts != defaultMaxAttempts || relay.maxAge != defaultMaxAge {
+		t.Fatal("retry defaults not applied")
+	}
+}
+
+func TestRelayOnceMarksEventFailedAtAttemptLimit(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("create SQL mock: %v", err)
+	}
+	defer db.Close()
+	relay := testRelay(t, db, &recordingProducer{err: errors.New("rejected")}, 1)
+	relay.maxAttempts = 3
+	now := relay.now()
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT candidate.id").WithArgs(1, now).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "topic", "event_type", "event_version", "aggregate_id", "aggregate_type", "payload", "occurred_at", "attempt_count", "created_at"}).
+			AddRow("evt-1", "payment-events", "payment.created", 1, "pay-1", "payment", []byte(`{}`), now, 2, now.Add(-time.Minute)))
+	mock.ExpectExec("UPDATE outbox_events").WithArgs(3, "rejected", now, "evt-1").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+	if count, err := relay.RelayOnce(context.Background()); err != nil || count != 0 {
+		t.Fatalf("RelayOnce = (%d, %v), want (0, nil)", count, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet database expectations: %v", err)
 	}
 }
 
