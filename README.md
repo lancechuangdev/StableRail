@@ -88,8 +88,8 @@ a dual-write consistency gap.
 Step 2 adds PostgreSQL-backed payment commands and a transactional outbox.
 `PostgresService` writes the payment, double-entry ledger posting, audit
 history, timeline, and versioned outbox event in one database transaction.
-Kafka publication remains outside the request transaction and will be
-performed by the relay in the next step.
+Kafka publication remains outside the request transaction and is performed by
+the outbox relay.
 
 The initial chart of accounts defines operating cash as an asset and settlement
 payable as a liability. Payment processing debits operating cash and credits
@@ -108,7 +108,7 @@ Corrections should be represented by reversing journal transactions.
    - PostgreSQL-backed payment commands
    - Atomic payment and outbox writes
    - Persistent double-entry ledger, audit history, and timeline
-3. **Outbox relay — planned**
+3. **Outbox relay — complete**
    - Poll pending outbox rows in bounded batches
    - Lock rows safely across multiple worker instances
    - Publish events to Kafka and mark successful rows as published
@@ -166,6 +166,28 @@ defer db.Close()
 
 payments := paymentcore.NewPostgresService(db)
 ```
+
+Create and run an outbox relay with the same connection pool and the shared
+Kafka producer:
+
+```go
+relay, err := outbox.NewRelay(db, producer, outbox.Config{
+    BatchSize:    100,
+    PollInterval: time.Second,
+})
+if err != nil {
+    return err
+}
+if err := relay.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+    return err
+}
+```
+
+Multiple relay processes can run concurrently. Pending rows are claimed with
+`FOR UPDATE SKIP LOCKED`, and only the earliest pending event for each payment
+is eligible, preserving per-payment order. Delivery is at least once: consumers
+must tolerate a duplicate if the process stops after Kafka accepts an event but
+before its `published_at` update commits.
 
 The default development broker address is `localhost:9092`. Kafka topics are
 auto-created in this local setup; production environments should provision and

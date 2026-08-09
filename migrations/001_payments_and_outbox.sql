@@ -59,8 +59,9 @@ CREATE TABLE payment_timeline_entries (
     occurred_at TIMESTAMPTZ NOT NULL
 );
 
--- The relay added in the next step will publish pending rows to Kafka.
+-- The outbox relay publishes pending rows to Kafka.
 CREATE TABLE outbox_events (
+    sequence_number BIGINT GENERATED ALWAYS AS IDENTITY UNIQUE,
     id             TEXT PRIMARY KEY,
     topic          TEXT NOT NULL,
     event_type     TEXT NOT NULL,
@@ -74,5 +75,9 @@ CREATE TABLE outbox_events (
 );
 
 CREATE INDEX outbox_events_pending_idx
-    ON outbox_events (created_at, id)
+    ON outbox_events (sequence_number)
+    WHERE published_at IS NULL;
+
+CREATE INDEX outbox_events_aggregate_pending_idx
+    ON outbox_events (aggregate_type, aggregate_id, sequence_number)
     WHERE published_at IS NULL;
