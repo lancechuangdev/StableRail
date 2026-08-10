@@ -167,7 +167,37 @@ Each step will be implemented and verified independently before work begins on t
 
 ### Running the Phase 3 application
 
-Apply migrations 001-004, start PostgreSQL and Kafka, then run:
+Start PostgreSQL and Kafka, wait for PostgreSQL to become healthy, then apply migrations 001–004.
+```bash
+docker compose up -d
+```
+```bash
+for migration in migrations/*.sql; do
+  echo "Applying $migration"
+  docker compose exec -T postgres \
+    psql -U stablerail -d stablerail \
+    -f - < "$migration"
+done
+```
+
+Create the Kafka topics before starting StableRail:
+
+```bash
+for topic in payment-events payment-commands stablerail-dead-letter; do
+  docker compose exec kafka \
+    /opt/kafka/bin/kafka-topics.sh \
+    --bootstrap-server localhost:9092 \
+    --create --if-not-exists \
+    --topic "$topic" \
+    --partitions 1 \
+    --replication-factor 1
+done
+```
+
+Creating the topics explicitly avoids a startup race where consumers receive
+an empty partition assignment before Kafka auto-creates their topics.
+
+Then run:
 
 ```bash
 export STABLERAIL_DATABASE_URL=postgresql://stablerail:stablerail@localhost:5432/stablerail
