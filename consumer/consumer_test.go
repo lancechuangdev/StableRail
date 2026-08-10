@@ -37,7 +37,7 @@ type fakeProcessor struct {
 	cancel   context.CancelFunc
 }
 
-func (p *fakeProcessor) Process(_ context.Context, _ string, _ eventbus.Event, _ func(context.Context, eventbus.Event) error) (bool, error) {
+func (p *fakeProcessor) Process(_ context.Context, _ string, _ eventbus.Event) (bool, error) {
 	p.attempts++
 	if p.attempts == 2 && p.cancel != nil {
 		p.cancel()
@@ -54,7 +54,7 @@ func TestLoopRetriesBeforeCommit(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	p := &fakeProcessor{err: errors.New("temporary"), cancel: cancel}
 	r := &fakeReader{message: kafka.Message{Value: value}}
-	l := Loop{Reader: r, Processor: p, Consumer: "test", Handler: func(context.Context, eventbus.Event) error { return nil }, RetryBackoff: time.Millisecond}
+	l := Loop{Reader: r, Processor: p, Consumer: "test", RetryBackoff: time.Millisecond}
 	if err := l.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		t.Fatal(err)
 	}
@@ -68,7 +68,7 @@ func TestLoopCommitsPermanentDecodeFailure(t *testing.T) {
 	defer cancel()
 	r := &fakeReader{message: kafka.Message{Value: []byte("bad")}}
 	p := &fakeProcessor{}
-	l := Loop{Reader: r, Processor: p, Consumer: "test", Handler: func(context.Context, eventbus.Event) error { return nil }, OnPermanent: func(error) { cancel() }}
+	l := Loop{Reader: r, Processor: p, Consumer: "test", OnPermanent: func(error) { cancel() }}
 	_ = l.Run(ctx)
 	if r.commits != 1 {
 		t.Fatalf("commits=%d", r.commits)

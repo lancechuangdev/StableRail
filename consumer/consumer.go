@@ -18,9 +18,8 @@ type Reader interface {
 	Close() error
 }
 type Processor interface {
-	Process(context.Context, string, eventbus.Event, func(context.Context, eventbus.Event) error) (bool, error)
+	Process(context.Context, string, eventbus.Event) (bool, error)
 }
-type Handler func(context.Context, eventbus.Event) error
 
 type permanentError struct{ error }
 
@@ -36,14 +35,13 @@ type Loop struct {
 	Reader       Reader
 	Processor    Processor
 	Consumer     string
-	Handler      Handler
 	RetryBackoff time.Duration
 	OnPermanent  func(error)
 }
 
 func (l *Loop) Run(ctx context.Context) error {
-	if l.Reader == nil || l.Processor == nil || l.Consumer == "" || l.Handler == nil {
-		return errors.New("consumer reader, processor, name, and handler are required")
+	if l.Reader == nil || l.Processor == nil || l.Consumer == "" {
+		return errors.New("consumer reader, processor, and name are required")
 	}
 	backoff := l.RetryBackoff
 	if backoff <= 0 {
@@ -66,7 +64,7 @@ func (l *Loop) Run(ctx context.Context) error {
 			err = Permanent(fmt.Errorf("validate event: %w", validateErr))
 		}
 		for err == nil || !IsPermanent(err) {
-			_, err = l.Processor.Process(ctx, l.Consumer, event, l.Handler)
+			_, err = l.Processor.Process(ctx, l.Consumer, event)
 			if err == nil || IsPermanent(err) {
 				break
 			}
@@ -89,8 +87,4 @@ func (l *Loop) Run(ctx context.Context) error {
 			l.OnPermanent(permanentErr)
 		}
 	}
-}
-
-type InboxAdapter interface {
-	Process(context.Context, string, eventbus.Event, func(context.Context, eventbus.Event) error) (bool, error)
 }

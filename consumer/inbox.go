@@ -2,7 +2,6 @@ package consumer
 
 import (
 	"context"
-	"database/sql"
 	"stablerail/eventbus"
 	"stablerail/inbox"
 )
@@ -11,9 +10,9 @@ import (
 // transaction for handlers that need atomic side effects.
 type InboxProcessor struct {
 	Inbox   *inbox.Processor
-	Handler func(context.Context, *sql.Tx, eventbus.Event) error
+	Handler inbox.Handler
 }
 
-func (p InboxProcessor) Process(ctx context.Context, name string, event eventbus.Event, _ func(context.Context, eventbus.Event) error) (bool, error) {
+func (p InboxProcessor) Process(ctx context.Context, name string, event eventbus.Event) (bool, error) {
 	return p.Inbox.Process(ctx, name, event, p.Handler)
 }

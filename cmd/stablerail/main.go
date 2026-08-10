@@ -66,14 +66,12 @@ func run() error {
 		Reader:    consumer.NewKafkaReader(config.KafkaBrokers, string(paymentcore.PaymentEventsTopic), "stablerail-saga"),
 		Processor: consumer.InboxProcessor{Inbox: inboxProcessor, Handler: workers.SagaHandler(coordinator)},
 		Consumer:  "payment-saga",
-		Handler:   func(context.Context, eventbus.Event) error { return nil },
 	}
 
 	commandLoop := &consumer.Loop{
 		Reader:    consumer.NewKafkaReader(config.KafkaBrokers, string(saga.CommandTopic), "stablerail-core-workers"),
 		Processor: consumer.InboxProcessor{Inbox: inboxProcessor, Handler: workers.NewCommandHandler().Handle},
 		Consumer:  "core-workers",
-		Handler:   func(context.Context, eventbus.Event) error { return nil },
 	}
 
 	handler, err := paymentapi.NewHandler(paymentcore.NewPostgresService(db), db)
