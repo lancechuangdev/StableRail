@@ -1,8 +1,32 @@
 # StableRail
 
-A reference implementation exploring the building blocks of a cross-border payment platform. The repository currently implements an in-memory payment lifecycle; the broader architecture below is a roadmap, not a claim that every component is available today.
+A Go reference implementation of a durable, event-driven payment workflow. The
+current application exposes an HTTP API, stores payment and ledger state in
+PostgreSQL, publishes through a transactional outbox, consumes Kafka events with
+a transactional inbox, and coordinates policy, ledger, and settlement steps
+with a persisted saga.
 
-## Architecture
+Policy approval and settlement are deterministic local workers in the current
+phase. Real provider integrations, quotes, notifications, reconciliation, and
+blockchain adapters remain roadmap items.
+
+## Current capabilities
+
+- HTTP payment creation, lookup, and timeline endpoints
+- HTTP idempotency keys backed by a PostgreSQL uniqueness constraint
+- Payment lifecycle: `created → processing → settled`
+- Immutable, balanced double-entry ledger postings
+- Transactional outbox publication with retry, dead-letter, and redrive support
+- Transactional inbox deduplication and manual Kafka offset commits
+- Persisted payment saga with timeouts and compensating commands
+- Versioned event payloads and consumer upcasting support
+- One runnable process with health checks and graceful shutdown
+
+## Target architecture
+
+The following is the broader roadmap, not a claim that every component is
+implemented:
+
 ```
                         REST/gRPC API
                                │
@@ -25,8 +49,297 @@ A reference implementation exploring the building blocks of a cross-border payme
           Ethereum / Base / Sepolia
 ```
 
-## Components
-1. Payment Core
+## Implemented Phase 3 data flow
+
+Numbered arrows show the initial request followed by the repeating
+outbox–Kafka–inbox workflow.
+
+```mermaid
+flowchart TD
+    Client["Client"]
+
+    subgraph API["HTTP API"]
+        Handler["paymentapi/handler.go<br/>Handler.create"]
+        PaymentService["paymentcore/postgres_service.go<br/>PostgresService.CreatePayment"]
+        TimelineHandler["paymentapi/handler.go<br/>Handler.timeline"]
+    end
+
+    subgraph Database["PostgreSQL"]
+        Payments[("payments")]
+        Timeline[("payment_timeline_entries")]
+        Outbox[("outbox_events")]
+        Inbox[("inbox_events")]
+        Sagas[("payment_sagas")]
+        Ledger[("ledger_transactions<br/>ledger_entries")]
+    end
+
+    subgraph Publication["Outbox publication"]
+        Relay["outbox/relay.go<br/>Relay.Run"]
+        Producer["eventbus/kafka.go<br/>KafkaProducer.Publish"]
+    end
+
+    subgraph Kafka["Kafka"]
+        PaymentEvents[["payment-events"]]
+        PaymentCommands[["payment-commands"]]
+    end
+
+    subgraph SagaRuntime["Saga event consumer"]
+        SagaLoop["consumer/consumer.go<br/>Loop.Run"]
+        SagaInbox["consumer/inbox.go<br/>InboxProcessor"]
+        SagaHandler["workers/handlers.go<br/>SagaHandler"]
+        Coordinator["saga/coordinator.go<br/>Coordinator.Handle"]
+    end
+
+    subgraph CommandRuntime["Core command consumer"]
+        CommandLoop["consumer/consumer.go<br/>Loop.Run"]
+        CommandInbox["consumer/inbox.go<br/>InboxProcessor"]
+        Worker["workers/handlers.go<br/>CommandHandler.Handle"]
+    end
+
+    Client -->|"1. POST JSON + Idempotency-Key"| Handler
+    Handler -->|"2. Validate request"| PaymentService
+
+    PaymentService -->|"3a. Insert state = created"| Payments
+    PaymentService -->|"3b. Insert created timeline entry"| Timeline
+    PaymentService -->|"3c. Insert payment.created"| Outbox
+    PaymentService -->|"4. Return payment"| Handler
+    Handler -->|"5. HTTP 201 Created"| Client
+
+    Outbox -->|"6. Claim unpublished event"| Relay
+    Relay -->|"7. Pass event to producer"| Producer
+    Producer -->|"8a. Publish payment event/reply"| PaymentEvents
+    Producer -->|"8b. Publish workflow command"| PaymentCommands
+
+    PaymentEvents -->|"9. Fetch event"| SagaLoop
+    SagaLoop -->|"10. Decode and validate"| SagaInbox
+    SagaInbox -->|"11a. Insert deduplication record"| Inbox
+    SagaInbox -->|"11b. Invoke handler in same transaction"| SagaHandler
+    SagaHandler -->|"12. Route supported saga event"| Coordinator
+
+    Coordinator -->|"13a. Create or advance saga"| Sagas
+    Coordinator -->|"13b. Insert next command"| Outbox
+
+    PaymentCommands -->|"14. Fetch command"| CommandLoop
+    CommandLoop -->|"15. Decode and validate"| CommandInbox
+    CommandInbox -->|"16a. Insert deduplication record"| Inbox
+    CommandInbox -->|"16b. Invoke worker in same transaction"| Worker
+
+    Worker -->|"17a. Change payment state"| Payments
+    Worker -->|"17b. Append timeline entry"| Timeline
+    Worker -->|"17c. Write balanced ledger posting"| Ledger
+    Worker -->|"17d. Insert saga reply"| Outbox
+
+    Outbox -.->|"18. Repeat steps 6–17 for each workflow stage"| Relay
+
+    Client -->|"19. GET /v1/payments/{id}/timeline"| TimelineHandler
+    TimelineHandler -->|"20. Query ordered timeline"| Timeline
+    Timeline -->|"21. Return created → processing → settled"| TimelineHandler
+    TimelineHandler -->|"22. HTTP 200 timeline"| Client
+```
+
+<details>
+<summary>Detailed successful-payment transaction sequence</summary>
+
+The shaded, dotted regions represent PostgreSQL transaction boundaries. Kafka
+offset commits deliberately happen after the associated database transaction
+commits.
+
+```mermaid
+%%{init: {
+  "themeCSS": ".rect { stroke-dasharray: 6 4; stroke-width: 1.5px; }"
+}}%%
+sequenceDiagram
+    autonumber
+
+    participant C as Client
+    participant API as Payment API
+    participant DB as PostgreSQL
+    participant R as Outbox Relay
+    participant K as Kafka
+    participant I as Transactional Inbox
+    participant S as Saga Coordinator
+    participant W as Core Workers
+
+    C->>API: POST /v1/payments + Idempotency-Key
+
+    rect rgba(220, 235, 255, 0.25)
+        Note over API,DB: Payment creation transaction
+        API->>DB: Begin transaction
+        API->>DB: Insert payment with state created
+        API->>DB: Insert created timeline entry
+        API->>DB: Insert payment.created into outbox
+        API->>DB: Commit transaction
+    end
+
+    API-->>C: 201 Created
+
+    rect rgba(240, 240, 240, 0.25)
+        Note over R,DB: Outbox publication transaction
+        R->>DB: Begin transaction and claim payment.created
+        R->>K: Publish payment.created
+        R->>DB: Mark outbox row published
+        R->>DB: Commit transaction
+    end
+
+    K->>I: Deliver payment.created to saga consumer
+
+    rect rgba(225, 245, 225, 0.25)
+        Note over I,S: Saga inbox transaction
+        I->>DB: Begin transaction
+        I->>DB: Insert saga inbox record
+        I->>S: Handle payment.created using inbox transaction
+        S->>DB: Create payment saga
+        S->>DB: Insert policy.evaluate into outbox
+        I->>DB: Commit inbox, saga, and outbox atomically
+    end
+
+    I->>K: Commit Kafka offset
+
+    rect rgba(240, 240, 240, 0.25)
+        Note over R,DB: Outbox publication transaction
+        R->>DB: Begin transaction and claim policy.evaluate
+        R->>K: Publish policy.evaluate
+        R->>DB: Mark outbox row published
+        R->>DB: Commit transaction
+    end
+
+    K->>I: Deliver policy.evaluate to core-worker consumer
+
+    rect rgba(255, 240, 220, 0.25)
+        Note over I,W: Core-worker inbox transaction
+        I->>DB: Begin transaction
+        I->>DB: Insert core-worker inbox record
+        I->>W: Handle policy.evaluate using inbox transaction
+        W->>DB: Insert policy.approved into outbox
+        I->>DB: Commit inbox and reply atomically
+    end
+
+    I->>K: Commit Kafka offset
+
+    rect rgba(240, 240, 240, 0.25)
+        Note over R,DB: Outbox publication transaction
+        R->>DB: Begin transaction and claim policy.approved
+        R->>K: Publish policy.approved
+        R->>DB: Mark outbox row published
+        R->>DB: Commit transaction
+    end
+
+    K->>I: Deliver policy.approved to saga consumer
+
+    rect rgba(225, 245, 225, 0.25)
+        Note over I,S: Saga inbox transaction
+        I->>DB: Begin transaction
+        I->>DB: Insert saga inbox record
+        I->>S: Handle policy.approved using inbox transaction
+        S->>DB: Saga → awaiting_ledger
+        S->>DB: Insert ledger.reserve into outbox
+        I->>DB: Commit inbox, saga, and command atomically
+    end
+
+    I->>K: Commit Kafka offset
+
+    rect rgba(240, 240, 240, 0.25)
+        Note over R,DB: Outbox publication transaction
+        R->>DB: Begin transaction and claim ledger.reserve
+        R->>K: Publish ledger.reserve
+        R->>DB: Mark outbox row published
+        R->>DB: Commit transaction
+    end
+
+    K->>I: Deliver ledger.reserve to core-worker consumer
+
+    rect rgba(255, 240, 220, 0.25)
+        Note over I,W: Core-worker inbox transaction
+        I->>DB: Begin transaction
+        I->>DB: Insert core-worker inbox record
+        I->>W: Handle ledger.reserve using inbox transaction
+        W->>DB: Payment → processing
+        W->>DB: Insert debit and credit ledger entries
+        W->>DB: Insert processing audit event
+        W->>DB: Insert processing timeline entry
+        W->>DB: Insert ledger.reserved into outbox
+        I->>DB: Commit all changes atomically
+    end
+
+    I->>K: Commit Kafka offset
+
+    rect rgba(240, 240, 240, 0.25)
+        Note over R,DB: Outbox publication transaction
+        R->>DB: Begin transaction and claim ledger.reserved
+        R->>K: Publish ledger.reserved
+        R->>DB: Mark outbox row published
+        R->>DB: Commit transaction
+    end
+
+    K->>I: Deliver ledger.reserved to saga consumer
+
+    rect rgba(225, 245, 225, 0.25)
+        Note over I,S: Saga inbox transaction
+        I->>DB: Begin transaction
+        I->>DB: Insert saga inbox record
+        I->>S: Handle ledger.reserved using inbox transaction
+        S->>DB: Saga → awaiting_settlement
+        S->>DB: Insert settlement.execute into outbox
+        I->>DB: Commit all changes atomically
+    end
+
+    I->>K: Commit Kafka offset
+
+    rect rgba(240, 240, 240, 0.25)
+        Note over R,DB: Outbox publication transaction
+        R->>DB: Begin transaction and claim settlement.execute
+        R->>K: Publish settlement.execute
+        R->>DB: Mark outbox row published
+        R->>DB: Commit transaction
+    end
+
+    K->>I: Deliver settlement.execute to core-worker consumer
+
+    rect rgba(255, 240, 220, 0.25)
+        Note over I,W: Core-worker inbox transaction
+        I->>DB: Begin transaction
+        I->>DB: Insert core-worker inbox record
+        I->>W: Handle settlement.execute using inbox transaction
+        W->>DB: Payment → settled
+        W->>DB: Insert clearing ledger entries
+        W->>DB: Insert settled audit event
+        W->>DB: Insert settled timeline entry
+        W->>DB: Insert settlement.completed into outbox
+        I->>DB: Commit all changes atomically
+    end
+
+    I->>K: Commit Kafka offset
+
+    rect rgba(240, 240, 240, 0.25)
+        Note over R,DB: Outbox publication transaction
+        R->>DB: Begin transaction and claim settlement.completed
+        R->>K: Publish settlement.completed
+        R->>DB: Mark outbox row published
+        R->>DB: Commit transaction
+    end
+
+    K->>I: Deliver settlement.completed to saga consumer
+
+    rect rgba(225, 245, 225, 0.25)
+        Note over I,S: Saga inbox transaction
+        I->>DB: Begin transaction
+        I->>DB: Insert saga inbox record
+        I->>S: Handle settlement.completed using inbox transaction
+        S->>DB: Saga → completed
+        I->>DB: Commit inbox and saga atomically
+    end
+
+    I->>K: Commit Kafka offset
+
+    C->>API: GET /v1/payments/{id}/timeline
+    API->>DB: Query ordered timeline entries
+    DB-->>API: created, processing, settled
+    API-->>C: 200 timeline
+```
+
+</details>
+
+## Payment core
 
 A foundation for the payment lifecycle.
 
@@ -53,17 +366,18 @@ Implemented capabilities:
 - Timeline API for payment history
 - Concurrency-safe service operations and snapshot-based reads
 
-The original `Service` remains useful for isolated in-memory tests. Phase 2 also provides `PostgresService` for durable payment commands and transactional event creation. No REST/gRPC, provider, blockchain, or reconciliation integration has been implemented yet.
+The original `Service` remains useful for isolated in-memory tests.
+`PostgresService` provides durable payment commands, reads, and transactional
+event creation. The HTTP API and asynchronous application runtime use the
+PostgreSQL implementation.
 
-## Running the payment core
+## Testing
 
 From the repository root:
 
 ```bash
 go test ./...
 ```
-
-The current implementation lives in the paymentcore package and is covered by unit tests.
 
 For race detection and static analysis:
 
@@ -72,11 +386,26 @@ go test -race ./...
 go vet ./...
 ```
 
-## Phase 2: distributed payments
+Run the opt-in HTTP/PostgreSQL end-to-end test against a migrated disposable
+database:
 
-Phase 2 is being delivered incrementally. Step 1 adds the Kafka boundary: a versioned event envelope, a producer interface, and a shared Kafka producer that can publish to multiple topics. Create one producer per application process and pass the destination topic to each publish call; do not create a producer per message. Payment state changes are not wired directly to Kafka because that would create a dual-write consistency gap.
+```bash
+STABLERAIL_E2E_DATABASE_URL=postgresql://stablerail:stablerail@localhost:5432/stablerail \
+  go test -v ./paymentapi -run EndToEnd
+```
 
-Step 2 adds PostgreSQL-backed payment commands and a transactional outbox. `PostgresService` writes the payment, double-entry ledger posting, audit history, timeline, and versioned outbox event in one database transaction. Kafka publication remains outside the request transaction and is performed by the outbox relay.
+## Delivery roadmap
+
+Phase 2 introduced the Kafka boundary, PostgreSQL persistence, transactional
+outbox and inbox, saga coordination, and event-version evolution. The runtime
+creates one shared Kafka producer per process. Payment state changes never
+publish directly to Kafka because doing so would create a dual-write
+consistency gap.
+
+`PostgresService` writes payment state, ledger postings, audit history,
+timeline entries, and versioned outbox events in database transactions. Kafka
+publication happens outside command transactions and is performed by the
+outbox relay.
 
 The initial chart of accounts defines operating cash as an asset and settlement payable as a liability. Payment processing debits operating cash and credits settlement payable, recognizing cash received and the matching obligation. Settlement debits the payable and credits operating cash, clearing both. Each journal transaction contains separate, equal debit and credit lines. Corrections should be represented by reversing journal transactions.
 
@@ -165,12 +494,22 @@ The initial chart of accounts defines operating cash as an asset and settlement 
 
 Each step will be implemented and verified independently before work begins on the next one.
 
-### Running the Phase 3 application
+## Running the application
 
-Start PostgreSQL and Kafka, wait for PostgreSQL to become healthy, then apply migrations 001–004.
+### 1. Start infrastructure
+
+Start PostgreSQL and Kafka, then wait for PostgreSQL to report `healthy`:
+
 ```bash
 docker compose up -d
+docker compose ps
 ```
+
+### 2. Apply database migrations
+
+Use the `psql` client included in the PostgreSQL container; no host installation
+is required:
+
 ```bash
 for migration in migrations/*.sql; do
   echo "Applying $migration"
@@ -179,6 +518,8 @@ for migration in migrations/*.sql; do
     -f - < "$migration"
 done
 ```
+
+### 3. Create Kafka topics
 
 Create the Kafka topics before starting StableRail:
 
@@ -197,7 +538,7 @@ done
 Creating the topics explicitly avoids a startup race where consumers receive
 an empty partition assignment before Kafka auto-creates their topics.
 
-Then run:
+### 4. Start StableRail
 
 ```bash
 export STABLERAIL_DATABASE_URL=postgresql://stablerail:stablerail@localhost:5432/stablerail
@@ -211,7 +552,19 @@ runtime defaults. The process runs the HTTP server, outbox relay, saga timeout
 worker, saga event consumer, and core command consumer together and drains them
 on SIGINT or SIGTERM.
 
-Create and inspect a payment:
+| Endpoint | Purpose |
+| --- | --- |
+| `POST /v1/payments` | Create a payment; requires `Idempotency-Key` |
+| `GET /v1/payments/{id}` | Read the current payment snapshot |
+| `GET /v1/payments/{id}/timeline` | Read ordered lifecycle history |
+| `GET /healthz` | Check whether the process is running |
+| `GET /readyz` | Check whether PostgreSQL is reachable |
+
+Repeating a request with the same idempotency key returns the original payment.
+The current implementation does not yet compare the repeated request body with
+the original body; clients must not reuse a key for a different operation.
+
+### 5. Create and inspect a payment
 
 ```bash
 curl -i -X POST http://localhost:8080/v1/payments \
@@ -225,21 +578,34 @@ curl http://localhost:8080/healthz
 curl http://localhost:8080/readyz
 ```
 
-The optional HTTP/PostgreSQL end-to-end test expects a migrated disposable
-database:
+The create response initially has state `created`. Policy, ledger, and
+settlement execute asynchronously; poll the lookup or timeline endpoint to
+observe `processing` and `settled`.
+
+### 6. Stop the local environment
+
+Stop containers while preserving PostgreSQL data:
 
 ```bash
-STABLERAIL_E2E_DATABASE_URL=postgresql://stablerail:stablerail@localhost:5432/stablerail \
-  go test ./paymentapi -run EndToEnd
+docker compose down
 ```
+
+Stop containers and permanently delete local data:
+
+```bash
+docker compose down --volumes
+```
+
+## Design notes
 
 ### Event schema evolution
 
 `Event.Version` identifies the payload schema for one event type. Current producer versions are named constants in `eventbus/versions.go`; producers must use those constants and increment only the event type whose payload changes. An envelope change does not change a payload version.
 
-Payload changes are backward compatible when existing fields retain their meaning and type, and new fields are optional or have a safe default. Removing or renaming fields, changing their type or meaning, or making an optional field required needs a new version. 
+Payload changes are backward compatible when existing fields retain their meaning and type, and new fields are optional or have a safe default. Removing or renaming fields, changing their type or meaning, or making an optional field required needs a new version.
 
 Producers deploy after consumers can accept the new version. Suppose `payment.created` moves from version 1 to version 2:
+
 1. Deploy consumers that understand both v1 and v2.
 2. Confirm those consumers are healthy.
 3. Deploy the producer that starts publishing v2.
@@ -261,25 +627,7 @@ processor, err := inbox.NewProcessorWithSchemas(db, schemas)
 
 The inbox persists the version actually received for auditability, while the handler receives the upcasted event. Unknown event types, future versions, a missing step in an upcast chain, and invalid upcaster output are rejected. Keep fixtures for every supported historical version and verify that each reaches the current consumer model; `eventbus/schema_test.go` demonstrates this compatibility contract.
 
-Start the local single-node Kafka broker with:
-
-```bash
-docker compose up -d kafka
-```
-
-Start PostgreSQL and apply the schema with:
-
-```bash
-docker compose up -d postgres
-psql postgresql://stablerail:stablerail@localhost:5432/stablerail \
-  -f migrations/001_payment_core.sql
-psql postgresql://stablerail:stablerail@localhost:5432/stablerail \
-  -f migrations/002_outbox.sql
-psql postgresql://stablerail:stablerail@localhost:5432/stablerail \
-  -f migrations/003_consumer_inbox.sql
-psql postgresql://stablerail:stablerail@localhost:5432/stablerail \
-  -f migrations/004_payment_sagas.sql
-```
+### Shared PostgreSQL service
 
 Create the persistent payment service with the shared connection pool:
 
@@ -292,6 +640,8 @@ defer db.Close()
 
 payments := paymentcore.NewPostgresService(db)
 ```
+
+### Transactional outbox
 
 Create and run an outbox relay with the same connection pool and the shared Kafka producer:
 
@@ -317,6 +667,8 @@ Multiple relay processes can run concurrently. Pending rows are claimed with `FO
 
 Failed publications are retried with exponential backoff and jitter. Attempt and event-age limits are configurable. Exhausted events are published to the configured Kafka dead-letter topic with the original topic, event envelope, attempt count, error, and failure time, then marked failed. They continue to block later events for the same payment until an operator calls `relay.Redrive(ctx, eventID)`. Redrive clears the failure state and starts a new retry window; it does not bypass normal per-payment ordering.
 
+### Transactional inbox
+
 Consumers can make at-least-once Kafka delivery idempotent with the inbox processor. The handler receives the transaction containing the inbox record, so all consumer state changes must use that transaction:
 
 ```go
@@ -337,6 +689,8 @@ processed, err := processor.Process(ctx, "settlement", event,
 
 `processed` is false for a duplicate event already handled by the named consumer. Different consumers can process the same event independently.
 
+### Saga coordination
+
 The payment saga coordinator persists the workflow and emits commands through the transactional outbox. Use it as an inbox handler so the consumed event, saga transition, and next command commit together:
 
 ```go
@@ -354,4 +708,8 @@ _, err = processor.Process(ctx, "payment-saga", event, coordinator.Handle)
 
 The workflow emits `policy.evaluate`, `ledger.reserve`, and `settlement.execute` commands. Policy or ledger failure emits `payment.fail`. A settlement failure or timeout emits `ledger.release`; after `ledger.released`, the saga records compensation and emits `payment.fail`. Replies must include the command's `correlation_id` in their payload. Run `coordinator.ExpireOnce(ctx)` periodically to claim overdue sagas safely across multiple workers and initiate failure or compensation.
 
-The default development broker address is `localhost:9092`. Kafka topics are auto-created in this local setup; production environments should provision and configure topics explicitly.
+The default development broker address is `localhost:9092`. Although the local
+broker permits automatic topic creation, explicitly create the application
+topics before startup so consumer groups receive their partition assignments.
+Production environments should provision topics with appropriate partition,
+replication, retention, and access-control settings.
