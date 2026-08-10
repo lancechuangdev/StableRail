@@ -3,6 +3,7 @@ package inbox
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -11,6 +12,47 @@ import (
 
 	"stablerail/eventbus"
 )
+
+func TestProcessUpcastsBeforeHandlingAndRecordsReceivedVersion(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	schemas := eventbus.NewSchemaRegistry()
+	if err := schemas.Register("payment.processing", 2, map[int]eventbus.Upcaster{
+		1: func(payload json.RawMessage) (json.RawMessage, error) {
+			return json.RawMessage(`{"state":"processing","source":"legacy"}`), nil
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	processor, err := NewProcessorWithSchemas(db, schemas)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := validEvent()
+
+	mock.ExpectBegin()
+	mock.ExpectExec("INSERT INTO inbox_events").
+		WithArgs("settlement", event.ID, event.Type, 1, event.AggregateID, event.AggregateType, event.OccurredAt, sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	processed, err := processor.Process(context.Background(), "settlement", event,
+		func(_ context.Context, _ *sql.Tx, got eventbus.Event) error {
+			if got.Version != 2 || string(got.Payload) != `{"state":"processing","source":"legacy"}` {
+				t.Fatalf("handler event = version %d payload %s", got.Version, got.Payload)
+			}
+			return nil
+		})
+	if err != nil || !processed {
+		t.Fatalf("Process = (%v, %v)", processed, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestProcessRecordsEventAndCommitsHandlerState(t *testing.T) {
 	processor, mock, closeDB := testProcessor(t)

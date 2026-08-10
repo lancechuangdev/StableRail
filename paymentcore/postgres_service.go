@@ -238,12 +238,25 @@ func (s *PostgresService) enqueue(ctx context.Context, tx *sql.Tx, paymentID, ev
 		INSERT INTO outbox_events
 			(id, topic, event_type, event_version, aggregate_id, aggregate_type, payload, occurred_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-		eventID, PaymentEventsTopic, eventType, 1, paymentID, "payment", payload, now,
+		eventID, PaymentEventsTopic, eventType, paymentEventVersion(eventType), paymentID, "payment", payload, now,
 	)
 	if err != nil {
 		return fmt.Errorf("enqueue outbox event: %w", err)
 	}
 	return nil
+}
+
+func paymentEventVersion(eventType string) int {
+	switch eventType {
+	case "payment.created":
+		return eventbus.PaymentCreatedVersion
+	case "payment.processing":
+		return eventbus.PaymentProcessingVersion
+	case "payment.settled":
+		return eventbus.PaymentSettledVersion
+	default:
+		panic("unknown payment event type: " + eventType)
+	}
 }
 
 func insertHistory(

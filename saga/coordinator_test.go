@@ -54,7 +54,7 @@ func TestHandleStartsSagaAndEnqueuesPolicyCommand(t *testing.T) {
 		WithArgs("saga_1", "pay-1", "corr_2", StateAwaitingPolicy, now.Add(time.Minute), now).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO outbox_events").
-		WithArgs("evt_3", CommandTopic, "policy.evaluate", "pay-1", sqlmock.AnyArg(), now).
+		WithArgs("evt_3", CommandTopic, "policy.evaluate", eventbus.PolicyEvaluateVersion, "pay-1", sqlmock.AnyArg(), now).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 
@@ -112,7 +112,7 @@ func TestExpireOnceCompensatesSettlementTimeout(t *testing.T) {
 		WithArgs(StateCompensating, now.Add(time.Minute), "awaiting_settlement timeout", now, "saga-1").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO outbox_events").
-		WithArgs("evt_1", CommandTopic, "ledger.release", "pay-1", sqlmock.AnyArg(), now).
+		WithArgs("evt_1", CommandTopic, "ledger.release", eventbus.LedgerReleaseVersion, "pay-1", sqlmock.AnyArg(), now).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 	count, err := c.ExpireOnce(context.Background())

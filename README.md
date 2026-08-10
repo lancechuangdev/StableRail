@@ -53,10 +53,7 @@ Implemented capabilities:
 - Timeline API for payment history
 - Concurrency-safe service operations and snapshot-based reads
 
-The original `Service` remains useful for isolated in-memory tests. Phase 2 also
-provides `PostgresService` for durable payment commands and transactional event
-creation. No REST/gRPC, provider, blockchain, or reconciliation integration has
-been implemented yet.
+The original `Service` remains useful for isolated in-memory tests. Phase 2 also provides `PostgresService` for durable payment commands and transactional event creation. No REST/gRPC, provider, blockchain, or reconciliation integration has been implemented yet.
 
 ## Running the payment core
 
@@ -77,26 +74,11 @@ go vet ./...
 
 ## Phase 2: distributed payments
 
-Phase 2 is being delivered incrementally. Step 1 adds the Kafka boundary: a
-versioned event envelope, a producer interface, and a shared Kafka producer
-that can publish to multiple topics. Create one producer per application
-process and pass the destination topic to each publish call; do not create a
-producer per message.
-Payment state changes are not wired directly to Kafka because that would create
-a dual-write consistency gap.
+Phase 2 is being delivered incrementally. Step 1 adds the Kafka boundary: a versioned event envelope, a producer interface, and a shared Kafka producer that can publish to multiple topics. Create one producer per application process and pass the destination topic to each publish call; do not create a producer per message. Payment state changes are not wired directly to Kafka because that would create a dual-write consistency gap.
 
-Step 2 adds PostgreSQL-backed payment commands and a transactional outbox.
-`PostgresService` writes the payment, double-entry ledger posting, audit
-history, timeline, and versioned outbox event in one database transaction.
-Kafka publication remains outside the request transaction and is performed by
-the outbox relay.
+Step 2 adds PostgreSQL-backed payment commands and a transactional outbox. `PostgresService` writes the payment, double-entry ledger posting, audit history, timeline, and versioned outbox event in one database transaction. Kafka publication remains outside the request transaction and is performed by the outbox relay.
 
-The initial chart of accounts defines operating cash as an asset and settlement
-payable as a liability. Payment processing debits operating cash and credits
-settlement payable, recognizing cash received and the matching obligation.
-Settlement debits the payable and credits operating cash, clearing both.
-Each journal transaction contains separate, equal debit and credit lines.
-Corrections should be represented by reversing journal transactions.
+The initial chart of accounts defines operating cash as an asset and settlement payable as a liability. Payment processing debits operating cash and credits settlement payable, recognizing cash received and the matching obligation. Settlement debits the payable and credits operating cash, clearing both. Each journal transaction contains separate, equal debit and credit lines. Corrections should be represented by reversing journal transactions.
 
 ### Phase 2 delivery plan
 
@@ -129,7 +111,7 @@ Corrections should be represented by reversing journal transactions.
    - Coordinate policy, ledger, and settlement steps through events
    - Persist saga state and correlation identifiers
    - Define timeouts and compensating actions for failed workflows
-8. **Event-version evolution — planned**
+8. **Event-version evolution — complete**
    - Maintain explicit payload versions per event type
    - Add compatibility tests and consumer upcasters
    - Document rules for backward-compatible schema changes
@@ -138,8 +120,35 @@ Corrections should be represented by reversing journal transactions.
    - Replay into a separate destination topic by default
    - Support dry runs, checkpoints, rate limits, and resumable execution
 
-Each step will be implemented and verified independently before work begins on
-the next one.
+Each step will be implemented and verified independently before work begins on the next one.
+
+### Event schema evolution
+
+`Event.Version` identifies the payload schema for one event type. Current producer versions are named constants in `eventbus/versions.go`; producers must use those constants and increment only the event type whose payload changes. An envelope change does not change a payload version.
+
+Payload changes are backward compatible when existing fields retain their meaning and type, and new fields are optional or have a safe default. Removing or renaming fields, changing their type or meaning, or making an optional field required needs a new version. 
+
+Producers deploy after consumers can accept the new version. Suppose `payment.created` moves from version 1 to version 2:
+1. Deploy consumers that understand both v1 and v2.
+2. Confirm those consumers are healthy.
+3. Deploy the producer that starts publishing v2.
+4. Later, retire v1 support once old events can no longer arrive or be replayed.
+
+Consumers that support historical payloads register every sequential upcast to their current model and use the schema-aware inbox constructor:
+
+```go
+schemas := eventbus.NewSchemaRegistry()
+err := schemas.Register("payment.created", 2, map[int]eventbus.Upcaster{
+	1: upcastPaymentCreatedV1ToV2,
+})
+if err != nil {
+	return err
+}
+
+processor, err := inbox.NewProcessorWithSchemas(db, schemas)
+```
+
+The inbox persists the version actually received for auditability, while the handler receives the upcasted event. Unknown event types, future versions, a missing step in an upcast chain, and invalid upcaster output are rejected. Keep fixtures for every supported historical version and verify that each reaches the current consumer model; `eventbus/schema_test.go` demonstrates this compatibility contract.
 
 Start the local single-node Kafka broker with:
 
@@ -173,8 +182,7 @@ defer db.Close()
 payments := paymentcore.NewPostgresService(db)
 ```
 
-Create and run an outbox relay with the same connection pool and the shared
-Kafka producer:
+Create and run an outbox relay with the same connection pool and the shared Kafka producer:
 
 ```go
 relay, err := outbox.NewRelay(db, producer, outbox.Config{
@@ -194,23 +202,11 @@ if err := relay.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 }
 ```
 
-Multiple relay processes can run concurrently. Pending rows are claimed with
-`FOR UPDATE SKIP LOCKED`, and only the earliest pending event for each payment
-is eligible, preserving per-payment order. Delivery is at least once: consumers
-must tolerate a duplicate if the process stops after Kafka accepts an event but
-before its `published_at` update commits.
+Multiple relay processes can run concurrently. Pending rows are claimed with `FOR UPDATE SKIP LOCKED`, and only the earliest pending event for each payment is eligible, preserving per-payment order. Delivery is at least once: consumers must tolerate a duplicate if the process stops after Kafka accepts an event but before its `published_at` update commits.
 
-Failed publications are retried with exponential backoff and jitter. Attempt
-and event-age limits are configurable. Exhausted events are published to the
-configured Kafka dead-letter topic with the original topic, event envelope,
-attempt count, error, and failure time, then marked failed. They continue to
-block later events for the same payment until an operator calls
-`relay.Redrive(ctx, eventID)`. Redrive clears the failure state and starts a new
-retry window; it does not bypass normal per-payment ordering.
+Failed publications are retried with exponential backoff and jitter. Attempt and event-age limits are configurable. Exhausted events are published to the configured Kafka dead-letter topic with the original topic, event envelope, attempt count, error, and failure time, then marked failed. They continue to block later events for the same payment until an operator calls `relay.Redrive(ctx, eventID)`. Redrive clears the failure state and starts a new retry window; it does not bypass normal per-payment ordering.
 
-Consumers can make at-least-once Kafka delivery idempotent with the inbox
-processor. The handler receives the transaction containing the inbox record,
-so all consumer state changes must use that transaction:
+Consumers can make at-least-once Kafka delivery idempotent with the inbox processor. The handler receives the transaction containing the inbox record, so all consumer state changes must use that transaction:
 
 ```go
 processor, err := inbox.NewProcessor(db)
@@ -228,12 +224,9 @@ processed, err := processor.Process(ctx, "settlement", event,
 	})
 ```
 
-`processed` is false for a duplicate event already handled by the named
-consumer. Different consumers can process the same event independently.
+`processed` is false for a duplicate event already handled by the named consumer. Different consumers can process the same event independently.
 
-The payment saga coordinator persists the workflow and emits commands through
-the transactional outbox. Use it as an inbox handler so the consumed event,
-saga transition, and next command commit together:
+The payment saga coordinator persists the workflow and emits commands through the transactional outbox. Use it as an inbox handler so the consumed event, saga transition, and next command commit together:
 
 ```go
 coordinator, err := saga.NewCoordinator(db, saga.Config{
@@ -248,14 +241,6 @@ if err != nil {
 _, err = processor.Process(ctx, "payment-saga", event, coordinator.Handle)
 ```
 
-The workflow emits `policy.evaluate`, `ledger.reserve`, and
-`settlement.execute` commands. Policy or ledger failure emits `payment.fail`.
-A settlement failure or timeout emits `ledger.release`; after
-`ledger.released`, the saga records compensation and emits `payment.fail`.
-Replies must include the command's `correlation_id` in their payload. Run
-`coordinator.ExpireOnce(ctx)` periodically to claim overdue sagas safely across
-multiple workers and initiate failure or compensation.
+The workflow emits `policy.evaluate`, `ledger.reserve`, and `settlement.execute` commands. Policy or ledger failure emits `payment.fail`. A settlement failure or timeout emits `ledger.release`; after `ledger.released`, the saga records compensation and emits `payment.fail`. Replies must include the command's `correlation_id` in their payload. Run `coordinator.ExpireOnce(ctx)` periodically to claim overdue sagas safely across multiple workers and initiate failure or compensation.
 
-The default development broker address is `localhost:9092`. Kafka topics are
-auto-created in this local setup; production environments should provision and
-configure topics explicitly.
+The default development broker address is `localhost:9092`. Kafka topics are auto-created in this local setup; production environments should provision and configure topics explicitly.

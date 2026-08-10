@@ -18,8 +18,23 @@ type Handler func(context.Context, *sql.Tx, eventbus.Event) error
 
 // Processor records consumed events and applies their side effects atomically.
 type Processor struct {
-	db  *sql.DB
-	now func() time.Time
+	db      *sql.DB
+	now     func() time.Time
+	schemas *eventbus.SchemaRegistry
+}
+
+// NewProcessorWithSchemas creates a processor that upcasts events immediately
+// before invoking the handler. Inbox records retain the received version.
+func NewProcessorWithSchemas(db *sql.DB, schemas *eventbus.SchemaRegistry) (*Processor, error) {
+	if schemas == nil {
+		return nil, errors.New("inbox schema registry is required")
+	}
+	processor, err := NewProcessor(db)
+	if err != nil {
+		return nil, err
+	}
+	processor.schemas = schemas
+	return processor, nil
 }
 
 func NewProcessor(db *sql.DB) (*Processor, error) {
@@ -77,7 +92,14 @@ func (p *Processor) Process(ctx context.Context, consumer string, event eventbus
 		return false, fmt.Errorf("record inbox event %s: inserted %d rows", event.ID, inserted)
 	}
 
-	if err := handler(ctx, tx, event); err != nil {
+	handlerEvent := event
+	if p.schemas != nil {
+		handlerEvent, err = p.schemas.Upcast(event)
+		if err != nil {
+			return false, fmt.Errorf("upcast inbox event %s: %w", event.ID, err)
+		}
+	}
+	if err := handler(ctx, tx, handlerEvent); err != nil {
 		return false, fmt.Errorf("handle inbox event %s: %w", event.ID, err)
 	}
 	if err := tx.Commit(); err != nil {

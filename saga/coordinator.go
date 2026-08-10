@@ -201,11 +201,28 @@ func (c *Coordinator) enqueue(ctx context.Context, tx *sql.Tx, sagaID, correlati
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO outbox_events
 		(id, topic, event_type, event_version, aggregate_id, aggregate_type, payload, occurred_at)
-		VALUES ($1, $2, $3, 1, $4, 'payment', $5, $6)`, eventID, CommandTopic, command, paymentID, payload, now)
+		VALUES ($1, $2, $3, $4, $5, 'payment', $6, $7)`, eventID, CommandTopic, command, sagaCommandVersion(command), paymentID, payload, now)
 	if err != nil {
 		return fmt.Errorf("enqueue saga command %s: %w", command, err)
 	}
 	return nil
+}
+
+func sagaCommandVersion(command string) int {
+	switch command {
+	case "policy.evaluate":
+		return eventbus.PolicyEvaluateVersion
+	case "ledger.reserve":
+		return eventbus.LedgerReserveVersion
+	case "settlement.execute":
+		return eventbus.SettlementExecuteVersion
+	case "payment.fail":
+		return eventbus.PaymentFailVersion
+	case "ledger.release":
+		return eventbus.LedgerReleaseVersion
+	default:
+		panic("unknown saga command type: " + command)
+	}
 }
 
 func reasonOrDefault(reason, fallback string) string {

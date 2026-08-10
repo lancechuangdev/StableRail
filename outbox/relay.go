@@ -238,7 +238,7 @@ func (r *Relay) recordFailure(ctx context.Context, tx *sql.Tx, pending pendingEv
 			return fmt.Errorf("encode dead-letter event %s: %w", pending.event.ID, err)
 		}
 		deadLetter := eventbus.Event{
-			ID: pending.event.ID + ".dlq", Type: "outbox.dead_lettered", Version: 1,
+			ID: pending.event.ID + ".dlq", Type: "outbox.dead_lettered", Version: eventbus.DeadLetterVersion,
 			AggregateID: pending.event.AggregateID, AggregateType: pending.event.AggregateType,
 			OccurredAt: now, Payload: payload,
 		}
