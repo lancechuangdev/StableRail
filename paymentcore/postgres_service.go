@@ -123,6 +123,46 @@ func (s *PostgresService) Settle(ctx context.Context, paymentID string) error {
 	return s.transition(ctx, paymentID, StateProcessing, StateSettled, "settled", "payment settled successfully", "payment settled")
 }
 
+// GetPayment returns the durable payment and its history.
+func (s *PostgresService) GetPayment(ctx context.Context, paymentID string) (*Payment, error) {
+	p := &Payment{}
+	err := s.db.QueryRowContext(ctx, `SELECT id, external_reference, currency, amount_minor,
+		customer_id, state, idempotency_key, created_at, updated_at FROM payments WHERE id = $1`, paymentID).
+		Scan(&p.ID, &p.ExternalReference, &p.Currency, &p.AmountMinor, &p.CustomerID,
+			&p.State, &p.IdempotencyKey, &p.CreatedAt, &p.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("%w: %s", ErrPaymentNotFound, paymentID)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get payment: %w", err)
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT state, occurred_at, note FROM payment_timeline_entries
+		WHERE payment_id = $1 ORDER BY occurred_at, id`, paymentID)
+	if err != nil {
+		return nil, fmt.Errorf("get payment timeline: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var entry TimelineEntry
+		if err := rows.Scan(&entry.State, &entry.At, &entry.Note); err != nil {
+			return nil, fmt.Errorf("scan payment timeline: %w", err)
+		}
+		p.Timeline = append(p.Timeline, entry)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read payment timeline: %w", err)
+	}
+	return p, nil
+}
+
+func (s *PostgresService) Timeline(ctx context.Context, paymentID string) ([]TimelineEntry, error) {
+	p, err := s.GetPayment(ctx, paymentID)
+	if err != nil {
+		return nil, err
+	}
+	return p.Timeline, nil
+}
+
 func (s *PostgresService) transition(
 	ctx context.Context,
 	paymentID string,

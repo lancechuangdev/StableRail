@@ -7,6 +7,8 @@ import (
 	"time"
 )
 
+var ErrPaymentNotFound = errors.New("payment not found")
+
 // PaymentState represents the lifecycle state of a payment.
 type PaymentState string
 
@@ -19,18 +21,18 @@ const (
 
 // Payment represents a payment intent and its ledger state.
 type Payment struct {
-	ID                string
-	ExternalReference string
-	Currency          string
-	AmountMinor       int64 // The payment amount expressed in the currency’s smallest unit
-	CustomerID        string
-	State             PaymentState
-	LedgerEntries     []LedgerEntry
-	AuditLog          []AuditEvent
-	Timeline          []TimelineEntry
-	CreatedAt         time.Time
-	UpdatedAt         time.Time
-	IdempotencyKey    string
+	ID                string          `json:"id"`
+	ExternalReference string          `json:"external_reference"`
+	Currency          string          `json:"currency"`
+	AmountMinor       int64           `json:"amount_minor"` // The payment amount expressed in the currency’s smallest unit
+	CustomerID        string          `json:"customer_id"`
+	State             PaymentState    `json:"state"`
+	LedgerEntries     []LedgerEntry   `json:"ledger_entries,omitempty"`
+	AuditLog          []AuditEvent    `json:"audit_log,omitempty"`
+	Timeline          []TimelineEntry `json:"timeline,omitempty"`
+	CreatedAt         time.Time       `json:"created_at"`
+	UpdatedAt         time.Time       `json:"updated_at"`
+	IdempotencyKey    string          `json:"-"`
 }
 
 type AccountType string
@@ -73,9 +75,9 @@ type AuditEvent struct {
 
 // TimelineEntry is a public-facing entry for the timeline API.
 type TimelineEntry struct {
-	State PaymentState
-	At    time.Time
-	Note  string
+	State PaymentState `json:"state"`
+	At    time.Time    `json:"at"`
+	Note  string       `json:"note"`
 }
 
 // Service provides payment lifecycle operations.
@@ -203,7 +205,7 @@ func (s *Service) GetPayment(paymentID string) (*Payment, error) {
 	defer s.mu.RUnlock()
 	payment, ok := s.payments[paymentID]
 	if !ok {
-		return nil, fmt.Errorf("payment %s not found", paymentID)
+		return nil, fmt.Errorf("%w: %s", ErrPaymentNotFound, paymentID)
 	}
 	return clonePayment(payment), nil
 }

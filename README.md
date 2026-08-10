@@ -118,12 +118,12 @@ The initial chart of accounts defines operating cash as an asset and settlement 
 
 ### Phase 3: runnable application
 
-9. **Payment API and application runtime — planned next**
+9. **Payment API and application runtime — complete**
    - Expose payment creation, lookup, and timeline endpoints
    - Enforce request validation and HTTP idempotency keys
    - Run the API, outbox relay, and saga timeout worker with shared dependencies and graceful shutdown
    - Add health, readiness, configuration, and end-to-end tests
-10. **Kafka consumer runtime and core workers — planned**
+10. **Kafka consumer runtime and core workers — complete**
    - Provide a reusable consumer loop with decoding, inbox processing, offset commits, and graceful shutdown
    - Connect payment events to the saga coordinator
    - Implement policy, ledger, and payment-command handlers so the saga can complete without test doubles
@@ -164,6 +164,44 @@ The initial chart of accounts defines operating cash as an asset and settlement 
    - Add chain submission and confirmation tracking only where the chosen settlement rail requires it
 
 Each step will be implemented and verified independently before work begins on the next one.
+
+### Running the Phase 3 application
+
+Apply migrations 001-004, start PostgreSQL and Kafka, then run:
+
+```bash
+export STABLERAIL_DATABASE_URL=postgresql://stablerail:stablerail@localhost:5432/stablerail
+export STABLERAIL_KAFKA_BROKERS=localhost:9092
+go run ./cmd/stablerail
+```
+
+The API listens on `:8080` by default. `STABLERAIL_HTTP_ADDRESS`,
+`STABLERAIL_SHUTDOWN_TIMEOUT`, and `STABLERAIL_SAGA_POLL_INTERVAL` override the
+runtime defaults. The process runs the HTTP server, outbox relay, saga timeout
+worker, saga event consumer, and core command consumer together and drains them
+on SIGINT or SIGTERM.
+
+Create and inspect a payment:
+
+```bash
+curl -i -X POST http://localhost:8080/v1/payments \
+  -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: request-123' \
+  -d '{"external_reference":"order-123","currency":"USD","amount_minor":2500,"customer_id":"customer-1"}'
+
+curl http://localhost:8080/v1/payments/PAYMENT_ID
+curl http://localhost:8080/v1/payments/PAYMENT_ID/timeline
+curl http://localhost:8080/healthz
+curl http://localhost:8080/readyz
+```
+
+The optional HTTP/PostgreSQL end-to-end test expects a migrated disposable
+database:
+
+```bash
+STABLERAIL_E2E_DATABASE_URL=postgresql://stablerail:stablerail@localhost:5432/stablerail \
+  go test ./paymentapi -run EndToEnd
+```
 
 ### Event schema evolution
 
