@@ -1,14 +1,8 @@
 # StableRail
 
-A Go reference implementation of a durable, event-driven payment workflow. The
-current application exposes an HTTP API, stores payment and ledger state in
-PostgreSQL, publishes through a transactional outbox, consumes Kafka events with
-a transactional inbox, and coordinates policy, ledger, and settlement steps
-with a persisted saga.
+A Go reference implementation of a durable, event-driven payment workflow. The current application exposes an HTTP API, stores payment and ledger state in PostgreSQL, publishes through a transactional outbox, consumes Kafka events with a transactional inbox, and coordinates policy, ledger, and settlement steps with a persisted saga.
 
-Policy approval and settlement are deterministic local workers in the current
-phase. Real provider integrations, quotes, notifications, reconciliation, and
-blockchain adapters remain roadmap items.
+Policy approval and settlement are deterministic local workers in the current phase. Real provider integrations, quotes, notifications, reconciliation, and blockchain adapters remain roadmap items.
 
 ## Current capabilities
 
@@ -24,8 +18,7 @@ blockchain adapters remain roadmap items.
 
 ## Target architecture
 
-The following is the broader roadmap, not a claim that every component is
-implemented:
+The following is the broader roadmap, not a claim that every component is implemented:
 
 ```
                         REST/gRPC API
@@ -51,8 +44,7 @@ implemented:
 
 ## Implemented Phase 3 data flow
 
-Numbered arrows show the initial request followed by the repeating
-outbox–Kafka–inbox workflow.
+Numbered arrows show the initial request followed by the repeating outbox–Kafka–inbox workflow.
 
 ```mermaid
 flowchart TD
@@ -140,9 +132,7 @@ flowchart TD
 <details>
 <summary>Detailed successful-payment transaction sequence</summary>
 
-The shaded, dotted regions represent PostgreSQL transaction boundaries. Kafka
-offset commits deliberately happen after the associated database transaction
-commits.
+The shaded, dotted regions represent PostgreSQL transaction boundaries. Kafka offset commits deliberately happen after the associated database transaction commits.
 
 ```mermaid
 %%{init: {
@@ -366,10 +356,7 @@ Implemented capabilities:
 - Timeline API for payment history
 - Concurrency-safe service operations and snapshot-based reads
 
-The original `Service` remains useful for isolated in-memory tests.
-`PostgresService` provides durable payment commands, reads, and transactional
-event creation. The HTTP API and asynchronous application runtime use the
-PostgreSQL implementation.
+The original `Service` remains useful for isolated in-memory tests. `PostgresService` provides durable payment commands, reads, and transactional event creation. The HTTP API and asynchronous application runtime use the PostgreSQL implementation.
 
 ## Testing
 
@@ -386,8 +373,7 @@ go test -race ./...
 go vet ./...
 ```
 
-Run the opt-in HTTP/PostgreSQL end-to-end test against a migrated disposable
-database:
+Run the opt-in HTTP/PostgreSQL end-to-end test against a migrated disposable database:
 
 ```bash
 STABLERAIL_E2E_DATABASE_URL=postgresql://stablerail:stablerail@localhost:5432/stablerail \
@@ -396,16 +382,9 @@ STABLERAIL_E2E_DATABASE_URL=postgresql://stablerail:stablerail@localhost:5432/st
 
 ## Delivery roadmap
 
-Phase 2 introduced the Kafka boundary, PostgreSQL persistence, transactional
-outbox and inbox, saga coordination, and event-version evolution. The runtime
-creates one shared Kafka producer per process. Payment state changes never
-publish directly to Kafka because doing so would create a dual-write
-consistency gap.
+Phase 2 introduced the Kafka boundary, PostgreSQL persistence, transactional outbox and inbox, saga coordination, and event-version evolution. The runtime creates one shared Kafka producer per process. Payment state changes never publish directly to Kafka because doing so would create a dual-write consistency gap.
 
-`PostgresService` writes payment state, ledger postings, audit history,
-timeline entries, and versioned outbox events in database transactions. Kafka
-publication happens outside command transactions and is performed by the
-outbox relay.
+`PostgresService` writes payment state, ledger postings, audit history, timeline entries, and versioned outbox events in database transactions. Kafka publication happens outside command transactions and is performed by the outbox relay.
 
 The initial chart of accounts defines operating cash as an asset and settlement payable as a liability. Payment processing debits operating cash and credits settlement payable, recognizing cash received and the matching obligation. Settlement debits the payable and credits operating cash, clearing both. Each journal transaction contains separate, equal debit and credit lines. Corrections should be represented by reversing journal transactions.
 
@@ -507,8 +486,7 @@ docker compose ps
 
 ### 2. Apply database migrations
 
-Use the `psql` client included in the PostgreSQL container; no host installation
-is required:
+Use the `psql` client included in the PostgreSQL container; no host installation is required:
 
 ```bash
 for migration in migrations/*.sql; do
@@ -535,8 +513,7 @@ for topic in payment-events payment-commands stablerail-dead-letter; do
 done
 ```
 
-Creating the topics explicitly avoids a startup race where consumers receive
-an empty partition assignment before Kafka auto-creates their topics.
+Creating the topics explicitly avoids a startup race where consumers receive an empty partition assignment before Kafka auto-creates their topics.
 
 ### 4. Start StableRail
 
@@ -546,11 +523,7 @@ export STABLERAIL_KAFKA_BROKERS=localhost:9092
 go run ./cmd/stablerail
 ```
 
-The API listens on `:8080` by default. `STABLERAIL_HTTP_ADDRESS`,
-`STABLERAIL_SHUTDOWN_TIMEOUT`, and `STABLERAIL_SAGA_POLL_INTERVAL` override the
-runtime defaults. The process runs the HTTP server, outbox relay, saga timeout
-worker, saga event consumer, and core command consumer together and drains them
-on SIGINT or SIGTERM.
+The API listens on `:8080` by default. `STABLERAIL_HTTP_ADDRESS`, `STABLERAIL_SHUTDOWN_TIMEOUT`, and `STABLERAIL_SAGA_POLL_INTERVAL` override the runtime defaults. The process runs the HTTP server, outbox relay, saga timeout worker, saga event consumer, and core command consumer together and drains them on SIGINT or SIGTERM.
 
 | Endpoint | Purpose |
 | --- | --- |
@@ -560,9 +533,7 @@ on SIGINT or SIGTERM.
 | `GET /healthz` | Check whether the process is running |
 | `GET /readyz` | Check whether PostgreSQL is reachable |
 
-Repeating a request with the same idempotency key returns the original payment.
-The current implementation does not yet compare the repeated request body with
-the original body; clients must not reuse a key for a different operation.
+Repeating a request with the same idempotency key returns the original payment. The current implementation does not yet compare the repeated request body with the original body; clients must not reuse a key for a different operation.
 
 ### 5. Create and inspect a payment
 
@@ -578,9 +549,7 @@ curl http://localhost:8080/healthz
 curl http://localhost:8080/readyz
 ```
 
-The create response initially has state `created`. Policy, ledger, and
-settlement execute asynchronously; poll the lookup or timeline endpoint to
-observe `processing` and `settled`.
+The create response initially has state `created`. Policy, ledger, and settlement execute asynchronously; poll the lookup or timeline endpoint to observe `processing` and `settled`.
 
 ### 6. Stop the local environment
 
@@ -708,8 +677,4 @@ _, err = processor.Process(ctx, "payment-saga", event, coordinator.Handle)
 
 The workflow emits `policy.evaluate`, `ledger.reserve`, and `settlement.execute` commands. Policy or ledger failure emits `payment.fail`. A settlement failure or timeout emits `ledger.release`; after `ledger.released`, the saga records compensation and emits `payment.fail`. Replies must include the command's `correlation_id` in their payload. Run `coordinator.ExpireOnce(ctx)` periodically to claim overdue sagas safely across multiple workers and initiate failure or compensation.
 
-The default development broker address is `localhost:9092`. Although the local
-broker permits automatic topic creation, explicitly create the application
-topics before startup so consumer groups receive their partition assignments.
-Production environments should provision topics with appropriate partition,
-replication, retention, and access-control settings.
+The default development broker address is `localhost:9092`. Although the local broker permits automatic topic creation, explicitly create the application topics before startup so consumer groups receive their partition assignments. Production environments should provision topics with appropriate partition, replication, retention, and access-control settings.
