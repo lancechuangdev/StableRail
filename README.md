@@ -125,7 +125,7 @@ Corrections should be represented by reversing journal transactions.
    - Store consumed event IDs before applying side effects
    - Make duplicate Kafka deliveries harmless
    - Commit inbox records and consumer state changes atomically
-7. **Payment saga — planned**
+7. **Payment saga — complete**
    - Coordinate policy, ledger, and settlement steps through events
    - Persist saga state and correlation identifiers
    - Define timeouts and compensating actions for failed workflows
@@ -157,6 +157,8 @@ psql postgresql://stablerail:stablerail@localhost:5432/stablerail \
   -f migrations/002_outbox.sql
 psql postgresql://stablerail:stablerail@localhost:5432/stablerail \
   -f migrations/003_consumer_inbox.sql
+psql postgresql://stablerail:stablerail@localhost:5432/stablerail \
+  -f migrations/004_payment_sagas.sql
 ```
 
 Create the persistent payment service with the shared connection pool:
@@ -228,6 +230,31 @@ processed, err := processor.Process(ctx, "settlement", event,
 
 `processed` is false for a duplicate event already handled by the named
 consumer. Different consumers can process the same event independently.
+
+The payment saga coordinator persists the workflow and emits commands through
+the transactional outbox. Use it as an inbox handler so the consumed event,
+saga transition, and next command commit together:
+
+```go
+coordinator, err := saga.NewCoordinator(db, saga.Config{
+	PolicyTimeout:     time.Minute,
+	LedgerTimeout:     time.Minute,
+	SettlementTimeout: 10 * time.Minute,
+})
+if err != nil {
+	return err
+}
+
+_, err = processor.Process(ctx, "payment-saga", event, coordinator.Handle)
+```
+
+The workflow emits `policy.evaluate`, `ledger.reserve`, and
+`settlement.execute` commands. Policy or ledger failure emits `payment.fail`.
+A settlement failure or timeout emits `ledger.release`; after
+`ledger.released`, the saga records compensation and emits `payment.fail`.
+Replies must include the command's `correlation_id` in their payload. Run
+`coordinator.ExpireOnce(ctx)` periodically to claim overdue sagas safely across
+multiple workers and initiate failure or compensation.
 
 The default development broker address is `localhost:9092`. Kafka topics are
 auto-created in this local setup; production environments should provision and
