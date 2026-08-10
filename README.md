@@ -80,7 +80,7 @@ Step 2 adds PostgreSQL-backed payment commands and a transactional outbox. `Post
 
 The initial chart of accounts defines operating cash as an asset and settlement payable as a liability. Payment processing debits operating cash and credits settlement payable, recognizing cash received and the matching obligation. Settlement debits the payable and credits operating cash, clearing both. Each journal transaction contains separate, equal debit and credit lines. Corrections should be represented by reversing journal transactions.
 
-### Phase 2 delivery plan
+### Phase 2: distributed foundations
 
 1. **Kafka foundation — complete**
    - Shared multi-topic Kafka producer
@@ -115,10 +115,53 @@ The initial chart of accounts defines operating cash as an asset and settlement 
    - Maintain explicit payload versions per event type
    - Add compatibility tests and consumer upcasters
    - Document rules for backward-compatible schema changes
-9. **Event replay CLI — planned**
+
+### Phase 3: runnable application
+
+9. **Payment API and application runtime — planned next**
+   - Expose payment creation, lookup, and timeline endpoints
+   - Enforce request validation and HTTP idempotency keys
+   - Run the API, outbox relay, and saga timeout worker with shared dependencies and graceful shutdown
+   - Add health, readiness, configuration, and end-to-end tests
+10. **Kafka consumer runtime and core workers — planned**
+   - Provide a reusable consumer loop with decoding, inbox processing, offset commits, and graceful shutdown
+   - Connect payment events to the saga coordinator
+   - Implement policy, ledger, and payment-command handlers so the saga can complete without test doubles
+   - Define retryable versus permanent consumer failures
+
+### Phase 4: payment capabilities
+
+11. **Settlement provider boundary — planned**
+   - Define provider request, response, status, and error contracts
+   - Implement a deterministic mock provider for local and integration testing
+   - Consume settlement commands and correlate asynchronous provider results with the payment saga
+   - Make provider submission and webhook handling idempotent
+12. **Quote and FX lifecycle — planned**
+   - Create expiring quotes with source amount, destination amount, rate, and fees
+   - Bind accepted quotes to payments so execution uses immutable pricing
+   - Add precision, rounding, expiration, and concurrency tests
+
+### Phase 5: operations and recovery
+
+13. **Notifications and external webhooks — planned**
+   - Publish customer-facing payment status updates
+   - Sign webhook deliveries and retry transient failures
+   - Provide delivery history, idempotency, and operator redrive controls
+14. **Reconciliation and observability — planned**
+   - Compare internal ledger, provider, and settlement records
+   - Record discrepancies and support operator resolution workflows
+   - Add structured logs, metrics, traces, and alerts across the payment path
+15. **Event replay CLI — planned**
    - Select events by topic, type, aggregate, and time range
    - Replay into a separate destination topic by default
    - Support dry runs, checkpoints, rate limits, and resumable execution
+
+### Phase 6: production settlement rails
+
+16. **Production provider and blockchain adapters — planned**
+   - Implement one real provider behind the settlement boundary
+   - Manage credentials, rate limits, webhooks, and provider-specific failure mapping
+   - Add chain submission and confirmation tracking only where the chosen settlement rail requires it
 
 Each step will be implemented and verified independently before work begins on the next one.
 
