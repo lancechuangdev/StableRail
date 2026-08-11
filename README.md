@@ -78,14 +78,14 @@ flowchart TD
 
     subgraph SagaRuntime["Saga event consumer"]
         SagaLoop["consumer/consumer.go<br/>Loop.Run"]
-        SagaInbox["consumer/inbox.go<br/>InboxProcessor"]
+        SagaInbox["inbox/bound_processor.go<br/>BoundProcessor"]
         SagaHandler["workers/handlers.go<br/>SagaHandler"]
         Coordinator["saga/coordinator.go<br/>Coordinator.Handle"]
     end
 
     subgraph CommandRuntime["Core command consumer"]
         CommandLoop["consumer/consumer.go<br/>Loop.Run"]
-        CommandInbox["consumer/inbox.go<br/>InboxProcessor"]
+        CommandInbox["inbox/bound_processor.go<br/>BoundProcessor"]
         Worker["workers/handlers.go<br/>CommandHandler.Handle"]
     end
 

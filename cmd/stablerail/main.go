@@ -67,13 +67,13 @@ func run() error {
 
 	sagaLoop := &consumer.Loop{
 		Reader:    consumer.NewKafkaReader(config.KafkaBrokers, string(paymentcore.PaymentEventsTopic), "stablerail-saga"),
-		Processor: consumer.InboxProcessor{Inbox: inboxProcessor, Handler: workers.SagaHandler(coordinator)},
+		Processor: inbox.BoundProcessor{Processor: inboxProcessor, Handler: workers.SagaHandler(coordinator)},
 		Consumer:  "payment-saga",
 	}
 
 	commandLoop := &consumer.Loop{
 		Reader: consumer.NewKafkaReader(config.KafkaBrokers, string(saga.CommandTopic), "stablerail-core-workers"),
-		Processor: consumer.InboxProcessor{Inbox: inboxProcessor, Handler: workers.NewCommandHandler(
+		Processor: inbox.BoundProcessor{Processor: inboxProcessor, Handler: workers.NewCommandHandler(
 			policy.DeterministicEvaluator{}, ledger.NewPostgresService(), settlement.NewMockProvider(settlement.SettlementResult{}),
 		).Handle},
 		Consumer: "core-workers",
@@ -96,7 +96,7 @@ func run() error {
 		server,
 		config.ShutdownTimeout,
 		relay.Run,
-		app.SagaTimeoutWorker(coordinator, config.SagaPollInterval),
+		saga.TimeoutWorker(coordinator, config.SagaPollInterval),
 		sagaLoop.Run,
 		commandLoop.Run,
 	)

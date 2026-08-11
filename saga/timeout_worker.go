@@ -1,14 +1,15 @@
-package app
+package saga
 
 import (
 	"context"
 	"errors"
 	"time"
-
-	"stablerail/saga"
 )
 
-func SagaTimeoutWorker(coordinator *saga.Coordinator, interval time.Duration) Runner {
+// TimeoutWorker periodically expires overdue sagas until its context is
+// canceled. Its function signature can be passed directly to an application
+// runtime without coupling the saga package to that runtime.
+func TimeoutWorker(coordinator *Coordinator, interval time.Duration) func(context.Context) error {
 	return func(ctx context.Context) error {
 		for {
 			if _, err := coordinator.ExpireOnce(ctx); err != nil {
