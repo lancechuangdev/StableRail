@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"log/slog"
 	"net/http"
 	"os/signal"
 	"syscall"
@@ -15,12 +16,14 @@ import (
 	"stablerail/inbox"
 	"stablerail/ledger"
 	"stablerail/notification"
+	"stablerail/observability"
 	"stablerail/outbox"
 	"stablerail/paymentapi"
 	"stablerail/paymentcore"
 	"stablerail/policy"
 	"stablerail/postgresdb"
 	"stablerail/quote"
+	"stablerail/reconciliation"
 	"stablerail/saga"
 	"stablerail/settlement"
 	"stablerail/workers"
@@ -33,6 +36,8 @@ func main() {
 }
 
 func run() error {
+	logger := slog.New(slog.NewJSONHandler(log.Writer(), nil))
+	slog.SetDefault(logger)
 	config, err := app.ConfigFromEnv()
 	if err != nil {
 		return err
@@ -90,6 +95,10 @@ func run() error {
 		Processor: inbox.BoundProcessor{Processor: inboxProcessor, Handler: notification.EventHandler()},
 		Consumer:  "payment-webhooks",
 	}
+	reconciler, err := reconciliation.New(db, reconciliation.Config{Interval: config.ReconciliationInterval}, logger)
+	if err != nil {
+		return err
+	}
 
 	quoteRepo, err := quote.NewPostgresRepository(db)
 	if err != nil {
@@ -105,9 +114,13 @@ func run() error {
 		return err
 	}
 
+	metrics := &observability.Metrics{}
+	root := http.NewServeMux()
+	root.Handle("/metrics", metrics.Handler())
+	root.Handle("/", metrics.Middleware(handler, logger))
 	server := &http.Server{
 		Addr:              config.HTTPAddress,
-		Handler:           handler,
+		Handler:           root,
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
@@ -122,6 +135,7 @@ func run() error {
 		commandLoop.Run,
 		webhookLoop.Run,
 		webhookDispatcher.Run,
+		reconciler.Run,
 	)
 	if errors.Is(err, context.Canceled) {
 		return nil

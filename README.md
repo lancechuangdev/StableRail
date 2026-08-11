@@ -457,7 +457,7 @@ The initial chart of accounts defines operating cash as an asset and settlement 
    - Publish customer-facing payment status updates
    - Sign webhook deliveries and retry transient failures
    - Provide delivery history, idempotency, and operator redrive controls
-14. **Reconciliation and observability — planned**
+14. **Reconciliation and observability — complete**
    - Compare internal ledger, provider, and settlement records
    - Record discrepancies and support operator resolution workflows
    - Add structured logs, metrics, traces, and alerts across the payment path
@@ -474,6 +474,23 @@ The initial chart of accounts defines operating cash as an asset and settlement 
    - Add chain submission and confirmation tracking only where the chosen settlement rail requires it
 
 Each step will be implemented and verified independently before work begins on the next one.
+
+### Reconciliation and observability
+
+The reconciliation worker periodically compares debit and credit totals for every
+ledger transaction and compares the latest provider submission with the durable
+payment state. Findings have stable fingerprints in
+`reconciliation_discrepancies`: repeated findings update the existing record,
+cleared findings resolve automatically, and findings resolved by an operator reopen
+if the mismatch remains. Operators can resolve investigated findings with
+`reconciliation.Reconciler.Resolve`, which requires an identity and note. Every run
+is recorded in `reconciliation_runs` and emits a warning-level structured log when
+action is required.
+
+HTTP requests emit JSON logs with method, path, status, duration, and an
+`X-Request-ID` correlation value. `GET /metrics` exposes Prometheus-format request,
+server-error, and cumulative-duration counters. The runtime interval defaults to one
+minute and can be changed with `STABLERAIL_RECONCILIATION_INTERVAL`.
 
 ### Webhook delivery
 
@@ -551,6 +568,7 @@ The API listens on `:8080` by default. `STABLERAIL_HTTP_ADDRESS`, `STABLERAIL_SH
 | `GET /v1/payments/{id}/timeline` | Read ordered lifecycle history |
 | `GET /healthz` | Check whether the process is running |
 | `GET /readyz` | Check whether PostgreSQL is reachable |
+| `GET /metrics` | Read Prometheus-format HTTP metrics |
 
 Repeating a request with the same idempotency key returns the original payment. The current implementation does not yet compare the repeated request body with the original body; clients must not reuse a key for a different operation.
 
