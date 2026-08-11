@@ -13,6 +13,7 @@ Policy approval and settlement use deterministic local implementations in the cu
 - Transactional outbox publication with retry, dead-letter, and redrive support
 - Transactional inbox deduplication and manual Kafka offset commits
 - Persisted payment saga with timeouts and compensating commands
+- Injected policy evaluator, transactional ledger service, and settlement provider boundaries
 - Versioned event payloads and consumer upcasting support
 - One runnable process with health checks and graceful shutdown
 

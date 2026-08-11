@@ -13,7 +13,9 @@ import (
 
 	"stablerail/consumer"
 	"stablerail/eventbus"
+	"stablerail/ledger"
 	"stablerail/paymentcore"
+	"stablerail/policy"
 	"stablerail/saga"
 	"stablerail/settlement"
 )
@@ -21,15 +23,13 @@ import (
 type CommandHandler struct {
 	now                func() time.Time
 	newID              func() (string, error)
-	settlementProvider settlement.Provider
+	policyEvaluator    policy.PolicyEvaluator
+	ledgerService      ledger.LedgerService
+	settlementProvider settlement.SettlementProvider
 }
 
-func NewCommandHandler(providers ...settlement.Provider) *CommandHandler {
-	provider := settlement.Provider(settlement.NewMockProvider(settlement.Result{}))
-	if len(providers) > 0 && providers[0] != nil {
-		provider = providers[0]
-	}
-	return &CommandHandler{settlementProvider: provider, now: func() time.Time { return time.Now().UTC() }, newID: func() (string, error) {
+func NewCommandHandler(evaluator policy.PolicyEvaluator, ledgerService ledger.LedgerService, provider settlement.SettlementProvider) *CommandHandler {
+	return &CommandHandler{policyEvaluator: evaluator, ledgerService: ledgerService, settlementProvider: provider, now: func() time.Time { return time.Now().UTC() }, newID: func() (string, error) {
 		b := make([]byte, 16)
 		_, err := rand.Read(b)
 		return "evt_" + hex.EncodeToString(b), err
@@ -43,6 +43,9 @@ type commandPayload struct {
 }
 
 func (h *CommandHandler) Handle(ctx context.Context, tx *sql.Tx, event eventbus.Event) error {
+	if h.policyEvaluator == nil || h.ledgerService == nil || h.settlementProvider == nil {
+		return errors.New("command handler dependencies are required")
+	}
 	var payload commandPayload
 	if err := json.Unmarshal(event.Payload, &payload); err != nil || payload.CorrelationID == "" {
 		return consumer.Permanent(errors.New("invalid command payload"))
@@ -53,19 +56,33 @@ func (h *CommandHandler) Handle(ctx context.Context, tx *sql.Tx, event eventbus.
 	var reply string
 	switch event.Type {
 	case "policy.evaluate":
-		reply = "policy.approved"
-	case "ledger.reserve":
-		if err := transitionPayment(ctx, tx, payload.PaymentID, paymentcore.StateCreated, paymentcore.StateProcessing, h.now()); err != nil {
+		amount, currency, err := loadPaymentAmount(ctx, tx, payload.PaymentID)
+		if err != nil {
 			return err
+		}
+		decision, err := h.policyEvaluator.Evaluate(ctx, policy.PolicyRequest{PaymentID: payload.PaymentID, AmountMinor: amount, Currency: currency})
+		if err != nil {
+			return fmt.Errorf("evaluate payment policy: %w", err)
+		}
+		if !decision.Approved {
+			payload.Reason, reply = decision.Reason, "policy.rejected"
+		} else {
+			reply = "policy.approved"
+		}
+	case "ledger.reserve":
+		if err := h.ledgerService.Reserve(ctx, tx, ledger.ReservationRequest{PaymentID: payload.PaymentID, At: h.now()}); err != nil {
+			if errors.Is(err, ledger.ErrInvalidPaymentState) {
+				return consumer.Permanent(err)
+			}
+			return fmt.Errorf("reserve ledger funds: %w", err)
 		}
 		reply = "ledger.reserved"
 	case "settlement.execute":
-		var amount int64
-		var currency string
-		if err := tx.QueryRowContext(ctx, `SELECT amount_minor, currency FROM payments WHERE id=$1`, payload.PaymentID).Scan(&amount, &currency); err != nil {
-			return fmt.Errorf("load payment for settlement: %w", err)
+		amount, currency, err := loadPaymentAmount(ctx, tx, payload.PaymentID)
+		if err != nil {
+			return err
 		}
-		result, err := h.settlementProvider.Submit(ctx, settlement.Request{IdempotencyKey: event.ID, PaymentID: payload.PaymentID, AmountMinor: amount, Currency: currency})
+		result, err := h.settlementProvider.Submit(ctx, settlement.SettlementRequest{IdempotencyKey: event.ID, PaymentID: payload.PaymentID, AmountMinor: amount, Currency: currency})
 		if err != nil {
 			return fmt.Errorf("submit settlement: %w", err)
 		}
@@ -93,6 +110,12 @@ func (h *CommandHandler) Handle(ctx context.Context, tx *sql.Tx, event eventbus.
 		}
 		reply = "settlement.completed"
 	case "ledger.release":
+		if err := h.ledgerService.Release(ctx, tx, ledger.ReleaseRequest{PaymentID: payload.PaymentID, At: h.now()}); err != nil {
+			if errors.Is(err, ledger.ErrInvalidPaymentState) {
+				return consumer.Permanent(err)
+			}
+			return fmt.Errorf("release ledger funds: %w", err)
+		}
 		reply = "ledger.released"
 	case "payment.fail":
 		now := h.now()
@@ -110,6 +133,15 @@ func (h *CommandHandler) Handle(ctx context.Context, tx *sql.Tx, event eventbus.
 		return consumer.Permanent(fmt.Errorf("unsupported command %q", event.Type))
 	}
 	return h.enqueueReply(ctx, tx, event, payload, reply)
+}
+
+func loadPaymentAmount(ctx context.Context, tx *sql.Tx, paymentID string) (int64, string, error) {
+	var amount int64
+	var currency string
+	if err := tx.QueryRowContext(ctx, `SELECT amount_minor, currency FROM payments WHERE id=$1`, paymentID).Scan(&amount, &currency); err != nil {
+		return 0, "", fmt.Errorf("load payment: %w", err)
+	}
+	return amount, currency, nil
 }
 
 func transitionPayment(ctx context.Context, tx *sql.Tx, id string, from, to paymentcore.PaymentState, now time.Time) error {
@@ -161,7 +193,7 @@ func (h *CommandHandler) enqueueReply(ctx context.Context, tx *sql.Tx, caused ev
 		return err
 	}
 	body, _ := json.Marshal(map[string]string{"correlation_id": p.CorrelationID, "caused_by_event_id": caused.ID, "reason": p.Reason})
-	version := map[string]int{"policy.approved": eventbus.PolicyApprovedVersion, "ledger.reserved": eventbus.LedgerReservedVersion, "ledger.released": eventbus.LedgerReleasedVersion, "settlement.completed": eventbus.SettlementCompletedVersion, "settlement.failed": eventbus.SettlementFailedVersion}[reply]
+	version := map[string]int{"policy.approved": eventbus.PolicyApprovedVersion, "policy.rejected": eventbus.PolicyRejectedVersion, "ledger.reserved": eventbus.LedgerReservedVersion, "ledger.released": eventbus.LedgerReleasedVersion, "settlement.completed": eventbus.SettlementCompletedVersion, "settlement.failed": eventbus.SettlementFailedVersion}[reply]
 	_, err = tx.ExecContext(ctx, `INSERT INTO outbox_events(id,topic,event_type,event_version,aggregate_id,aggregate_type,payload,occurred_at) VALUES($1,$2,$3,$4,$5,'payment',$6,$7)`, id, paymentcore.PaymentEventsTopic, reply, version, p.PaymentID, body, h.now())
 	if err != nil {
 		return fmt.Errorf("enqueue %s: %w", reply, err)

@@ -16,28 +16,28 @@ const (
 	StatusFailed    Status = "failed"
 )
 
-type Request struct {
+type SettlementRequest struct {
 	IdempotencyKey string
 	PaymentID      string
 	AmountMinor    int64
 	Currency       string
 }
 
-type Result struct {
+type SettlementResult struct {
 	ProviderReference string
 	Status            Status
 	FailureCode       string
 	FailureMessage    string
 }
 
-func (r Request) Validate() error {
+func (r SettlementRequest) Validate() error {
 	if r.IdempotencyKey == "" || r.PaymentID == "" || r.Currency == "" || r.AmountMinor <= 0 {
 		return errors.New("settlement request identity, positive amount, and currency are required")
 	}
 	return nil
 }
 
-func (r Result) Validate() error {
+func (r SettlementResult) Validate() error {
 	if r.ProviderReference == "" {
 		return errors.New("provider reference is required")
 	}
@@ -54,31 +54,31 @@ func (r Result) Validate() error {
 	}
 }
 
-type Provider interface {
+type SettlementProvider interface {
 	Name() string
-	Submit(context.Context, Request) (Result, error)
+	Submit(context.Context, SettlementRequest) (SettlementResult, error)
 }
 
 // MockProvider is deterministic and idempotent. It is safe for concurrent use.
 // By default every new request succeeds; Result can be set to exercise other outcomes.
 type MockProvider struct {
 	mu     sync.Mutex
-	Result Result
-	seen   map[string]Result
+	Result SettlementResult
+	seen   map[string]SettlementResult
 }
 
-func NewMockProvider(result Result) *MockProvider {
+func NewMockProvider(result SettlementResult) *MockProvider {
 	if result.Status == "" {
-		result = Result{Status: StatusSucceeded}
+		result = SettlementResult{Status: StatusSucceeded}
 	}
-	return &MockProvider{Result: result, seen: make(map[string]Result)}
+	return &MockProvider{Result: result, seen: make(map[string]SettlementResult)}
 }
 
 func (*MockProvider) Name() string { return "mock" }
 
-func (p *MockProvider) Submit(_ context.Context, request Request) (Result, error) {
+func (p *MockProvider) Submit(_ context.Context, request SettlementRequest) (SettlementResult, error) {
 	if err := request.Validate(); err != nil {
-		return Result{}, err
+		return SettlementResult{}, err
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -90,7 +90,7 @@ func (p *MockProvider) Submit(_ context.Context, request Request) (Result, error
 		result.ProviderReference = "mock_" + request.IdempotencyKey
 	}
 	if err := result.Validate(); err != nil {
-		return Result{}, err
+		return SettlementResult{}, err
 	}
 	p.seen[request.IdempotencyKey] = result
 	return result, nil

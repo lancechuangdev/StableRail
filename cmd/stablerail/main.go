@@ -13,9 +13,11 @@ import (
 	"stablerail/consumer"
 	"stablerail/eventbus"
 	"stablerail/inbox"
+	"stablerail/ledger"
 	"stablerail/outbox"
 	"stablerail/paymentapi"
 	"stablerail/paymentcore"
+	"stablerail/policy"
 	"stablerail/postgresdb"
 	"stablerail/saga"
 	"stablerail/settlement"
@@ -70,9 +72,11 @@ func run() error {
 	}
 
 	commandLoop := &consumer.Loop{
-		Reader:    consumer.NewKafkaReader(config.KafkaBrokers, string(saga.CommandTopic), "stablerail-core-workers"),
-		Processor: consumer.InboxProcessor{Inbox: inboxProcessor, Handler: workers.NewCommandHandler(settlement.NewMockProvider(settlement.Result{})).Handle},
-		Consumer:  "core-workers",
+		Reader: consumer.NewKafkaReader(config.KafkaBrokers, string(saga.CommandTopic), "stablerail-core-workers"),
+		Processor: consumer.InboxProcessor{Inbox: inboxProcessor, Handler: workers.NewCommandHandler(
+			policy.DeterministicEvaluator{}, ledger.NewPostgresService(), settlement.NewMockProvider(settlement.SettlementResult{}),
+		).Handle},
+		Consumer: "core-workers",
 	}
 
 	handler, err := paymentapi.NewHandler(paymentcore.NewPostgresService(db), db)
