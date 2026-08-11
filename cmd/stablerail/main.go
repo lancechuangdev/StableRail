@@ -14,6 +14,7 @@ import (
 	"stablerail/eventbus"
 	"stablerail/inbox"
 	"stablerail/ledger"
+	"stablerail/notification"
 	"stablerail/outbox"
 	"stablerail/paymentapi"
 	"stablerail/paymentcore"
@@ -80,6 +81,16 @@ func run() error {
 		Consumer: "core-workers",
 	}
 
+	webhookDispatcher, err := notification.NewDispatcher(db, nil, notification.Config{})
+	if err != nil {
+		return err
+	}
+	webhookLoop := &consumer.Loop{
+		Reader:    consumer.NewKafkaReader(config.KafkaBrokers, string(paymentcore.PaymentEventsTopic), "stablerail-webhooks"),
+		Processor: inbox.BoundProcessor{Processor: inboxProcessor, Handler: notification.EventHandler()},
+		Consumer:  "payment-webhooks",
+	}
+
 	quoteRepo, err := quote.NewPostgresRepository(db)
 	if err != nil {
 		return err
@@ -109,6 +120,8 @@ func run() error {
 		saga.TimeoutWorker(coordinator, config.SagaPollInterval),
 		sagaLoop.Run,
 		commandLoop.Run,
+		webhookLoop.Run,
+		webhookDispatcher.Run,
 	)
 	if errors.Is(err, context.Canceled) {
 		return nil

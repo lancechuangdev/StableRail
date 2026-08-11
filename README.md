@@ -453,7 +453,7 @@ The initial chart of accounts defines operating cash as an asset and settlement 
 
 ### Phase 5: operations and recovery
 
-13. **Notifications and external webhooks — planned**
+13. **Notifications and external webhooks — complete**
    - Publish customer-facing payment status updates
    - Sign webhook deliveries and retry transient failures
    - Provide delivery history, idempotency, and operator redrive controls
@@ -474,6 +474,21 @@ The initial chart of accounts defines operating cash as an asset and settlement 
    - Add chain submission and confirmation tracking only where the chosen settlement rail requires it
 
 Each step will be implemented and verified independently before work begins on the next one.
+
+### Webhook delivery
+
+Active rows in `webhook_endpoints` subscribe a customer to payment status updates. The
+webhook consumer transactionally creates one delivery per endpoint and event; a
+uniqueness constraint makes Kafka replay harmless. The dispatcher sends the stored
+JSON body with `X-StableRail-Delivery`, `X-StableRail-Timestamp`, and
+`X-StableRail-Signature` headers. The signature is lowercase hexadecimal
+`HMAC-SHA256(secret, timestamp + "." + raw_body)`, prefixed with `v1=`.
+
+Non-2xx responses and transport errors use bounded exponential retry. Exhausted
+deliveries remain in `webhook_deliveries` with status `failed`, their attempt and
+response history, and can be explicitly made pending again through
+`notification.Dispatcher.Redrive`. Endpoint secrets are never included in delivery
+payloads or history.
 
 ## Running the application
 

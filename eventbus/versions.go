@@ -6,6 +6,7 @@ const (
 	PaymentCreatedVersion      = 1
 	PaymentProcessingVersion   = 1
 	PaymentSettledVersion      = 1
+	PaymentFailedVersion       = 1
 	PolicyEvaluateVersion      = 1
 	LedgerReserveVersion       = 1
 	SettlementExecuteVersion   = 1
