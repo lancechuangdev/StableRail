@@ -2,7 +2,7 @@
 
 A Go reference implementation of a durable, event-driven payment workflow. The current application exposes an HTTP API, stores payment and ledger state in PostgreSQL, publishes through a transactional outbox, consumes Kafka events with a transactional inbox, and coordinates policy, ledger, and settlement steps with a persisted saga.
 
-Policy approval and settlement are deterministic local workers in the current phase. Real provider integrations, quotes, notifications, reconciliation, and blockchain adapters remain roadmap items.
+Policy approval and settlement use deterministic local implementations in the current phase. A provider boundary and idempotent mock provider are implemented; real provider integrations, quotes, notifications, reconciliation, and blockchain adapters remain roadmap items.
 
 ## Current capabilities
 
@@ -439,7 +439,7 @@ The initial chart of accounts defines operating cash as an asset and settlement 
 
 ### Phase 4: payment capabilities
 
-11. **Settlement provider boundary — planned**
+11. **Settlement provider boundary — complete**
    - Define provider request, response, status, and error contracts
    - Implement a deterministic mock provider for local and integration testing
    - Consume settlement commands and correlate asynchronous provider results with the payment saga

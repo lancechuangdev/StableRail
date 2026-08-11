@@ -18,6 +18,7 @@ import (
 	"stablerail/paymentcore"
 	"stablerail/postgresdb"
 	"stablerail/saga"
+	"stablerail/settlement"
 	"stablerail/workers"
 )
 
@@ -70,7 +71,7 @@ func run() error {
 
 	commandLoop := &consumer.Loop{
 		Reader:    consumer.NewKafkaReader(config.KafkaBrokers, string(saga.CommandTopic), "stablerail-core-workers"),
-		Processor: consumer.InboxProcessor{Inbox: inboxProcessor, Handler: workers.NewCommandHandler().Handle},
+		Processor: consumer.InboxProcessor{Inbox: inboxProcessor, Handler: workers.NewCommandHandler(settlement.NewMockProvider(settlement.Result{})).Handle},
 		Consumer:  "core-workers",
 	}
 
