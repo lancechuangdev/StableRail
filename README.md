@@ -492,6 +492,21 @@ For an on-chain address, the adapter first creates a Circle address-book recipie
 then submits the payout. Circle API credentials are only read from environment
 configuration and are never stored in payment or webhook records.
 
+### Circle payout notifications
+
+Circle Mint payout notifications use an AWS SNS subscription, not the generic
+Circle v2 notification API. Register StableRail's public HTTPS endpoint through
+`POST /v1/notifications/subscriptions`; Circle's subscription response includes an
+AWS SNS subscription ARN. The receiver must verify each SNS signature using the
+trusted AWS signing certificate, restrict accepted signing-certificate URLs and
+topic ARNs, and handle `SubscriptionConfirmation` by visiting its verified
+`SubscribeURL`.
+
+For payout notifications, deduplicate the SNS `MessageId`, then correlate
+`payout.id` to `settlement_submissions.provider_reference`. A `complete` payout
+settles the payment and a `failed` payout starts failure handling. Circle's
+documented payout statuses are `pending`, `complete`, and `failed`.
+
 ### Reconciliation and observability
 
 The reconciliation worker periodically compares debit and credit totals for every
