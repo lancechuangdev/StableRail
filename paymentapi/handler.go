@@ -20,6 +20,9 @@ type PaymentStore interface {
 	GetPayment(context.Context, string) (*paymentcore.Payment, error)
 	Timeline(context.Context, string) ([]paymentcore.TimelineEntry, error)
 }
+type DestinationPaymentStore interface {
+	CreatePaymentWithDestination(context.Context, string, string, int64, string, string, string, paymentcore.Destination) (*paymentcore.Payment, error)
+}
 
 type QuoteService interface {
 	Create(context.Context, string, string, int64) (*quote.Quote, error)
@@ -51,11 +54,12 @@ func NewHandler(payments PaymentStore, quotes QuoteService, health Health) (http
 }
 
 type createRequest struct {
-	ExternalReference string `json:"external_reference"`
-	Currency          string `json:"currency"`
-	AmountMinor       int64  `json:"amount_minor"`
-	CustomerID        string `json:"customer_id"`
-	QuoteID           string `json:"quote_id,omitempty"`
+	ExternalReference string                   `json:"external_reference"`
+	Currency          string                   `json:"currency"`
+	AmountMinor       int64                    `json:"amount_minor"`
+	CustomerID        string                   `json:"customer_id"`
+	QuoteID           string                   `json:"quote_id,omitempty"`
+	Destination       *paymentcore.Destination `json:"destination,omitempty"`
 }
 
 func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
@@ -81,9 +85,22 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 		problem(w, http.StatusBadRequest, "external_reference, three-letter currency, positive amount_minor, and customer_id are required")
 		return
 	}
+	if input.Destination != nil {
+		if err := input.Destination.Validate(); err != nil {
+			problem(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
 	var p *paymentcore.Payment
 	var err error
-	if input.QuoteID != "" {
+	if input.Destination != nil {
+		store, ok := h.payments.(DestinationPaymentStore)
+		if !ok {
+			problem(w, http.StatusBadRequest, "payment destinations are not supported")
+			return
+		}
+		p, err = store.CreatePaymentWithDestination(r.Context(), input.ExternalReference, input.Currency, input.AmountMinor, input.CustomerID, key, input.QuoteID, *input.Destination)
+	} else if input.QuoteID != "" {
 		p, err = h.payments.CreatePaymentWithQuote(r.Context(), input.ExternalReference, input.Currency, input.AmountMinor, input.CustomerID, key, input.QuoteID)
 	} else {
 		p, err = h.payments.CreatePayment(r.Context(), input.ExternalReference, input.Currency, input.AmountMinor, input.CustomerID, key)

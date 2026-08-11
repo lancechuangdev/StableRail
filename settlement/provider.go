@@ -8,6 +8,13 @@ import (
 	"sync"
 )
 
+type ProviderError struct {
+	Message   string
+	Retryable bool
+}
+
+func (e *ProviderError) Error() string { return e.Message }
+
 type Status string
 
 const (
@@ -21,7 +28,10 @@ type SettlementRequest struct {
 	PaymentID      string
 	AmountMinor    int64
 	Currency       string
+	Destination    *Destination
 }
+
+type Destination struct{ Type, RecipientID, Chain, Address string }
 
 type SettlementResult struct {
 	ProviderReference string

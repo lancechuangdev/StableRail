@@ -461,19 +461,36 @@ The initial chart of accounts defines operating cash as an asset and settlement 
    - Compare internal ledger, provider, and settlement records
    - Record discrepancies and support operator resolution workflows
    - Add structured logs, metrics, traces, and alerts across the payment path
-15. **Event replay CLI — planned**
+15. **Event replay CLI — deferred**
    - Select events by topic, type, aggregate, and time range
    - Replay into a separate destination topic by default
    - Support dry runs, checkpoints, rate limits, and resumable execution
 
 ### Phase 6: production settlement rails
 
-16. **Production provider and blockchain adapters — planned**
+16. **Production provider and blockchain adapters — in progress**
    - Implement one real provider behind the settlement boundary
    - Manage credentials, rate limits, webhooks, and provider-specific failure mapping
    - Add chain submission and confirmation tracking only where the chosen settlement rail requires it
 
 Each step will be implemented and verified independently before work begins on the next one.
+
+### Circle settlement destinations
+
+Step 15 is intentionally deferred. Circle Mint is selected as the first production
+provider because it is already represented in the target architecture. The current
+implementation covers credential configuration, idempotent payout submission, and
+provider-specific retryability mapping; inbound Circle webhook verification and
+account-specific rate-limit policy remain to be configured. Set
+`STABLERAIL_SETTLEMENT_PROVIDER=circle` and provide `STABLERAIL_CIRCLE_API_KEY`
+to enable it; `STABLERAIL_CIRCLE_BASE_URL` selects the API host (including a sandbox).
+The default remains the deterministic `mock` provider.
+
+Payments can bind one immutable destination: `circle_recipient` with a Circle
+address-book `recipient_id`, or `blockchain_address` with a `chain` and `address`.
+For an on-chain address, the adapter first creates a Circle address-book recipient,
+then submits the payout. Circle API credentials are only read from environment
+configuration and are never stored in payment or webhook records.
 
 ### Reconciliation and observability
 

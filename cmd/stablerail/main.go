@@ -78,12 +78,17 @@ func run() error {
 		Consumer:  "payment-saga",
 	}
 
+	var settlementProvider settlement.SettlementProvider = settlement.NewMockProvider(settlement.SettlementResult{})
+	if config.SettlementProvider == "circle" {
+		settlementProvider, err = settlement.NewCircleProvider(settlement.CircleConfig{APIKey: config.CircleAPIKey, BaseURL: config.CircleBaseURL})
+		if err != nil {
+			return err
+		}
+	}
 	commandLoop := &consumer.Loop{
-		Reader: consumer.NewKafkaReader(config.KafkaBrokers, string(saga.CommandTopic), "stablerail-core-workers"),
-		Processor: inbox.BoundProcessor{Processor: inboxProcessor, Handler: workers.NewCommandHandler(
-			policy.DeterministicEvaluator{}, ledger.NewPostgresService(), settlement.NewMockProvider(settlement.SettlementResult{}),
-		).Handle},
-		Consumer: "core-workers",
+		Reader:    consumer.NewKafkaReader(config.KafkaBrokers, string(saga.CommandTopic), "stablerail-core-workers"),
+		Processor: inbox.BoundProcessor{Processor: inboxProcessor, Handler: workers.NewCommandHandler(policy.DeterministicEvaluator{}, ledger.NewPostgresService(), settlementProvider).Handle},
+		Consumer:  "core-workers",
 	}
 
 	webhookDispatcher, err := notification.NewDispatcher(db, nil, notification.Config{})

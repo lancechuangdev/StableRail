@@ -43,7 +43,7 @@ func (s *PostgresService) CreatePayment(
 	amountMinor int64,
 	customerID, idempotencyKey string,
 ) (*Payment, error) {
-	return s.createPayment(ctx, externalRef, currency, amountMinor, customerID, idempotencyKey, "")
+	return s.createPayment(ctx, externalRef, currency, amountMinor, customerID, idempotencyKey, "", nil)
 }
 
 // CreatePaymentWithQuote atomically accepts an unexpired quote and binds its immutable price to the payment.
@@ -51,11 +51,18 @@ func (s *PostgresService) CreatePaymentWithQuote(ctx context.Context, externalRe
 	if quoteID == "" {
 		return nil, errors.New("quote ID is required")
 	}
-	return s.createPayment(ctx, externalRef, currency, amountMinor, customerID, idempotencyKey, quoteID)
+	return s.createPayment(ctx, externalRef, currency, amountMinor, customerID, idempotencyKey, quoteID, nil)
+}
+
+func (s *PostgresService) CreatePaymentWithDestination(ctx context.Context, externalRef, currency string, amountMinor int64, customerID, idempotencyKey, quoteID string, destination Destination) (*Payment, error) {
+	if err := destination.Validate(); err != nil {
+		return nil, err
+	}
+	return s.createPayment(ctx, externalRef, currency, amountMinor, customerID, idempotencyKey, quoteID, &destination)
 }
 
 func (s *PostgresService) createPayment(
-	ctx context.Context, externalRef, currency string, amountMinor int64, customerID, idempotencyKey, quoteID string,
+	ctx context.Context, externalRef, currency string, amountMinor int64, customerID, idempotencyKey, quoteID string, destination *Destination,
 ) (*Payment, error) {
 	if externalRef == "" || currency == "" || amountMinor <= 0 || customerID == "" || idempotencyKey == "" {
 		return nil, errors.New("invalid payment payload")
@@ -76,6 +83,7 @@ func (s *PostgresService) createPayment(
 		ID: paymentID, ExternalReference: externalRef, Currency: currency,
 		AmountMinor: amountMinor, CustomerID: customerID, State: StateCreated,
 		IdempotencyKey: idempotencyKey, QuoteID: quoteID, CreatedAt: now, UpdatedAt: now,
+		Destination: destination,
 	}
 
 	if quoteID != "" {
@@ -114,7 +122,6 @@ func (s *PostgresService) createPayment(
 			return nil, errors.New("payment amount and currency do not match quote")
 		}
 	}
-
 	result, err := tx.ExecContext(ctx, `
 		INSERT INTO payments
 			(id, external_reference, currency, amount_minor, customer_id, state,
@@ -140,6 +147,11 @@ func (s *PostgresService) createPayment(
 			return nil, fmt.Errorf("commit idempotent payment lookup: %w", err)
 		}
 		return existing, nil
+	}
+	if destination != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO payment_destinations(payment_id,kind,recipient_id,chain,address,created_at) VALUES($1,$2,NULLIF($3,''),NULLIF($4,''),NULLIF($5,''),$6)`, payment.ID, destination.Type, destination.RecipientID, destination.Chain, destination.Address, now); err != nil {
+			return nil, fmt.Errorf("insert payment destination: %w", err)
+		}
 	}
 	if quoteID != "" {
 		result, err := tx.ExecContext(ctx, `UPDATE quotes SET status = 'accepted' WHERE id = $1 AND status = 'open'`, quoteID)
@@ -194,6 +206,13 @@ func (s *PostgresService) GetPayment(ctx context.Context, paymentID string) (*Pa
 			&p.State, &p.IdempotencyKey, &p.QuoteID, &p.CreatedAt, &p.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("%w: %s", ErrPaymentNotFound, paymentID)
+	}
+	var destination Destination
+	err = s.db.QueryRowContext(ctx, `SELECT kind,COALESCE(recipient_id,''),COALESCE(chain,''),COALESCE(address,'') FROM payment_destinations WHERE payment_id=$1`, paymentID).Scan(&destination.Type, &destination.RecipientID, &destination.Chain, &destination.Address)
+	if err == nil {
+		p.Destination = &destination
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("get payment destination: %w", err)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get payment: %w", err)

@@ -82,8 +82,16 @@ func (h *CommandHandler) Handle(ctx context.Context, tx *sql.Tx, event eventbus.
 		if err != nil {
 			return err
 		}
-		result, err := h.settlementProvider.Submit(ctx, settlement.SettlementRequest{IdempotencyKey: event.ID, PaymentID: payload.PaymentID, AmountMinor: amount, Currency: currency})
+		destination, err := loadDestination(ctx, tx, payload.PaymentID)
 		if err != nil {
+			return err
+		}
+		result, err := h.settlementProvider.Submit(ctx, settlement.SettlementRequest{IdempotencyKey: event.ID, PaymentID: payload.PaymentID, AmountMinor: amount, Currency: currency, Destination: destination})
+		if err != nil {
+			var providerErr *settlement.ProviderError
+			if errors.As(err, &providerErr) && !providerErr.Retryable {
+				return consumer.Permanent(err)
+			}
 			return fmt.Errorf("submit settlement: %w", err)
 		}
 		now := h.now()
@@ -142,6 +150,18 @@ func loadPaymentAmount(ctx context.Context, tx *sql.Tx, paymentID string) (int64
 		return 0, "", fmt.Errorf("load payment: %w", err)
 	}
 	return amount, currency, nil
+}
+
+func loadDestination(ctx context.Context, tx *sql.Tx, paymentID string) (*settlement.Destination, error) {
+	var d settlement.Destination
+	err := tx.QueryRowContext(ctx, `SELECT kind,COALESCE(recipient_id,''),COALESCE(chain,''),COALESCE(address,'') FROM payment_destinations WHERE payment_id=$1`, paymentID).Scan(&d.Type, &d.RecipientID, &d.Chain, &d.Address)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("load payment destination: %w", err)
+	}
+	return &d, nil
 }
 
 func transitionPayment(ctx context.Context, tx *sql.Tx, id string, from, to paymentcore.PaymentState, now time.Time) error {
