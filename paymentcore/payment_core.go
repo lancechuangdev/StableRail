@@ -33,6 +33,7 @@ type Payment struct {
 	CreatedAt         time.Time       `json:"created_at"`
 	UpdatedAt         time.Time       `json:"updated_at"`
 	IdempotencyKey    string          `json:"-"`
+	QuoteID           string          `json:"quote_id,omitempty"`
 }
 
 type AccountType string

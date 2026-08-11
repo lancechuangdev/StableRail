@@ -2,7 +2,7 @@
 
 A Go reference implementation of a durable, event-driven payment workflow. The current application exposes an HTTP API, stores payment and ledger state in PostgreSQL, publishes through a transactional outbox, consumes Kafka events with a transactional inbox, and coordinates policy, ledger, and settlement steps with a persisted saga.
 
-Policy approval and settlement use deterministic local implementations in the current phase. A provider boundary and idempotent mock provider are implemented; real provider integrations, quotes, notifications, reconciliation, and blockchain adapters remain roadmap items.
+Policy approval and settlement use deterministic local implementations in the current phase. A provider boundary, idempotent mock provider, and immutable expiring FX quotes are implemented; real provider integrations, notifications, reconciliation, and blockchain adapters remain roadmap items.
 
 ## Current capabilities
 
@@ -15,6 +15,7 @@ Policy approval and settlement use deterministic local implementations in the cu
 - Persisted payment saga with timeouts and compensating commands
 - Injected policy evaluator, transactional ledger service, and settlement provider boundaries
 - Versioned event payloads and consumer upcasting support
+- Provider-priced, fixed-point FX quotes with expiration and atomic payment binding
 - One runnable process with health checks and graceful shutdown
 
 ## Target architecture
@@ -445,7 +446,7 @@ The initial chart of accounts defines operating cash as an asset and settlement 
    - Implement a deterministic mock provider for local and integration testing
    - Consume settlement commands and correlate asynchronous provider results with the payment saga
    - Make provider submission and webhook handling idempotent
-12. **Quote and FX lifecycle — planned**
+12. **Quote and FX lifecycle — complete**
    - Create expiring quotes with source amount, destination amount, rate, and fees
    - Bind accepted quotes to payments so execution uses immutable pricing
    - Add precision, rounding, expiration, and concurrency tests
@@ -529,12 +530,16 @@ The API listens on `:8080` by default. `STABLERAIL_HTTP_ADDRESS`, `STABLERAIL_SH
 | Endpoint | Purpose |
 | --- | --- |
 | `POST /v1/payments` | Create a payment; requires `Idempotency-Key` |
+| `POST /v1/quotes` | Request an authoritative, expiring FX quote for a currency pair and source amount |
+| `GET /v1/quotes/{id}` | Read a quote and its current lifecycle status |
 | `GET /v1/payments/{id}` | Read the current payment snapshot |
 | `GET /v1/payments/{id}/timeline` | Read ordered lifecycle history |
 | `GET /healthz` | Check whether the process is running |
 | `GET /readyz` | Check whether PostgreSQL is reachable |
 
 Repeating a request with the same idempotency key returns the original payment. The current implementation does not yet compare the repeated request body with the original body; clients must not reuse a key for a different operation.
+
+Quote callers provide only `source_currency`, `destination_currency`, and `source_amount_minor`. The configured pricing provider determines the rate, fee, and validity period; client-supplied pricing fields are rejected. `quote.Service` coordinates pricing and calculation, while `quote.PostgresRepository` only persists immutable snapshots. The runtime currently injects a deterministic provider for local development.
 
 ### 5. Create and inspect a payment
 

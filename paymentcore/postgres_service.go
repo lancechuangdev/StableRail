@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"stablerail/eventbus"
+	"stablerail/quote"
 )
 
 const PaymentEventsTopic eventbus.Topic = "payment-events"
@@ -42,6 +43,20 @@ func (s *PostgresService) CreatePayment(
 	amountMinor int64,
 	customerID, idempotencyKey string,
 ) (*Payment, error) {
+	return s.createPayment(ctx, externalRef, currency, amountMinor, customerID, idempotencyKey, "")
+}
+
+// CreatePaymentWithQuote atomically accepts an unexpired quote and binds its immutable price to the payment.
+func (s *PostgresService) CreatePaymentWithQuote(ctx context.Context, externalRef, currency string, amountMinor int64, customerID, idempotencyKey, quoteID string) (*Payment, error) {
+	if quoteID == "" {
+		return nil, errors.New("quote ID is required")
+	}
+	return s.createPayment(ctx, externalRef, currency, amountMinor, customerID, idempotencyKey, quoteID)
+}
+
+func (s *PostgresService) createPayment(
+	ctx context.Context, externalRef, currency string, amountMinor int64, customerID, idempotencyKey, quoteID string,
+) (*Payment, error) {
 	if externalRef == "" || currency == "" || amountMinor <= 0 || customerID == "" || idempotencyKey == "" {
 		return nil, errors.New("invalid payment payload")
 	}
@@ -60,17 +75,54 @@ func (s *PostgresService) CreatePayment(
 	payment := &Payment{
 		ID: paymentID, ExternalReference: externalRef, Currency: currency,
 		AmountMinor: amountMinor, CustomerID: customerID, State: StateCreated,
-		IdempotencyKey: idempotencyKey, CreatedAt: now, UpdatedAt: now,
+		IdempotencyKey: idempotencyKey, QuoteID: quoteID, CreatedAt: now, UpdatedAt: now,
+	}
+
+	if quoteID != "" {
+		var sourceCurrency string
+		var sourceAmount int64
+		var status quote.Status
+		var expiresAt time.Time
+		err := tx.QueryRowContext(ctx, `SELECT source_currency, source_amount_minor, status, expires_at FROM quotes WHERE id = $1 FOR UPDATE`, quoteID).
+			Scan(&sourceCurrency, &sourceAmount, &status, &expiresAt)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, quote.ErrNotFound
+		}
+		if err != nil {
+			return nil, fmt.Errorf("lock quote: %w", err)
+		}
+		if status == quote.StatusAccepted {
+			existing, lookupErr := getPaymentByIdempotencyKey(ctx, tx, idempotencyKey)
+			if lookupErr == nil && existing.QuoteID == quoteID {
+				if err := tx.Commit(); err != nil {
+					return nil, fmt.Errorf("commit idempotent quoted payment lookup: %w", err)
+				}
+				return existing, nil
+			}
+			return nil, quote.ErrAccepted
+		}
+		if status != quote.StatusOpen || !expiresAt.After(now) {
+			if _, updateErr := tx.ExecContext(ctx, `UPDATE quotes SET status = 'expired' WHERE id = $1 AND status = 'open'`, quoteID); updateErr != nil {
+				return nil, fmt.Errorf("expire quote: %w", updateErr)
+			}
+			if err := tx.Commit(); err != nil {
+				return nil, fmt.Errorf("commit quote expiration: %w", err)
+			}
+			return nil, quote.ErrExpired
+		}
+		if sourceCurrency != currency || sourceAmount != amountMinor {
+			return nil, errors.New("payment amount and currency do not match quote")
+		}
 	}
 
 	result, err := tx.ExecContext(ctx, `
 		INSERT INTO payments
 			(id, external_reference, currency, amount_minor, customer_id, state,
-			 idempotency_key, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)
+			 idempotency_key, quote_id, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, NULLIF($8, ''), $9, $9)
 		ON CONFLICT (idempotency_key) DO NOTHING`,
 		payment.ID, payment.ExternalReference, payment.Currency, payment.AmountMinor,
-		payment.CustomerID, payment.State, payment.IdempotencyKey, now,
+		payment.CustomerID, payment.State, payment.IdempotencyKey, payment.QuoteID, now,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert payment: %w", err)
@@ -88,6 +140,16 @@ func (s *PostgresService) CreatePayment(
 			return nil, fmt.Errorf("commit idempotent payment lookup: %w", err)
 		}
 		return existing, nil
+	}
+	if quoteID != "" {
+		result, err := tx.ExecContext(ctx, `UPDATE quotes SET status = 'accepted' WHERE id = $1 AND status = 'open'`, quoteID)
+		if err != nil {
+			return nil, fmt.Errorf("accept quote: %w", err)
+		}
+		rows, err := result.RowsAffected()
+		if err != nil || rows != 1 {
+			return nil, quote.ErrAccepted
+		}
 	}
 
 	if err := insertHistory(ctx, tx, payment.ID, "created", "payment intent created", StateCreated, "payment created", now); err != nil {
@@ -127,9 +189,9 @@ func (s *PostgresService) Settle(ctx context.Context, paymentID string) error {
 func (s *PostgresService) GetPayment(ctx context.Context, paymentID string) (*Payment, error) {
 	p := &Payment{}
 	err := s.db.QueryRowContext(ctx, `SELECT id, external_reference, currency, amount_minor,
-		customer_id, state, idempotency_key, created_at, updated_at FROM payments WHERE id = $1`, paymentID).
+		customer_id, state, idempotency_key, COALESCE(quote_id, ''), created_at, updated_at FROM payments WHERE id = $1`, paymentID).
 		Scan(&p.ID, &p.ExternalReference, &p.Currency, &p.AmountMinor, &p.CustomerID,
-			&p.State, &p.IdempotencyKey, &p.CreatedAt, &p.UpdatedAt)
+			&p.State, &p.IdempotencyKey, &p.QuoteID, &p.CreatedAt, &p.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("%w: %s", ErrPaymentNotFound, paymentID)
 	}
@@ -322,11 +384,11 @@ func getPaymentByIdempotencyKey(ctx context.Context, tx *sql.Tx, key string) (*P
 	payment := &Payment{}
 	err := tx.QueryRowContext(ctx, `
 		SELECT id, external_reference, currency, amount_minor, customer_id, state,
-		       idempotency_key, created_at, updated_at
+		       idempotency_key, COALESCE(quote_id, ''), created_at, updated_at
 		FROM payments WHERE idempotency_key = $1`, key,
 	).Scan(
 		&payment.ID, &payment.ExternalReference, &payment.Currency, &payment.AmountMinor,
-		&payment.CustomerID, &payment.State, &payment.IdempotencyKey,
+		&payment.CustomerID, &payment.State, &payment.IdempotencyKey, &payment.QuoteID,
 		&payment.CreatedAt, &payment.UpdatedAt,
 	)
 	if err != nil {
