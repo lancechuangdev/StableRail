@@ -8,9 +8,9 @@ import (
 )
 
 type Config struct {
-	HTTPAddress, DatabaseURL, SettlementProvider, CircleAPIKey, CircleBaseURL string
-	KafkaBrokers                                                              []string
-	ShutdownTimeout, SagaPollInterval, ReconciliationInterval                 time.Duration
+	HTTPAddress, DatabaseURL, SettlementProvider, CircleAPIKey, CircleBaseURL, CircleSNSTopicARN string
+	KafkaBrokers                                                                                 []string
+	ShutdownTimeout, SagaPollInterval, ReconciliationInterval                                    time.Duration
 }
 
 func ConfigFromEnv() (Config, error) {
@@ -20,6 +20,7 @@ func ConfigFromEnv() (Config, error) {
 		SettlementProvider:     env("STABLERAIL_SETTLEMENT_PROVIDER", "mock"),
 		CircleAPIKey:           os.Getenv("STABLERAIL_CIRCLE_API_KEY"),
 		CircleBaseURL:          env("STABLERAIL_CIRCLE_BASE_URL", "https://api.circle.com"),
+		CircleSNSTopicARN:      os.Getenv("STABLERAIL_CIRCLE_SNS_TOPIC_ARN"),
 		KafkaBrokers:           strings.Split(env("STABLERAIL_KAFKA_BROKERS", "localhost:9092"), ","),
 		ShutdownTimeout:        10 * time.Second,
 		SagaPollInterval:       time.Second,
@@ -33,6 +34,9 @@ func ConfigFromEnv() (Config, error) {
 	}
 	if c.SettlementProvider == "circle" && c.CircleAPIKey == "" {
 		return Config{}, errors.New("STABLERAIL_CIRCLE_API_KEY is required for Circle settlement")
+	}
+	if c.SettlementProvider == "circle" && c.CircleSNSTopicARN == "" {
+		return Config{}, errors.New("STABLERAIL_CIRCLE_SNS_TOPIC_ARN is required for Circle settlement")
 	}
 	if raw := os.Getenv("STABLERAIL_SHUTDOWN_TIMEOUT"); raw != "" {
 		d, err := time.ParseDuration(raw)

@@ -507,6 +507,21 @@ For payout notifications, deduplicate the SNS `MessageId`, then correlate
 settles the payment and a `failed` payout starts failure handling. Circle's
 documented payout statuses are `pending`, `complete`, and `failed`.
 
+To enable notifications, expose `POST /v1/providers/circle/notifications` at a
+public HTTPS URL, start StableRail with `STABLERAIL_CIRCLE_SNS_TOPIC_ARN` set to
+the expected ARN, then create the Circle subscription with:
+
+```bash
+curl -X POST https://api-sandbox.circle.com/v1/notifications/subscriptions \
+  -H "Authorization: Bearer $STABLERAIL_CIRCLE_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"endpoint":"https://YOUR_HOST/v1/providers/circle/notifications"}'
+```
+
+Circle delivers an AWS SNS `SubscriptionConfirmation` first. StableRail verifies
+the SNS signature and confirms it automatically. Copy the Circle-provided SNS
+topic ARN into `STABLERAIL_CIRCLE_SNS_TOPIC_ARN` before exposing the receiver.
+
 ### Reconciliation and observability
 
 The reconciliation worker periodically compares debit and credit totals for every

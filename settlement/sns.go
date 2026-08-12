@@ -42,7 +42,7 @@ func (m SNSMessage) Verify(ctx context.Context, client *http.Client, topicARN st
 		return errors.New("unexpected SNS topic ARN")
 	}
 	u, err := url.Parse(m.SigningCertURL)
-	if err != nil || u.Scheme != "https" || !strings.HasSuffix(u.Host, ".amazonaws.com") {
+	if err != nil || !trustedSNSURL(u) {
 		return errors.New("untrusted SNS signing certificate URL")
 	}
 	if client == nil {
@@ -110,7 +110,7 @@ func DecodeSNS(raw []byte) (SNSMessage, error) {
 }
 func ConfirmSNS(ctx context.Context, client *http.Client, subscribeURL string) error {
 	u, err := url.Parse(subscribeURL)
-	if err != nil || u.Scheme != "https" || !strings.HasSuffix(u.Host, ".amazonaws.com") {
+	if err != nil || !trustedSNSURL(u) {
 		return errors.New("untrusted SNS subscribe URL")
 	}
 	if client == nil {
@@ -129,4 +129,8 @@ func ConfirmSNS(ctx context.Context, client *http.Client, subscribeURL string) e
 		return fmt.Errorf("confirm SNS subscription: %s", res.Status)
 	}
 	return nil
+}
+
+func trustedSNSURL(u *url.URL) bool {
+	return u.Scheme == "https" && (strings.HasPrefix(u.Host, "sns.") || strings.HasPrefix(u.Host, "sns-fips.")) && strings.HasSuffix(u.Host, ".amazonaws.com")
 }
