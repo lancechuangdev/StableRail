@@ -2,7 +2,7 @@
 
 A Go reference implementation of a durable, event-driven payment workflow. The current application exposes an HTTP API, stores payment and ledger state in PostgreSQL, publishes through a transactional outbox, consumes Kafka events with a transactional inbox, and coordinates policy, ledger, and settlement steps with a persisted saga.
 
-Policy approval and settlement use deterministic local implementations in the current phase. A provider boundary, idempotent mock provider, and immutable expiring FX quotes are implemented; real provider integrations, notifications, reconciliation, and blockchain adapters remain roadmap items.
+Policy approval and settlement use deterministic local implementations in the current phase. A provider boundary and idempotent mock provider are implemented; real provider integrations and blockchain adapters remain roadmap items.
 
 ## Current capabilities
 
@@ -15,7 +15,6 @@ Policy approval and settlement use deterministic local implementations in the cu
 - Persisted payment saga with timeouts and compensating commands
 - Injected policy evaluator, transactional ledger service, and settlement provider boundaries
 - Versioned event payloads and consumer upcasting support
-- Provider-priced, fixed-point FX quotes with expiration and atomic payment binding
 - One runnable process with health checks and graceful shutdown
 
 ## Target architecture
@@ -32,7 +31,7 @@ The following is the broader roadmap, not a claim that every component is implem
                 Kafka Event Bus (or NATS later)
           ┌────────────┬──────────────┬────────────┐
           │            │              │            │
-    Quote Engine   Policy Engine   Settlement   Notification
+                   Policy Engine   Settlement   Notification
                                        │
                         Provider Adapter Interface
                               │
@@ -441,10 +440,10 @@ The initial chart of accounts defines operating cash as an asset and settlement 
    - Implement a deterministic mock provider for local and integration testing
    - Consume settlement commands and correlate asynchronous provider results with the payment saga
    - Make provider submission and webhook handling idempotent
-12. **Quote and FX lifecycle — complete**
-   - Create expiring quotes with source amount, destination amount, rate, and fees
-   - Bind accepted quotes to payments so execution uses immutable pricing
-   - Add precision, rounding, expiration, and concurrency tests
+12. **Provider-bound quote and FX lifecycle — planned**
+   - Create BlindPay payout quotes with exact amounts, rates, fees, and expiration
+   - Bind each provider quote to one payment and payout execution
+   - Add precision, expiration, idempotency, and concurrency tests
 
 ### Phase 5: operations and recovery
 
@@ -469,6 +468,114 @@ The initial chart of accounts defines operating cash as an asset and settlement 
    - Add chain submission and confirmation tracking only where the chosen settlement rail requires it
 
 Each step will be implemented and verified independently before work begins on the next one.
+
+### Recommended BlindPay architecture
+
+BlindPay is the planned first production payout rail. StableRail will use a
+self-custodied external EVM wallet as the funding source; it will not depend on a
+BlindPay-managed wallet. Although BlindPay describes its payment processor as
+non-custodial, managed wallets do not give the customer direct access to their
+private keys and may be maintained by a payment vendor or partner. Keeping signing
+outside the provider adapter preserves explicit control over treasury funds.
+
+BlindPay's payout quote is the authoritative transactional FX quote. It binds the
+recipient bank account, funding network and token, requested amount side, fee policy,
+exact sender and receiver amounts, provider quote ID, and five-minute expiration.
+StableRail must persist those returned values without recalculating them locally. The
+StableRail does not currently expose a generic quote service; BlindPay quote support
+will be introduced with the payout integration.
+
+```text
+BlindPay customer + approved bank account
+                    │
+                    ▼
+          BlindPay payout quote
+      (exact amounts, rate, fees, expiry)
+                    │
+                    ▼
+             StableRail payment
+                    │
+          policy + ledger reservation
+                    │
+                    ▼
+        awaiting wallet authorization
+      (approve only the exact quoted amount)
+                    │
+                    ▼
+          BlindPay payout submission
+                    │
+          processing / on_hold
+                    │
+                    ▼
+     verified webhook + reconciliation
+          │             │             │
+      completed       failed       refunded
+```
+
+The payout workflow must represent `processing`, `on_hold`, `completed`, `failed`,
+and `refunded` separately. `on_hold` is not a transient API failure and must use a
+compliance-oriented deadline instead of the normal settlement timeout. `refunded`
+is distinct from `failed` because funds were captured and returned. A failed or
+stalled payout must be reconciled before StableRail assumes that source funds are
+available again.
+
+Provider calls must not occur inside the database transaction that records their
+result. StableRail first commits a durable submission attempt, performs the remote
+call, and then records the BlindPay payout ID and response. An ambiguous response is
+resolved through provider lookup or reconciliation rather than blind resubmission;
+each BlindPay quote is single-use.
+
+#### BlindPay integration steps
+
+1. **Provider client and configuration**
+   - Add instance-scoped API key, instance ID, base URL, webhook secret, network,
+     token, and treasury-wallet address configuration.
+   - Implement bounded HTTP timeouts, stable error classification, request
+     idempotency where supported, and contract tests against a fake server.
+2. **Customer and payout destination references**
+   - Store opaque BlindPay customer (`re_...`) and bank-account (`ba_...`) IDs plus
+     display-safe metadata; do not copy full bank credentials into StableRail.
+   - Require approved KYC/KYB and an approved bank account before creating a payout
+     quote.
+3. **Provider-bound payout quotes**
+   - Add a payout quote interface containing bank account, amount side, network,
+     token, `cover_fees`, and optional partner-fee reference.
+   - Persist BlindPay's quote ID, exact sender/receiver amounts, commercial and net
+     rates, fee components, expiration, authorization payload, and immutable raw
+     response. Decode rates without binary floating-point arithmetic.
+4. **Self-custodied wallet authorization**
+   - Add an `awaiting_authorization` saga state and return the EVM token contract,
+     spender, exact amount, chain ID, and expiration to a separate signing service.
+   - Validate token, chain, and spender against allowlists; never store treasury
+     private keys in StableRail, never grant unlimited allowance, and confirm the
+     approval transaction before payout submission.
+5. **Durable payout submission**
+   - Commit a unique submission attempt keyed by payment and provider quote before
+     calling BlindPay, then submit the quote ID and sender wallet address.
+   - Persist the returned payout (`po_...`) ID and map provider errors into retryable,
+     permanent, user-action-required, and ambiguous-outcome categories.
+6. **Webhook processing**
+   - Expose `POST /v1/providers/blindpay/webhooks`; verify the raw body using
+     `svix-id`, `svix-timestamp`, and `svix-signature` with a replay tolerance and
+     constant-time signature comparison.
+   - Deduplicate by `svix-id`, durably store verified payloads, apply monotonic payout
+     transitions, and emit internal events through the transactional outbox.
+7. **Saga and accounting completion**
+   - Extend the saga for authorization, submission, processing, compliance hold,
+     completion, failure, refund, and manual-review states.
+   - Track provider wallet assets and payout funds in transit separately; post final
+     settlement only on `completed`, and use distinct accounting for returned funds.
+8. **Reconciliation and operations**
+   - Poll nonterminal and ambiguous payouts to repair missed webhooks and compare
+     provider IDs, amounts, statuses, and return transactions with local records.
+   - Alert on expired quotes, prolonged holds, unresolved failures, unknown outcomes,
+     and provider/internal balance mismatches.
+9. **Verification and rollout**
+   - In a development instance, test successful payouts plus BlindPay's `66600`
+     failed and `77700` refunded scenarios, webhook replay, expired quotes, duplicate
+     commands, lost responses, and signing rejection.
+   - Run a limited production pilot before enabling general traffic; development
+     instances simulate fiat completion and do not validate real bank-rail timing.
 
 ### Reconciliation and observability
 
@@ -557,8 +664,6 @@ The API listens on `:8080` by default. `STABLERAIL_HTTP_ADDRESS`, `STABLERAIL_SH
 | Endpoint | Purpose |
 | --- | --- |
 | `POST /v1/payments` | Create a payment; requires `Idempotency-Key` |
-| `POST /v1/quotes` | Request an authoritative, expiring FX quote for a currency pair and source amount |
-| `GET /v1/quotes/{id}` | Read a quote and its current lifecycle status |
 | `GET /v1/payments/{id}` | Read the current payment snapshot |
 | `GET /v1/payments/{id}/timeline` | Read ordered lifecycle history |
 | `GET /healthz` | Check whether the process is running |
@@ -566,8 +671,6 @@ The API listens on `:8080` by default. `STABLERAIL_HTTP_ADDRESS`, `STABLERAIL_SH
 | `GET /metrics` | Read Prometheus-format HTTP metrics |
 
 Repeating a request with the same idempotency key returns the original payment. The current implementation does not yet compare the repeated request body with the original body; clients must not reuse a key for a different operation.
-
-Quote callers provide only `source_currency`, `destination_currency`, and `source_amount_minor`. The configured pricing provider determines the rate, fee, and validity period; client-supplied pricing fields are rejected. `quote.Service` coordinates pricing and calculation, while `quote.PostgresRepository` only persists immutable snapshots. The runtime currently injects a deterministic provider for local development.
 
 ### 5. Create and inspect a payment
 

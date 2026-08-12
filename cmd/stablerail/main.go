@@ -22,7 +22,6 @@ import (
 	"stablerail/paymentcore"
 	"stablerail/policy"
 	"stablerail/postgresdb"
-	"stablerail/quote"
 	"stablerail/reconciliation"
 	"stablerail/saga"
 	"stablerail/settlement"
@@ -99,16 +98,7 @@ func run() error {
 		return err
 	}
 
-	quoteRepo, err := quote.NewPostgresRepository(db)
-	if err != nil {
-		return err
-	}
-	pricing := quote.DeterministicProvider{Quote: quote.Price{Rate: "1", FeeMinor: 0, ValidFor: time.Minute}}
-	quoteService, err := quote.NewService(pricing, quoteRepo)
-	if err != nil {
-		return err
-	}
-	handler, err := paymentapi.NewHandler(paymentcore.NewPostgresService(db), quoteService, db)
+	handler, err := paymentapi.NewHandler(paymentcore.NewPostgresService(db), db)
 	if err != nil {
 		return err
 	}

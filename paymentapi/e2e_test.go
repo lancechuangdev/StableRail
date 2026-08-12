@@ -13,11 +13,10 @@ import (
 
 	"stablerail/paymentcore"
 	"stablerail/postgresdb"
-	"stablerail/quote"
 )
 
 // Run with STABLERAIL_E2E_DATABASE_URL pointing at a database with migrations
-// 001-006 applied. This covers HTTP -> payment transaction -> outbox -> query.
+// applied. This covers HTTP -> payment transaction -> outbox -> query.
 func TestPostgresPaymentHTTPEndToEnd(t *testing.T) {
 	url := os.Getenv("STABLERAIL_E2E_DATABASE_URL")
 	if url == "" {
@@ -28,15 +27,7 @@ func TestPostgresPaymentHTTPEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	quoteRepo, err := quote.NewPostgresRepository(db)
-	if err != nil {
-		t.Fatal(err)
-	}
-	quoteService, err := quote.NewService(quote.DeterministicProvider{Quote: quote.Price{Rate: "1", ValidFor: time.Minute}}, quoteRepo)
-	if err != nil {
-		t.Fatal(err)
-	}
-	handler, err := NewHandler(paymentcore.NewPostgresService(db), quoteService, db)
+	handler, err := NewHandler(paymentcore.NewPostgresService(db), db)
 	if err != nil {
 		t.Fatal(err)
 	}

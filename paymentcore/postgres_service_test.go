@@ -21,7 +21,7 @@ func TestPostgresCreateCommitsPaymentAndOutboxTogether(t *testing.T) {
 	service := deterministicPostgresService(db)
 	mock.ExpectBegin()
 	mock.ExpectExec("INSERT INTO payments").
-		WithArgs("pay_test", "order-1", "USD", int64(2500), "customer-1", StateCreated, "idem-1", "", service.now()).
+		WithArgs("pay_test", "order-1", "USD", int64(2500), "customer-1", StateCreated, "idem-1", service.now()).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO payment_audit_events").
 		WithArgs("pay_test", "created", "payment intent created", service.now()).
