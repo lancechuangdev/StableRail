@@ -492,6 +492,10 @@ For an on-chain address, the adapter first creates a Circle address-book recipie
 then submits the payout. Circle API credentials are only read from environment
 configuration and are never stored in payment or webhook records.
 
+Circle API calls are locally rate limited to one every 200ms by default. Set
+`STABLERAIL_CIRCLE_MIN_REQUEST_INTERVAL` (for example, `500ms`) to lower the
+request rate, or `0s` to disable the local limiter.
+
 ### Circle payout notifications
 
 Circle Mint payout notifications use an AWS SNS subscription, not the generic

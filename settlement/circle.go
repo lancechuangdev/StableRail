@@ -11,16 +11,22 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
+	"time"
 )
 
 type CircleConfig struct {
-	APIKey, BaseURL string
-	HTTPClient      *http.Client
+	APIKey, BaseURL    string
+	HTTPClient         *http.Client
+	MinRequestInterval time.Duration
 }
 type CircleProvider struct {
 	apiKey, baseURL string
 	client          *http.Client
 	newUUID         func(string) string
+	mu              sync.Mutex
+	nextRequestAt   time.Time
+	minInterval     time.Duration
 }
 
 func NewCircleProvider(c CircleConfig) (*CircleProvider, error) {
@@ -33,7 +39,10 @@ func NewCircleProvider(c CircleConfig) (*CircleProvider, error) {
 	if c.HTTPClient == nil {
 		c.HTTPClient = http.DefaultClient
 	}
-	return &CircleProvider{c.APIKey, strings.TrimRight(c.BaseURL, "/"), c.HTTPClient, uuidV4For}, nil
+	if c.MinRequestInterval < 0 {
+		return nil, errors.New("Circle minimum request interval cannot be negative")
+	}
+	return &CircleProvider{apiKey: c.APIKey, baseURL: strings.TrimRight(c.BaseURL, "/"), client: c.HTTPClient, newUUID: uuidV4For, minInterval: c.MinRequestInterval}, nil
 }
 func (*CircleProvider) Name() string { return "circle" }
 func (p *CircleProvider) Submit(ctx context.Context, r SettlementRequest) (SettlementResult, error) {
@@ -94,6 +103,9 @@ func (p *CircleProvider) createRecipient(ctx context.Context, d *Destination) (s
 	return result.Data.ID, nil
 }
 func (p *CircleProvider) do(ctx context.Context, path string, body, out any) error {
+	if err := p.wait(ctx); err != nil {
+		return err
+	}
 	raw, err := json.Marshal(body)
 	if err != nil {
 		return err
@@ -121,6 +133,30 @@ func (p *CircleProvider) do(ctx context.Context, path string, body, out any) err
 		return fmt.Errorf("decode Circle response: %w", err)
 	}
 	return nil
+}
+func (p *CircleProvider) wait(ctx context.Context) error {
+	if p.minInterval == 0 {
+		return nil
+	}
+	p.mu.Lock()
+	now := time.Now()
+	at := p.nextRequestAt
+	if at.Before(now) {
+		at = now
+	}
+	p.nextRequestAt = at.Add(p.minInterval)
+	p.mu.Unlock()
+	if !at.After(now) {
+		return nil
+	}
+	timer := time.NewTimer(time.Until(at))
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 func circleStatus(s string) Status {
 	switch strings.ToLower(s) {

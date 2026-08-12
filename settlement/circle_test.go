@@ -2,9 +2,11 @@ package settlement
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 func TestCircleProviderCreatesRecipientForBlockchainDestination(t *testing.T) {
@@ -34,6 +36,25 @@ func TestCircleProviderCreatesRecipientForBlockchainDestination(t *testing.T) {
 	}
 	if len(paths) != 2 || paths[0] != "/v1/addressBook/recipients" || paths[1] != "/v1/payouts" {
 		t.Fatalf("paths = %v", paths)
+	}
+}
+
+func TestCircleProviderRejectsNegativeRequestInterval(t *testing.T) {
+	if _, err := NewCircleProvider(CircleConfig{APIKey: "key", MinRequestInterval: -time.Second}); err == nil {
+		t.Fatal("expected interval error")
+	}
+}
+
+func TestCircleProviderWaitHonorsCancellation(t *testing.T) {
+	p, err := NewCircleProvider(CircleConfig{APIKey: "key", MinRequestInterval: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.nextRequestAt = time.Now().Add(time.Hour)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := p.wait(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("wait error = %v", err)
 	}
 }
 

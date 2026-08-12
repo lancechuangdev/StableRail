@@ -81,7 +81,7 @@ func run() error {
 	var settlementProvider settlement.SettlementProvider = settlement.NewMockProvider(settlement.SettlementResult{})
 	var circleSNS *settlement.SNSReceiver
 	if config.SettlementProvider == "circle" {
-		settlementProvider, err = settlement.NewCircleProvider(settlement.CircleConfig{APIKey: config.CircleAPIKey, BaseURL: config.CircleBaseURL})
+		settlementProvider, err = settlement.NewCircleProvider(settlement.CircleConfig{APIKey: config.CircleAPIKey, BaseURL: config.CircleBaseURL, MinRequestInterval: config.CircleMinRequestInterval})
 		if err != nil {
 			return err
 		}
