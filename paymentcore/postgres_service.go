@@ -149,7 +149,7 @@ func (s *PostgresService) createPayment(
 		return existing, nil
 	}
 	if destination != nil {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO payment_destinations(payment_id,kind,recipient_id,chain,address,created_at) VALUES($1,$2,NULLIF($3,''),NULLIF($4,''),NULLIF($5,''),$6)`, payment.ID, destination.Type, destination.RecipientID, destination.Chain, destination.Address, now); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO payment_destinations(payment_id,kind,chain,address,created_at) VALUES($1,$2,NULLIF($3,''),NULLIF($4,''),$5)`, payment.ID, destination.Type, destination.Chain, destination.Address, now); err != nil {
 			return nil, fmt.Errorf("insert payment destination: %w", err)
 		}
 	}
@@ -208,7 +208,7 @@ func (s *PostgresService) GetPayment(ctx context.Context, paymentID string) (*Pa
 		return nil, fmt.Errorf("%w: %s", ErrPaymentNotFound, paymentID)
 	}
 	var destination Destination
-	err = s.db.QueryRowContext(ctx, `SELECT kind,COALESCE(recipient_id,''),COALESCE(chain,''),COALESCE(address,'') FROM payment_destinations WHERE payment_id=$1`, paymentID).Scan(&destination.Type, &destination.RecipientID, &destination.Chain, &destination.Address)
+	err = s.db.QueryRowContext(ctx, `SELECT kind,COALESCE(chain,''),COALESCE(address,'') FROM payment_destinations WHERE payment_id=$1`, paymentID).Scan(&destination.Type, &destination.Chain, &destination.Address)
 	if err == nil {
 		p.Destination = &destination
 	} else if !errors.Is(err, sql.ErrNoRows) {

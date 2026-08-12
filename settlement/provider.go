@@ -31,7 +31,7 @@ type SettlementRequest struct {
 	Destination    *Destination
 }
 
-type Destination struct{ Type, RecipientID, Chain, Address string }
+type Destination struct{ Type, Chain, Address string }
 
 type SettlementResult struct {
 	ProviderReference string

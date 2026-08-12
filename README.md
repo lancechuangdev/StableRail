@@ -35,13 +35,8 @@ The following is the broader roadmap, not a claim that every component is implem
     Quote Engine   Policy Engine   Settlement   Notification
                                        │
                         Provider Adapter Interface
-                      ┌────────┬────────┬────────┐
-                      │        │        │
-                   Bridge   Circle   MockProvider
-                      │
-               Blockchain Adapter
-                      │
-          Ethereum / Base / Sepolia
+                              │
+                         MockProvider
 ```
 
 ## Implemented Phase 3 data flow
@@ -468,63 +463,12 @@ The initial chart of accounts defines operating cash as an asset and settlement 
 
 ### Phase 6: production settlement rails
 
-16. **Production provider and blockchain adapters — in progress**
+16. **Production provider and blockchain adapters — planned**
    - Implement one real provider behind the settlement boundary
    - Manage credentials, rate limits, webhooks, and provider-specific failure mapping
    - Add chain submission and confirmation tracking only where the chosen settlement rail requires it
 
 Each step will be implemented and verified independently before work begins on the next one.
-
-### Circle settlement destinations
-
-Step 15 is intentionally deferred. Circle Mint is selected as the first production
-provider because it is already represented in the target architecture. The current
-implementation covers credential configuration, idempotent payout submission, and
-provider-specific retryability mapping; inbound Circle webhook verification and
-account-specific rate-limit policy remain to be configured. Set
-`STABLERAIL_SETTLEMENT_PROVIDER=circle` and provide `STABLERAIL_CIRCLE_API_KEY`
-to enable it; `STABLERAIL_CIRCLE_BASE_URL` selects the API host (including a sandbox).
-The default remains the deterministic `mock` provider.
-
-Payments can bind one immutable destination: `circle_recipient` with a Circle
-address-book `recipient_id`, or `blockchain_address` with a `chain` and `address`.
-For an on-chain address, the adapter first creates a Circle address-book recipient,
-then submits the payout. Circle API credentials are only read from environment
-configuration and are never stored in payment or webhook records.
-
-Circle API calls are locally rate limited to one every 200ms by default. Set
-`STABLERAIL_CIRCLE_MIN_REQUEST_INTERVAL` (for example, `500ms`) to lower the
-request rate, or `0s` to disable the local limiter.
-
-### Circle payout notifications
-
-Circle Mint payout notifications use an AWS SNS subscription, not the generic
-Circle v2 notification API. Register StableRail's public HTTPS endpoint through
-`POST /v1/notifications/subscriptions`; Circle's subscription response includes an
-AWS SNS subscription ARN. The receiver must verify each SNS signature using the
-trusted AWS signing certificate, restrict accepted signing-certificate URLs and
-topic ARNs, and handle `SubscriptionConfirmation` by visiting its verified
-`SubscribeURL`.
-
-For payout notifications, deduplicate the SNS `MessageId`, then correlate
-`payout.id` to `settlement_submissions.provider_reference`. A `complete` payout
-settles the payment and a `failed` payout starts failure handling. Circle's
-documented payout statuses are `pending`, `complete`, and `failed`.
-
-To enable notifications, expose `POST /v1/providers/circle/notifications` at a
-public HTTPS URL, start StableRail with `STABLERAIL_CIRCLE_SNS_TOPIC_ARN` set to
-the expected ARN, then create the Circle subscription with:
-
-```bash
-curl -X POST https://api-sandbox.circle.com/v1/notifications/subscriptions \
-  -H "Authorization: Bearer $STABLERAIL_CIRCLE_API_KEY" \
-  -H 'Content-Type: application/json' \
-  -d '{"endpoint":"https://YOUR_HOST/v1/providers/circle/notifications"}'
-```
-
-Circle delivers an AWS SNS `SubscriptionConfirmation` first. StableRail verifies
-the SNS signature and confirms it automatically. Copy the Circle-provided SNS
-topic ARN into `STABLERAIL_CIRCLE_SNS_TOPIC_ARN` before exposing the receiver.
 
 ### Reconciliation and observability
 

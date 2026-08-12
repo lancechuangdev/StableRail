@@ -154,7 +154,7 @@ func loadPaymentAmount(ctx context.Context, tx *sql.Tx, paymentID string) (int64
 
 func loadDestination(ctx context.Context, tx *sql.Tx, paymentID string) (*settlement.Destination, error) {
 	var d settlement.Destination
-	err := tx.QueryRowContext(ctx, `SELECT kind,COALESCE(recipient_id,''),COALESCE(chain,''),COALESCE(address,'') FROM payment_destinations WHERE payment_id=$1`, paymentID).Scan(&d.Type, &d.RecipientID, &d.Chain, &d.Address)
+	err := tx.QueryRowContext(ctx, `SELECT kind,COALESCE(chain,''),COALESCE(address,'') FROM payment_destinations WHERE payment_id=$1`, paymentID).Scan(&d.Type, &d.Chain, &d.Address)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}

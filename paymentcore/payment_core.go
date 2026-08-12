@@ -39,21 +39,16 @@ type Payment struct {
 
 // Destination is immutable settlement routing selected when a payment is created.
 type Destination struct {
-	Type        string `json:"type"`
-	RecipientID string `json:"recipient_id,omitempty"`
-	Chain       string `json:"chain,omitempty"`
-	Address     string `json:"address,omitempty"`
+	Type    string `json:"type"`
+	Chain   string `json:"chain,omitempty"`
+	Address string `json:"address,omitempty"`
 }
 
 func (d Destination) Validate() error {
 	switch d.Type {
-	case "circle_recipient":
-		if d.RecipientID == "" || d.Chain != "" || d.Address != "" {
-			return errors.New("circle_recipient destination requires only recipient_id")
-		}
 	case "blockchain_address":
-		if d.Chain == "" || d.Address == "" || d.RecipientID != "" {
-			return errors.New("blockchain_address destination requires only chain and address")
+		if d.Chain == "" || d.Address == "" {
+			return errors.New("blockchain_address destination requires chain and address")
 		}
 	default:
 		return errors.New("unsupported payment destination")

@@ -78,18 +78,7 @@ func run() error {
 		Consumer:  "payment-saga",
 	}
 
-	var settlementProvider settlement.SettlementProvider = settlement.NewMockProvider(settlement.SettlementResult{})
-	var circleSNS *settlement.SNSReceiver
-	if config.SettlementProvider == "circle" {
-		settlementProvider, err = settlement.NewCircleProvider(settlement.CircleConfig{APIKey: config.CircleAPIKey, BaseURL: config.CircleBaseURL, MinRequestInterval: config.CircleMinRequestInterval})
-		if err != nil {
-			return err
-		}
-		circleSNS, err = settlement.NewSNSReceiver(db, nil, config.CircleSNSTopicARN)
-		if err != nil {
-			return err
-		}
-	}
+	settlementProvider := settlement.NewMockProvider(settlement.SettlementResult{})
 	commandLoop := &consumer.Loop{
 		Reader:    consumer.NewKafkaReader(config.KafkaBrokers, string(saga.CommandTopic), "stablerail-core-workers"),
 		Processor: inbox.BoundProcessor{Processor: inboxProcessor, Handler: workers.NewCommandHandler(policy.DeterministicEvaluator{}, ledger.NewPostgresService(), settlementProvider).Handle},
@@ -127,9 +116,6 @@ func run() error {
 	metrics := &observability.Metrics{}
 	root := http.NewServeMux()
 	root.Handle("/metrics", metrics.Handler())
-	if circleSNS != nil {
-		root.Handle("POST /v1/providers/circle/notifications", circleSNS)
-	}
 	root.Handle("/", metrics.Middleware(handler, logger))
 	server := &http.Server{
 		Addr:              config.HTTPAddress,
