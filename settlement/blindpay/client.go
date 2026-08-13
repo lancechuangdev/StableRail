@@ -160,11 +160,12 @@ type PayoutRequest struct {
 	SenderWalletAddress string `json:"sender_wallet_address"`
 }
 type Payout struct {
-	ID                  string `json:"id"`
-	Status              string `json:"status"`
-	SenderWalletAddress string `json:"sender_wallet_address"`
-	CustomerID          string `json:"customer_id"`
-	BankAccountID       string `json:"bank_account_id"`
+	ID                  string          `json:"id"`
+	Status              string          `json:"status"`
+	SenderWalletAddress string          `json:"sender_wallet_address"`
+	CustomerID          string          `json:"customer_id"`
+	BankAccountID       string          `json:"bank_account_id"`
+	RawPayload          json.RawMessage `json:"-"`
 }
 
 type ManagedWalletAsset struct {
@@ -197,7 +198,8 @@ func (c *Client) CreateEVMPayout(ctx context.Context, r PayoutRequest) (Payout, 
 		return Payout{}, errors.New("invalid BlindPay payout request")
 	}
 	var out Payout
-	_, err := c.do(ctx, http.MethodPost, "/payouts/evm", r.IdempotencyKey, r, &out)
+	raw, err := c.do(ctx, http.MethodPost, "/payouts/evm", r.IdempotencyKey, r, &out)
+	out.RawPayload = raw
 	if err == nil && (!strings.HasPrefix(out.ID, "po_") || out.Status == "") {
 		err = errors.New("BlindPay returned an invalid payout")
 	}
