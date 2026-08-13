@@ -17,6 +17,7 @@ const (
 	StateProcessing PaymentState = "processing"
 	StateSettled    PaymentState = "settled"
 	StateFailed     PaymentState = "failed"
+	StateRefunded   PaymentState = "refunded"
 )
 
 // Payment represents a payment intent and its ledger state.

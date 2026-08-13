@@ -25,8 +25,10 @@ func TestWorkflowTransitions(t *testing.T) {
 		{StateAwaitingLedger, "ledger.reserved", StateAwaitingSettlement, "settlement.execute"},
 		{StateAwaitingLedger, "ledger.failed", StateFailed, "payment.fail"},
 		{StateAwaitingSettlement, "settlement.completed", StateCompleted, ""},
-		{StateAwaitingSettlement, "settlement.failed", StateCompensating, "ledger.release"},
-		{StateCompensating, "ledger.released", StateCompensated, "payment.fail"},
+		{StateAwaitingSettlement, "settlement.failed", StateReleasingLedger, "ledger.release"},
+		{StateAwaitingSettlement, "settlement.refunded", StateRefunding, "ledger.release"},
+		{StateReleasingLedger, "ledger.released", StateLedgerReleased, "payment.fail"},
+		{StateRefunding, "ledger.released", StateRefunded, "payment.refund"},
 	}
 	for _, tt := range tests {
 		next, command, _, _, err := c.transition(tt.state, tt.event, "")
@@ -109,7 +111,7 @@ func TestExpireOnceCompensatesSettlementTimeout(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"id", "payment_id", "correlation_id", "state"}).
 			AddRow("saga-1", "pay-1", "corr-1", StateAwaitingSettlement))
 	mock.ExpectExec("UPDATE payment_sagas").
-		WithArgs(StateCompensating, now.Add(time.Minute), "awaiting_settlement timeout", now, "saga-1").
+		WithArgs(StateReleasingLedger, now.Add(time.Minute), "awaiting_settlement timeout", now, "saga-1").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO outbox_events").
 		WithArgs("evt_1", CommandTopic, "ledger.release", eventbus.LedgerReleaseVersion, "pay-1", sqlmock.AnyArg(), now).

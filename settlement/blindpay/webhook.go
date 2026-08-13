@@ -183,6 +183,8 @@ func (s *PayoutWebhookService) enqueueSagaResult(ctx context.Context, tx *sql.Tx
 	eventType, version, reason := "settlement.failed", eventbus.SettlementFailedVersion, status
 	if status == "completed" {
 		eventType, version, reason = "settlement.completed", eventbus.SettlementCompletedVersion, ""
+	} else if status == "refunded" {
+		eventType, version = "settlement.refunded", eventbus.SettlementRefundedVersion
 	}
 	body, err := json.Marshal(map[string]string{"correlation_id": correlationID, "reason": reason})
 	if err != nil {

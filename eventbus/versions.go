@@ -7,10 +7,12 @@ const (
 	PaymentProcessingVersion   = 1
 	PaymentSettledVersion      = 1
 	PaymentFailedVersion       = 1
+	PaymentRefundedVersion     = 1
 	PolicyEvaluateVersion      = 1
 	LedgerReserveVersion       = 1
 	SettlementExecuteVersion   = 1
 	PaymentFailVersion         = 1
+	PaymentRefundVersion       = 1
 	LedgerReleaseVersion       = 1
 	DeadLetterVersion          = 1
 	PolicyApprovedVersion      = 1
@@ -20,4 +22,5 @@ const (
 	LedgerReleasedVersion      = 1
 	SettlementCompletedVersion = 1
 	SettlementFailedVersion    = 1
+	SettlementRefundedVersion  = 1
 )
