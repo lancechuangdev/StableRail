@@ -99,6 +99,10 @@ func run() error {
 		<-ctx.Done()
 		return ctx.Err()
 	}
+	payoutRecovery := func(ctx context.Context) error {
+		<-ctx.Done()
+		return ctx.Err()
+	}
 	if config.SettlementProvider == "blindpay" {
 		client, err := blindpay.NewClient(blindpay.Config{
 			APIKey:     config.BlindPay.APIKey,
@@ -119,6 +123,9 @@ func run() error {
 		payouts, err := blindpay.NewPayoutService(db, client)
 		if err != nil {
 			return err
+		}
+		payoutRecovery = func(ctx context.Context) error {
+			return payouts.RunRecovery(ctx, config.ReconciliationInterval)
 		}
 		settlementProvider, err = blindpay.NewProvider(payouts)
 		if err != nil {
@@ -177,6 +184,7 @@ func run() error {
 		webhookDispatcher.Run,
 		reconciler.Run,
 		webhookReconciler,
+		payoutRecovery,
 	)
 	if errors.Is(err, context.Canceled) {
 		return nil

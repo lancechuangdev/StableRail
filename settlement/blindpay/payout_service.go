@@ -58,7 +58,9 @@ func (s *PayoutService) SubmitPayment(ctx context.Context, paymentID, idempotenc
 		if attempt.ProviderPayoutID != "" {
 			return &attempt.PayoutSubmission, nil
 		}
-		return &attempt.PayoutSubmission, ErrPayoutSubmissionUnknown
+		if attempt.ProviderStatus != "unknown" {
+			return &attempt.PayoutSubmission, ErrPayoutSubmissionUnknown
+		}
 	}
 
 	payout, err := s.client.CreateEVMPayout(ctx, PayoutRequest{
@@ -89,11 +91,65 @@ func (s *PayoutService) SubmitPayment(ctx context.Context, paymentID, idempotenc
 		}
 	}
 	now := s.now()
-	_, err = s.db.ExecContext(ctx, `UPDATE blindpay_payouts SET provider_payout_id=$1,provider_status=$2,provider_payload=$3,last_error=NULL,updated_at=$4,submitted_at=$4 WHERE payment_id=$5 AND provider_status='submission_pending'`, payout.ID, payout.Status, raw, now, paymentID)
+	_, err = s.db.ExecContext(ctx, `UPDATE blindpay_payouts SET provider_payout_id=$1,provider_status=$2,provider_payload=$3,last_error=NULL,updated_at=$4,submitted_at=$4 WHERE payment_id=$5 AND provider_status IN ('submission_pending','unknown')`, payout.ID, payout.Status, raw, now, paymentID)
 	if err != nil {
 		return nil, fmt.Errorf("record BlindPay payout response: %w", err)
 	}
 	return &PayoutSubmission{PaymentID: paymentID, QuoteID: attempt.QuoteID, ProviderPayoutID: payout.ID, ProviderStatus: payout.Status, IdempotencyKey: idempotencyKey, SenderWalletID: attempt.SenderWalletID, SenderWalletAddress: attempt.SenderWalletAddress, CreatedAt: attempt.CreatedAt, UpdatedAt: now, SubmittedAt: &now}, nil
+}
+
+// RecoverUnknownOnce retries ambiguous submissions with their original
+// BlindPay idempotency key, allowing the provider to return the original payout
+// without creating a second one.
+func (s *PayoutService) RecoverUnknownOnce(ctx context.Context) (int, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT payment_id,idempotency_key FROM blindpay_payouts WHERE provider_status='unknown' ORDER BY updated_at LIMIT 100`)
+	if err != nil {
+		return 0, fmt.Errorf("find unknown BlindPay payouts: %w", err)
+	}
+	type attempt struct{ paymentID, idempotencyKey string }
+	var attempts []attempt
+	for rows.Next() {
+		var a attempt
+		if err := rows.Scan(&a.paymentID, &a.idempotencyKey); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		attempts = append(attempts, a)
+	}
+	if err := rows.Close(); err != nil {
+		return 0, err
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	recovered := 0
+	for _, a := range attempts {
+		if _, err := s.SubmitPayment(ctx, a.paymentID, a.idempotencyKey); err != nil {
+			return recovered, err
+		}
+		recovered++
+	}
+	return recovered, nil
+}
+
+func (s *PayoutService) RunRecovery(ctx context.Context, interval time.Duration) error {
+	if interval <= 0 {
+		interval = time.Minute
+	}
+	for {
+		if _, err := s.RecoverUnknownOnce(ctx); err != nil {
+			return err
+		}
+		timer := time.NewTimer(interval)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
 }
 
 func (s *PayoutService) prepare(ctx context.Context, paymentID, idempotencyKey string) (payoutAttempt, error) {
