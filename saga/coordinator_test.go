@@ -189,6 +189,32 @@ func TestExpireOnceRetriesPostSettlementRefundAccounting(t *testing.T) {
 	}
 }
 
+func TestResolveManualReviewRefundsPayment(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	c := testCoordinator(t, db)
+	now := c.now()
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT id,correlation_id,state FROM payment_sagas").WithArgs("pay-1").
+		WillReturnRows(sqlmock.NewRows([]string{"id", "correlation_id", "state"}).AddRow("saga-1", "corr-1", StateManualReview))
+	mock.ExpectExec("INSERT INTO saga_manual_review_actions").WithArgs("saga-1", "refund", "alice", "provider confirmed refund", now).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec("UPDATE payment_sagas").WithArgs(StateRefunding, now.Add(time.Minute), "provider confirmed refund", now, "saga-1").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO outbox_events").WithArgs("evt_1", CommandTopic, "ledger.release", eventbus.LedgerReleaseVersion, "pay-1", sqlmock.AnyArg(), now).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+	if err := c.ResolveManualReview(context.Background(), "pay-1", "refund", "alice", "provider confirmed refund"); err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func testCoordinator(t *testing.T, db *sql.DB) *Coordinator {
 	t.Helper()
 	c, err := NewCoordinator(db, Config{TimeoutBatchSize: 10})

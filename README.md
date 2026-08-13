@@ -698,6 +698,8 @@ Creating the topics explicitly avoids a startup race where consumers receive an 
 ```bash
 export STABLERAIL_DATABASE_URL=postgresql://stablerail:stablerail@localhost:5432/stablerail
 export STABLERAIL_KAFKA_BROKERS=localhost:9092
+# Optional: mounts privileged operator endpoints when configured.
+export STABLERAIL_OPERATOR_TOKEN='replace-with-a-secret-token'
 go run ./cmd/stablerail
 ```
 
@@ -708,6 +710,7 @@ The API listens on `:8080` by default. `STABLERAIL_HTTP_ADDRESS`, `STABLERAIL_SH
 | `POST /v1/payments` | Create a payment; requires `Idempotency-Key` |
 | `GET /v1/payments/{id}` | Read the current payment snapshot |
 | `GET /v1/payments/{id}/timeline` | Read ordered lifecycle history |
+| `POST /v1/operator/payments/{id}/manual-review` | Resolve a held saga; requires the configured operator Bearer token |
 | `GET /healthz` | Check whether the process is running |
 | `GET /readyz` | Check whether PostgreSQL is reachable |
 | `GET /metrics` | Read Prometheus-format HTTP metrics |
@@ -715,6 +718,22 @@ The API listens on `:8080` by default. `STABLERAIL_HTTP_ADDRESS`, `STABLERAIL_SH
 Repeating an equivalent request with the same idempotency key returns the original
 payment. Reusing the key with different payment fields, destination, or payout quote
 returns `409 Conflict`.
+
+The manual-review endpoint is mounted only when `STABLERAIL_OPERATOR_TOKEN` is set.
+It requires `Authorization: Bearer <token>` and an audited operator decision:
+
+```bash
+curl -i -X POST http://localhost:8080/v1/operator/payments/PAYMENT_ID/manual-review \
+  -H "Authorization: Bearer $STABLERAIL_OPERATOR_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"action":"refund","operator":"alice@example.com","note":"BlindPay confirmed returned funds"}'
+```
+
+Supported actions are `retry` (restart the compliance deadline), `complete` (record
+successful settlement), `fail` (release the reservation and fail the payment), and
+`refund` (release returned reserved funds and mark the payment refunded). Every
+accepted decision is stored in `saga_manual_review_actions` before the saga state and
+next outbox command commit atomically.
 
 ### 5. Create and inspect a payment
 

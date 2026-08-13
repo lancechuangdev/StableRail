@@ -161,6 +161,13 @@ func run() error {
 	metrics := &observability.Metrics{}
 	root := http.NewServeMux()
 	root.Handle("/metrics", metrics.Handler())
+	if config.OperatorToken != "" {
+		operatorHandler, err := paymentapi.NewOperatorHandler(config.OperatorToken, coordinator)
+		if err != nil {
+			return err
+		}
+		root.Handle("POST /v1/operator/payments/{id}/manual-review", operatorHandler)
+	}
 	if blindPayWebhookHandler != nil {
 		root.Handle("POST /v1/providers/blindpay/webhooks", blindPayWebhookHandler)
 	}

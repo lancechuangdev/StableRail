@@ -16,6 +16,11 @@ import (
 
 const CommandTopic eventbus.Topic = "payment-commands"
 
+var (
+	ErrSagaNotFound      = errors.New("payment saga not found")
+	ErrNotInManualReview = errors.New("payment saga is not in manual review")
+)
+
 type State string
 
 const (
@@ -265,6 +270,53 @@ func reasonOrDefault(reason, fallback string) string {
 		return reason
 	}
 	return fallback
+}
+
+// ResolveManualReview applies an audited operator decision and atomically
+// enqueues the next workflow command when one is required.
+func (c *Coordinator) ResolveManualReview(ctx context.Context, paymentID, action, operator, note string) error {
+	if paymentID == "" || operator == "" || note == "" {
+		return errors.New("payment ID, operator, and note are required")
+	}
+	tx, err := c.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin manual review resolution: %w", err)
+	}
+	defer tx.Rollback()
+	var sagaID, correlationID string
+	var state State
+	if err := tx.QueryRowContext(ctx, `SELECT id,correlation_id,state FROM payment_sagas WHERE payment_id=$1 FOR UPDATE`, paymentID).Scan(&sagaID, &correlationID, &state); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrSagaNotFound
+		}
+		return fmt.Errorf("lock manual review saga: %w", err)
+	}
+	if state != StateManualReview {
+		return ErrNotInManualReview
+	}
+	next, command, timeout := StateOnHold, "", c.complianceTimeout
+	switch action {
+	case "retry":
+	case "complete":
+		next, command, timeout = StateSettlingPayment, "payment.settle", c.ledgerTimeout
+	case "fail":
+		next, command, timeout = StateReleasingLedger, "ledger.release", c.ledgerTimeout
+	case "refund":
+		next, command, timeout = StateRefunding, "ledger.release", c.ledgerTimeout
+	default:
+		return errors.New("manual review action must be retry, complete, fail, or refund")
+	}
+	now := c.now()
+	if _, err := tx.ExecContext(ctx, `INSERT INTO saga_manual_review_actions(saga_id,action,operator,note,occurred_at) VALUES($1,$2,$3,$4,$5)`, sagaID, action, operator, note, now); err != nil {
+		return fmt.Errorf("audit manual review resolution: %w", err)
+	}
+	if err := c.updateAndCommand(ctx, tx, sagaID, correlationID, paymentID, "manual_review", next, command, timeout, note); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit manual review resolution: %w", err)
+	}
+	return nil
 }
 
 // ExpireOnce claims overdue active sagas and emits their failure or

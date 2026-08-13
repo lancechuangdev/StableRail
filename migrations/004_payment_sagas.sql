@@ -16,3 +16,15 @@ CREATE TABLE payment_sagas (
 CREATE INDEX payment_sagas_deadline_idx
     ON payment_sagas (deadline_at)
     WHERE deadline_at IS NOT NULL;
+
+CREATE TABLE saga_manual_review_actions (
+    id          BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    saga_id     TEXT NOT NULL REFERENCES payment_sagas(id),
+    action      TEXT NOT NULL CHECK (action IN ('retry','complete','fail','refund')),
+    operator    TEXT NOT NULL,
+    note        TEXT NOT NULL,
+    occurred_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX saga_manual_review_actions_saga_idx
+    ON saga_manual_review_actions (saga_id, occurred_at, id);

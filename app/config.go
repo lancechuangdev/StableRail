@@ -8,10 +8,10 @@ import (
 )
 
 type Config struct {
-	HTTPAddress, DatabaseURL, SettlementProvider              string
-	BlindPay                                                  BlindPayConfig
-	KafkaBrokers                                              []string
-	ShutdownTimeout, SagaPollInterval, ReconciliationInterval time.Duration
+	HTTPAddress, DatabaseURL, SettlementProvider, OperatorToken string
+	BlindPay                                                    BlindPayConfig
+	KafkaBrokers                                                []string
+	ShutdownTimeout, SagaPollInterval, ReconciliationInterval   time.Duration
 }
 
 type BlindPayConfig struct {
@@ -38,6 +38,7 @@ func ConfigFromEnv() (Config, error) {
 		HTTPAddress:        env("STABLERAIL_HTTP_ADDRESS", ":8080"),
 		DatabaseURL:        os.Getenv("STABLERAIL_DATABASE_URL"),
 		SettlementProvider: env("STABLERAIL_SETTLEMENT_PROVIDER", "mock"),
+		OperatorToken:      os.Getenv("STABLERAIL_OPERATOR_TOKEN"),
 		BlindPay: BlindPayConfig{
 			APIKey:               os.Getenv("STABLERAIL_BLINDPAY_API_KEY"),
 			InstanceID:           os.Getenv("STABLERAIL_BLINDPAY_INSTANCE_ID"),
