@@ -25,6 +25,15 @@ type ReleaseRequest struct {
 type LedgerService interface {
 	Reserve(context.Context, *sql.Tx, ReservationRequest) error
 	Release(context.Context, *sql.Tx, ReleaseRequest) error
+	RecordRefund(context.Context, *sql.Tx, ReleaseRequest) error
+}
+
+// RecordRefund reverses the settlement posting after provider funds have been
+// returned. It is distinct from releasing a reservation that never settled.
+func (*PostgresService) RecordRefund(ctx context.Context, tx *sql.Tx, request ReleaseRequest) error {
+	return post(ctx, tx, request.PaymentID, paymentcore.StateSettled, paymentcore.StateSettled,
+		"payment.refund_recorded", "refund_recorded", paymentcore.CashOperatingAccount, paymentcore.SettlementAccount,
+		"provider refund recorded", "provider refund recorded", request.At, false)
 }
 
 type PostgresService struct{}

@@ -4,7 +4,7 @@ CREATE TABLE payment_sagas (
     correlation_id TEXT NOT NULL UNIQUE,
     state          TEXT NOT NULL CHECK (state IN (
         'awaiting_policy', 'awaiting_ledger', 'awaiting_settlement',
-        'releasing_ledger', 'refunding', 'settling_payment', 'completed',
+        'releasing_ledger', 'refunding', 'recording_refund', 'settling_payment', 'completed',
         'ledger_released', 'refunded', 'failed'
     )),
     deadline_at    TIMESTAMPTZ,

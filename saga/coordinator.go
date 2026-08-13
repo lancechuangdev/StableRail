@@ -24,6 +24,7 @@ const (
 	StateAwaitingSettlement State = "awaiting_settlement"
 	StateReleasingLedger    State = "releasing_ledger"
 	StateRefunding          State = "refunding"
+	StateRecordingRefund    State = "recording_refund"
 	StateSettlingPayment    State = "settling_payment"
 	StateCompleted          State = "completed"
 	StateLedgerReleased     State = "ledger_released"
@@ -174,10 +175,12 @@ func (c *Coordinator) transition(state State, eventType, reason string) (State, 
 	case state == StateAwaitingSettlement && eventType == "settlement.refunded":
 		return StateRefunding, "ledger.release", c.ledgerTimeout, reasonOrDefault(reason, "settlement refunded"), nil
 	case state == StateCompleted && eventType == "settlement.refunded":
-		return StateRefunding, "ledger.release", c.ledgerTimeout, reasonOrDefault(reason, "settlement refunded"), nil
+		return StateRecordingRefund, "ledger.record_refund", c.ledgerTimeout, reasonOrDefault(reason, "settlement refunded"), nil
 	case state == StateReleasingLedger && eventType == "ledger.released":
 		return StateLedgerReleased, "payment.fail", 0, reason, nil
 	case state == StateRefunding && eventType == "ledger.released":
+		return StateRefunded, "payment.refund", 0, reason, nil
+	case state == StateRecordingRefund && eventType == "ledger.refund_recorded":
 		return StateRefunded, "payment.refund", 0, reason, nil
 	default:
 		return "", "", 0, "", fmt.Errorf("event %s is invalid while saga is %s", eventType, state)
@@ -235,6 +238,8 @@ func sagaCommandVersion(command string) int {
 		return eventbus.PaymentRefundVersion
 	case "ledger.release":
 		return eventbus.LedgerReleaseVersion
+	case "ledger.record_refund":
+		return eventbus.LedgerRecordRefundVersion
 	default:
 		panic("unknown saga command type: " + command)
 	}
@@ -258,7 +263,7 @@ func (c *Coordinator) ExpireOnce(ctx context.Context) (int, error) {
 	now := c.now()
 	rows, err := tx.QueryContext(ctx, `SELECT id, payment_id, correlation_id, state
 		FROM payment_sagas WHERE deadline_at <= $1
-		  AND state IN ('awaiting_policy', 'awaiting_ledger', 'awaiting_settlement', 'releasing_ledger', 'refunding', 'settling_payment')
+		  AND state IN ('awaiting_policy', 'awaiting_ledger', 'awaiting_settlement', 'releasing_ledger', 'refunding', 'recording_refund', 'settling_payment')
 		ORDER BY deadline_at FOR UPDATE SKIP LOCKED LIMIT $2`, now, c.timeoutBatchSize)
 	if err != nil {
 		return 0, fmt.Errorf("claim timed out payment sagas: %w", err)
@@ -291,7 +296,10 @@ func (c *Coordinator) ExpireOnce(ctx context.Context) (int, error) {
 			next, command = StateFailed, "payment.fail"
 		}
 		if s.state == StateRefunding {
-			next, command = StateFailed, "payment.refund"
+			next, command, timeout = StateRefunding, "ledger.release", c.ledgerTimeout
+		}
+		if s.state == StateRecordingRefund {
+			next, command, timeout = StateRecordingRefund, "ledger.record_refund", c.ledgerTimeout
 		}
 		if s.state == StateSettlingPayment {
 			next, command, timeout = StateSettlingPayment, "payment.settle", c.ledgerTimeout
