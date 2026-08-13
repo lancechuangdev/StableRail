@@ -471,17 +471,18 @@ Each step will be implemented and verified independently before work begins on t
 
 ### Recommended BlindPay architecture
 
-BlindPay is the planned first production payout rail. StableRail will use a
-self-custodied external EVM wallet as the funding source; it will not depend on a
-BlindPay-managed wallet. Although BlindPay describes its payment processor as
-non-custodial, managed wallets do not give the customer direct access to their
-private keys and may be maintained by a payment vendor or partner. Keeping signing
-outside the provider adapter preserves explicit control over treasury funds.
+BlindPay is the planned first production payout rail. StableRail will fund payouts
+from a BlindPay-managed wallet associated with the configured customer. This avoids
+an application-side approval or signing step: StableRail creates a provider-bound
+quote and submits the payout using the managed wallet's address. Managed wallets do
+not give the customer direct access to their private keys and may be maintained by a
+payment vendor or partner, so their custody and production availability must be
+confirmed contractually before launch.
 
 BlindPay's payout quote is the authoritative transactional FX quote. It binds the
 recipient bank account, funding network and token, requested amount side, fee policy,
 exact sender and receiver amounts, provider quote ID, and five-minute expiration.
-StableRail must persist those returned values without recalculating them locally. The
+StableRail must persist those returned values without recalculating them locally.
 StableRail does not currently expose a generic quote service; BlindPay quote support
 will be introduced with the payout integration.
 
@@ -498,11 +499,8 @@ BlindPay customer + approved bank account
           policy + ledger reservation
                     │
                     ▼
-        awaiting wallet authorization
-      (approve only the exact quoted amount)
-                    │
-                    ▼
           BlindPay payout submission
+       (managed wallet address; no signing)
                     │
           processing / on_hold
                     │
@@ -529,7 +527,7 @@ each BlindPay quote is single-use.
 
 1. **Provider client and configuration**
    - Add instance-scoped API key, instance ID, base URL, webhook secret, network,
-     token, and treasury-wallet address configuration.
+     token, managed-wallet ID, and managed-wallet address configuration.
    - Implement bounded HTTP timeouts, stable error classification, request
      idempotency where supported, and contract tests against a fake server.
 2. **Customer and payout destination references**
@@ -541,14 +539,13 @@ each BlindPay quote is single-use.
    - Add a payout quote interface containing bank account, amount side, network,
      token, `cover_fees`, and optional partner-fee reference.
    - Persist BlindPay's quote ID, exact sender/receiver amounts, commercial and net
-     rates, fee components, expiration, authorization payload, and immutable raw
-     response. Decode rates without binary floating-point arithmetic.
-4. **Self-custodied wallet authorization**
-   - Add an `awaiting_authorization` saga state and return the EVM token contract,
-     spender, exact amount, chain ID, and expiration to a separate signing service.
-   - Validate token, chain, and spender against allowlists; never store treasury
-     private keys in StableRail, never grant unlimited allowance, and confirm the
-     approval transaction before payout submission.
+     rates, fee components, expiration, and immutable raw response. Decode rates
+     without binary floating-point arithmetic.
+4. **Managed-wallet funding checks**
+   - Store and validate the configured managed-wallet (`bl_...`) ID and address, and
+     require its network and token to match every payout quote.
+   - Check the provider-reported balance before submission and treat insufficient
+     funds as an operational condition rather than repeatedly creating payouts.
 5. **Durable payout submission**
    - Commit a unique submission attempt keyed by payment and provider quote before
      calling BlindPay, then submit the quote ID and sender wallet address.
@@ -561,8 +558,8 @@ each BlindPay quote is single-use.
    - Deduplicate by `svix-id`, durably store verified payloads, apply monotonic payout
      transitions, and emit internal events through the transactional outbox.
 7. **Saga and accounting completion**
-   - Extend the saga for authorization, submission, processing, compliance hold,
-     completion, failure, refund, and manual-review states.
+   - Extend the saga for submission, processing, compliance hold, completion,
+     failure, refund, and manual-review states.
    - Track provider wallet assets and payout funds in transit separately; post final
      settlement only on `completed`, and use distinct accounting for returned funds.
 8. **Reconciliation and operations**
@@ -573,7 +570,7 @@ each BlindPay quote is single-use.
 9. **Verification and rollout**
    - In a development instance, test successful payouts plus BlindPay's `66600`
      failed and `77700` refunded scenarios, webhook replay, expired quotes, duplicate
-     commands, lost responses, and signing rejection.
+     commands, lost responses, insufficient balance, and wallet/network mismatch.
    - Run a limited production pilot before enabling general traffic; development
      instances simulate fiat completion and do not validate real bank-rail timing.
 

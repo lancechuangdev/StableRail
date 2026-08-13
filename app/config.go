@@ -8,15 +8,46 @@ import (
 )
 
 type Config struct {
-	HTTPAddress, DatabaseURL                                  string
+	HTTPAddress, DatabaseURL, SettlementProvider              string
+	BlindPay                                                  BlindPayConfig
 	KafkaBrokers                                              []string
 	ShutdownTimeout, SagaPollInterval, ReconciliationInterval time.Duration
 }
 
+type BlindPayConfig struct {
+	APIKey, InstanceID, BaseURL           string
+	WebhookSecret, Network, Token         string
+	ManagedWalletID, ManagedWalletAddress string
+}
+
+func (c BlindPayConfig) Validate() error {
+	if c.APIKey == "" || c.InstanceID == "" || c.WebhookSecret == "" || c.Network == "" || c.Token == "" || c.ManagedWalletID == "" || c.ManagedWalletAddress == "" {
+		return errors.New("BlindPay API key, instance ID, webhook secret, network, token, managed wallet ID, and managed wallet address are required")
+	}
+	if !strings.HasPrefix(c.InstanceID, "in_") {
+		return errors.New("STABLERAIL_BLINDPAY_INSTANCE_ID must start with in_")
+	}
+	if !strings.HasPrefix(c.ManagedWalletID, "bl_") {
+		return errors.New("STABLERAIL_BLINDPAY_MANAGED_WALLET_ID must start with bl_")
+	}
+	return nil
+}
+
 func ConfigFromEnv() (Config, error) {
 	c := Config{
-		HTTPAddress:            env("STABLERAIL_HTTP_ADDRESS", ":8080"),
-		DatabaseURL:            os.Getenv("STABLERAIL_DATABASE_URL"),
+		HTTPAddress:        env("STABLERAIL_HTTP_ADDRESS", ":8080"),
+		DatabaseURL:        os.Getenv("STABLERAIL_DATABASE_URL"),
+		SettlementProvider: env("STABLERAIL_SETTLEMENT_PROVIDER", "mock"),
+		BlindPay: BlindPayConfig{
+			APIKey:               os.Getenv("STABLERAIL_BLINDPAY_API_KEY"),
+			InstanceID:           os.Getenv("STABLERAIL_BLINDPAY_INSTANCE_ID"),
+			BaseURL:              env("STABLERAIL_BLINDPAY_BASE_URL", "https://api.blindpay.com/v1"),
+			WebhookSecret:        os.Getenv("STABLERAIL_BLINDPAY_WEBHOOK_SECRET"),
+			Network:              os.Getenv("STABLERAIL_BLINDPAY_NETWORK"),
+			Token:                os.Getenv("STABLERAIL_BLINDPAY_TOKEN"),
+			ManagedWalletID:      os.Getenv("STABLERAIL_BLINDPAY_MANAGED_WALLET_ID"),
+			ManagedWalletAddress: os.Getenv("STABLERAIL_BLINDPAY_MANAGED_WALLET_ADDRESS"),
+		},
 		KafkaBrokers:           strings.Split(env("STABLERAIL_KAFKA_BROKERS", "localhost:9092"), ","),
 		ShutdownTimeout:        10 * time.Second,
 		SagaPollInterval:       time.Second,
@@ -24,6 +55,14 @@ func ConfigFromEnv() (Config, error) {
 	}
 	if c.DatabaseURL == "" {
 		return Config{}, errors.New("STABLERAIL_DATABASE_URL is required")
+	}
+	if c.SettlementProvider != "mock" && c.SettlementProvider != "blindpay" {
+		return Config{}, errors.New("STABLERAIL_SETTLEMENT_PROVIDER must be mock or blindpay")
+	}
+	if c.SettlementProvider == "blindpay" {
+		if err := c.BlindPay.Validate(); err != nil {
+			return Config{}, err
+		}
 	}
 	if raw := os.Getenv("STABLERAIL_SHUTDOWN_TIMEOUT"); raw != "" {
 		d, err := time.ParseDuration(raw)
