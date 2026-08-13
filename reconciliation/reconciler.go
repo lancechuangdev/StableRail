@@ -113,7 +113,12 @@ func find(ctx context.Context, tx *sql.Tx) ([]Finding, error) {
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	rows, err = tx.QueryContext(ctx, `SELECT p.id,p.state,COALESCE(s.status,'missing'),COALESCE(s.provider_reference,'') FROM payments p LEFT JOIN LATERAL (SELECT status,provider_reference FROM settlement_submissions WHERE payment_id=p.id ORDER BY created_at DESC LIMIT 1) s ON true WHERE (p.state='settled' AND COALESCE(s.status,'missing')<>'succeeded') OR (s.status='succeeded' AND p.state<>'settled')`)
+	rows, err = tx.QueryContext(ctx, `SELECT p.id,p.state,COALESCE(s.status,'missing'),COALESCE(s.provider_reference,'')
+		FROM payments p LEFT JOIN LATERAL (
+			SELECT status,provider_reference FROM settlement_submissions
+			WHERE payment_id=p.id AND provider<>'blindpay' ORDER BY created_at DESC LIMIT 1
+		) s ON true
+		WHERE s.status IS NOT NULL AND ((p.state='settled' AND s.status<>'succeeded') OR (s.status='succeeded' AND p.state<>'settled'))`)
 	if err != nil {
 		return nil, fmt.Errorf("compare provider settlements: %w", err)
 	}
@@ -124,6 +129,28 @@ func find(ctx context.Context, tx *sql.Tx) ([]Finding, error) {
 			return nil, err
 		}
 		out = append(out, Finding{"settlement:" + payment, "settlement_state_mismatch", payment, map[string]any{"payment_state": state, "provider_status": status, "provider_reference": reference}})
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows, err = tx.QueryContext(ctx, `SELECT p.id,p.state,b.provider_status,COALESCE(b.provider_payout_id,'')
+		FROM payments p JOIN blindpay_payouts b ON b.payment_id=p.id
+		WHERE (b.provider_status='completed' AND p.state<>'settled')
+		   OR (b.provider_status='refunded' AND p.state<>'refunded')
+		   OR (b.provider_status='failed' AND p.state<>'failed')`)
+	if err != nil {
+		return nil, fmt.Errorf("compare BlindPay payout states: %w", err)
+	}
+	for rows.Next() {
+		var payment, state, status, reference string
+		if err := rows.Scan(&payment, &state, &status, &reference); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		out = append(out, Finding{"blindpay:" + payment, "blindpay_state_mismatch", payment, map[string]any{"payment_state": state, "provider_status": status, "provider_reference": reference}})
 	}
 	if err := rows.Close(); err != nil {
 		return nil, err
