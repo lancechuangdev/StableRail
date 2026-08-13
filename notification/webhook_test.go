@@ -58,3 +58,20 @@ func TestEventHandlerCreatesRefundDelivery(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestEventHandlerIgnoresProviderCompletionUntilPaymentSettles(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	mock.ExpectBegin()
+	tx, _ := db.Begin()
+	event := eventbus.Event{ID: "evt_provider", Type: "settlement.completed", Version: 1, AggregateID: "pay_1", AggregateType: "payment", Payload: []byte(`{}`), OccurredAt: time.Now()}
+	if err := EventHandler()(context.Background(), tx, event); err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}

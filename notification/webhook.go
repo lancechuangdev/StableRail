@@ -83,7 +83,7 @@ func EventHandler() func(context.Context, *sql.Tx, eventbus.Event) error {
 			return errors.New("webhook transaction is required")
 		}
 		switch event.Type {
-		case "payment.created", "ledger.reserved", "settlement.completed", "payment.failed", "payment.refunded":
+		case "payment.created", "ledger.reserved", "payment.settled", "payment.failed", "payment.refunded":
 		default:
 			return nil
 		}
@@ -91,7 +91,7 @@ func EventHandler() func(context.Context, *sql.Tx, eventbus.Event) error {
 		if err := tx.QueryRowContext(ctx, `SELECT customer_id FROM payments WHERE id=$1`, event.AggregateID).Scan(&customer); err != nil {
 			return fmt.Errorf("load webhook customer: %w", err)
 		}
-		publicType := map[string]string{"ledger.reserved": "payment.processing", "settlement.completed": "payment.settled"}[event.Type]
+		publicType := map[string]string{"ledger.reserved": "payment.processing"}[event.Type]
 		if publicType == "" {
 			publicType = event.Type
 		}
