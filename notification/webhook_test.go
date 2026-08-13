@@ -1,12 +1,17 @@
 package notification
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"testing"
 	"time"
+
+	"github.com/DATA-DOG/go-sqlmock"
+
+	"stablerail/eventbus"
 )
 
 func TestSignatureCoversTimestampAndExactBody(t *testing.T) {
@@ -27,5 +32,29 @@ func TestNewDispatcherRejectsInvalidRetryWindow(t *testing.T) {
 	_, err := NewDispatcher(&sql.DB{}, nil, Config{InitialBackoff: 2 * time.Second, MaxBackoff: time.Second})
 	if err == nil {
 		t.Fatal("expected invalid retry window to be rejected")
+	}
+}
+
+func TestEventHandlerCreatesRefundDelivery(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	mock.ExpectBegin()
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)
+	event := eventbus.Event{ID: "evt_refunded", Type: "payment.refunded", Version: 1, AggregateID: "pay_1", AggregateType: "payment", Payload: []byte(`{"reason":"provider payout refunded"}`), OccurredAt: now}
+	mock.ExpectQuery("SELECT customer_id FROM payments").WithArgs("pay_1").WillReturnRows(sqlmock.NewRows([]string{"customer_id"}).AddRow("cus_1"))
+	mock.ExpectExec("INSERT INTO webhook_deliveries").WithArgs("evt_refunded", "pay_1", "payment.refunded", sqlmock.AnyArg(), now, "cus_1").WillReturnResult(sqlmock.NewResult(0, 1))
+
+	if err := EventHandler()(context.Background(), tx, event); err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
 	}
 }
