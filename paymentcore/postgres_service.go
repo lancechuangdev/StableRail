@@ -42,18 +42,26 @@ func (s *PostgresService) CreatePayment(
 	amountMinor int64,
 	customerID, idempotencyKey string,
 ) (*Payment, error) {
-	return s.createPayment(ctx, externalRef, currency, amountMinor, customerID, idempotencyKey, nil)
+	return s.createPayment(ctx, externalRef, currency, amountMinor, customerID, idempotencyKey, "", nil)
+}
+
+// CreatePaymentWithPayoutQuote atomically consumes one provider-bound payout quote.
+func (s *PostgresService) CreatePaymentWithPayoutQuote(ctx context.Context, externalRef, currency string, amountMinor int64, customerID, idempotencyKey, payoutQuoteID string) (*Payment, error) {
+	if payoutQuoteID == "" {
+		return nil, errors.New("payout quote ID is required")
+	}
+	return s.createPayment(ctx, externalRef, currency, amountMinor, customerID, idempotencyKey, payoutQuoteID, nil)
 }
 
 func (s *PostgresService) CreatePaymentWithDestination(ctx context.Context, externalRef, currency string, amountMinor int64, customerID, idempotencyKey string, destination Destination) (*Payment, error) {
 	if err := destination.Validate(); err != nil {
 		return nil, err
 	}
-	return s.createPayment(ctx, externalRef, currency, amountMinor, customerID, idempotencyKey, &destination)
+	return s.createPayment(ctx, externalRef, currency, amountMinor, customerID, idempotencyKey, "", &destination)
 }
 
 func (s *PostgresService) createPayment(
-	ctx context.Context, externalRef, currency string, amountMinor int64, customerID, idempotencyKey string, destination *Destination,
+	ctx context.Context, externalRef, currency string, amountMinor int64, customerID, idempotencyKey, payoutQuoteID string, destination *Destination,
 ) (*Payment, error) {
 	if externalRef == "" || currency == "" || amountMinor <= 0 || customerID == "" || idempotencyKey == "" {
 		return nil, errors.New("invalid payment payload")
@@ -73,8 +81,43 @@ func (s *PostgresService) createPayment(
 	payment := &Payment{
 		ID: paymentID, ExternalReference: externalRef, Currency: currency,
 		AmountMinor: amountMinor, CustomerID: customerID, State: StateCreated,
-		IdempotencyKey: idempotencyKey, CreatedAt: now, UpdatedAt: now,
+		IdempotencyKey: idempotencyKey, PayoutQuoteID: payoutQuoteID, CreatedAt: now, UpdatedAt: now,
 		Destination: destination,
+	}
+	if payoutQuoteID != "" {
+		var quoteCustomer, quoteCurrency string
+		var quoteAmount int64
+		var quoteStatus string
+		var expiresAt time.Time
+		err := tx.QueryRowContext(ctx, `SELECT local_customer_id,source_currency,sender_amount_minor,status,expires_at FROM blindpay_quotes WHERE id=$1 FOR UPDATE`, payoutQuoteID).Scan(&quoteCustomer, &quoteCurrency, &quoteAmount, &quoteStatus, &expiresAt)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, errors.New("payout quote not found")
+		}
+		if err != nil {
+			return nil, fmt.Errorf("lock payout quote: %w", err)
+		}
+		if quoteStatus == "accepted" {
+			existing, lookupErr := getPaymentByIdempotencyKey(ctx, tx, idempotencyKey)
+			if lookupErr == nil && existing.PayoutQuoteID == payoutQuoteID {
+				if err := tx.Commit(); err != nil {
+					return nil, fmt.Errorf("commit idempotent payout payment lookup: %w", err)
+				}
+				return existing, nil
+			}
+			return nil, errors.New("payout quote already accepted")
+		}
+		if quoteStatus != "open" || !expiresAt.After(now) {
+			if _, err := tx.ExecContext(ctx, `UPDATE blindpay_quotes SET status='expired',updated_at=$1 WHERE id=$2 AND status='open'`, now, payoutQuoteID); err != nil {
+				return nil, fmt.Errorf("expire payout quote: %w", err)
+			}
+			if err := tx.Commit(); err != nil {
+				return nil, fmt.Errorf("commit payout quote expiration: %w", err)
+			}
+			return nil, errors.New("payout quote expired")
+		}
+		if quoteCustomer != customerID || quoteCurrency != currency || quoteAmount != amountMinor {
+			return nil, errors.New("payment customer, amount, or currency does not match payout quote")
+		}
 	}
 
 	result, err := tx.ExecContext(ctx, `
@@ -98,6 +141,9 @@ func (s *PostgresService) createPayment(
 		if err != nil {
 			return nil, err
 		}
+		if payoutQuoteID != "" && existing.PayoutQuoteID != payoutQuoteID {
+			return nil, errors.New("idempotency key is already bound to a different payment or payout quote")
+		}
 		if err := tx.Commit(); err != nil {
 			return nil, fmt.Errorf("commit idempotent payment lookup: %w", err)
 		}
@@ -106,6 +152,15 @@ func (s *PostgresService) createPayment(
 	if destination != nil {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO payment_destinations(payment_id,kind,chain,address,created_at) VALUES($1,$2,NULLIF($3,''),NULLIF($4,''),$5)`, payment.ID, destination.Type, destination.Chain, destination.Address, now); err != nil {
 			return nil, fmt.Errorf("insert payment destination: %w", err)
+		}
+	}
+	if payoutQuoteID != "" {
+		result, err := tx.ExecContext(ctx, `UPDATE blindpay_quotes SET status='accepted',payment_id=$1,updated_at=$2 WHERE id=$3 AND status='open'`, payment.ID, now, payoutQuoteID)
+		if err != nil {
+			return nil, fmt.Errorf("accept payout quote: %w", err)
+		}
+		if rows, err := result.RowsAffected(); err != nil || rows != 1 {
+			return nil, errors.New("payout quote already accepted")
 		}
 	}
 	if err := insertHistory(ctx, tx, payment.ID, "created", "payment intent created", StateCreated, "payment created", now); err != nil {
@@ -160,6 +215,9 @@ func (s *PostgresService) GetPayment(ctx context.Context, paymentID string) (*Pa
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get payment: %w", err)
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT id FROM blindpay_quotes WHERE payment_id=$1`, paymentID).Scan(&p.PayoutQuoteID); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("get payment payout quote: %w", err)
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT state, occurred_at, note FROM payment_timeline_entries
 		WHERE payment_id = $1 ORDER BY occurred_at, id`, paymentID)
@@ -356,6 +414,9 @@ func getPaymentByIdempotencyKey(ctx context.Context, tx *sql.Tx, key string) (*P
 	)
 	if err != nil {
 		return nil, fmt.Errorf("get idempotent payment: %w", err)
+	}
+	if err := tx.QueryRowContext(ctx, `SELECT id FROM blindpay_quotes WHERE payment_id=$1`, payment.ID).Scan(&payment.PayoutQuoteID); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("get idempotent payment payout quote: %w", err)
 	}
 	return payment, nil
 }

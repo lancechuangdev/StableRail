@@ -70,6 +70,42 @@ func TestPostgresCreateRollsBackWhenOutboxInsertFails(t *testing.T) {
 	}
 }
 
+func TestPostgresCreateWithPayoutQuoteBindsQuoteAndPaymentAtomically(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("create SQL mock: %v", err)
+	}
+	defer db.Close()
+
+	service := deterministicPostgresService(db)
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT local_customer_id,source_currency,sender_amount_minor,status,expires_at FROM blindpay_quotes").
+		WithArgs("qu_test").
+		WillReturnRows(sqlmock.NewRows([]string{"local_customer_id", "source_currency", "sender_amount_minor", "status", "expires_at"}).
+			AddRow("customer-1", "USDB", int64(2500), "open", service.now().Add(time.Minute)))
+	mock.ExpectExec("INSERT INTO payments").
+		WithArgs("pay_test", "order-1", "USDB", int64(2500), "customer-1", StateCreated, "idem-1", service.now()).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("UPDATE blindpay_quotes SET status='accepted'").
+		WithArgs("pay_test", service.now(), "qu_test").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO payment_audit_events").WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec("INSERT INTO payment_timeline_entries").WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec("INSERT INTO outbox_events").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	payment, err := service.CreatePaymentWithPayoutQuote(context.Background(), "order-1", "USDB", 2500, "customer-1", "idem-1", "qu_test")
+	if err != nil {
+		t.Fatalf("CreatePaymentWithPayoutQuote returned error: %v", err)
+	}
+	if payment.PayoutQuoteID != "qu_test" {
+		t.Fatalf("PayoutQuoteID = %q", payment.PayoutQuoteID)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet database expectations: %v", err)
+	}
+}
+
 func TestPostgresTransitionCommitsStateAndOutboxTogether(t *testing.T) {
 	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
 	if err != nil {

@@ -107,7 +107,8 @@ type Quote struct {
 	BlindPayQuotation                                       json.Number `json:"blindpay_quotation"`
 	SenderAmount, ReceiverAmount, PartnerFeeAmount, FlatFee int64
 	BillingFeeAmount                                        *int64
-	Contract                                                *Contract `json:"contract"`
+	Contract                                                *Contract       `json:"contract"`
+	RawPayload                                              json.RawMessage `json:"-"`
 }
 
 func (q *Quote) UnmarshalJSON(data []byte) error {
@@ -127,7 +128,16 @@ func (q *Quote) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &w); err != nil {
 		return err
 	}
-	*q = Quote(w)
+	q.ID = w.ID
+	q.ExpiresAt = w.ExpiresAt
+	q.CommercialQuotation = w.CommercialQuotation
+	q.BlindPayQuotation = w.BlindPayQuotation
+	q.SenderAmount = w.SenderAmount
+	q.ReceiverAmount = w.ReceiverAmount
+	q.PartnerFeeAmount = w.PartnerFeeAmount
+	q.FlatFee = w.FlatFee
+	q.BillingFeeAmount = w.BillingFeeAmount
+	q.Contract = w.Contract
 	return nil
 }
 
@@ -136,7 +146,8 @@ func (c *Client) CreateQuote(ctx context.Context, r QuoteRequest) (Quote, error)
 		return Quote{}, errors.New("invalid BlindPay payout quote request")
 	}
 	var out Quote
-	err := c.do(ctx, http.MethodPost, "/quotes", r.IdempotencyKey, r, &out)
+	raw, err := c.do(ctx, http.MethodPost, "/quotes", r.IdempotencyKey, r, &out)
+	out.RawPayload = raw
 	if err == nil && (!strings.HasPrefix(out.ID, "qu_") || out.ExpiresAt <= 0 || out.SenderAmount <= 0 || out.ReceiverAmount <= 0) {
 		err = errors.New("BlindPay returned an invalid payout quote")
 	}
@@ -161,7 +172,7 @@ func (c *Client) CreateEVMPayout(ctx context.Context, r PayoutRequest) (Payout, 
 		return Payout{}, errors.New("invalid BlindPay payout request")
 	}
 	var out Payout
-	err := c.do(ctx, http.MethodPost, "/payouts/evm", r.IdempotencyKey, r, &out)
+	_, err := c.do(ctx, http.MethodPost, "/payouts/evm", r.IdempotencyKey, r, &out)
 	if err == nil && (!strings.HasPrefix(out.ID, "po_") || out.Status == "") {
 		err = errors.New("BlindPay returned an invalid payout")
 	}
@@ -173,22 +184,22 @@ func (c *Client) GetPayout(ctx context.Context, id string) (Payout, error) {
 		return Payout{}, errors.New("invalid BlindPay payout ID")
 	}
 	var out Payout
-	err := c.do(ctx, http.MethodGet, "/payouts/"+url.PathEscape(id), "", nil, &out)
+	_, err := c.do(ctx, http.MethodGet, "/payouts/"+url.PathEscape(id), "", nil, &out)
 	return out, err
 }
 
-func (c *Client) do(ctx context.Context, method, path, idempotencyKey string, body, out any) error {
+func (c *Client) do(ctx context.Context, method, path, idempotencyKey string, body, out any) (json.RawMessage, error) {
 	var reader io.Reader
 	if body != nil {
 		raw, err := json.Marshal(body)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		reader = bytes.NewReader(raw)
 	}
 	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+"/instances/"+url.PathEscape(c.instanceID)+path, reader)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
 	req.Header.Set("Accept", "application/json")
@@ -200,24 +211,24 @@ func (c *Client) do(ctx context.Context, method, path, idempotencyKey string, bo
 	}
 	res, err := c.httpClient.Do(req)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer res.Body.Close()
 	raw, err := io.ReadAll(io.LimitReader(res.Body, 2<<20))
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		return classifyAPIError(res.StatusCode, raw)
+		return raw, classifyAPIError(res.StatusCode, raw)
 	}
 	if out != nil && len(raw) > 0 {
 		dec := json.NewDecoder(bytes.NewReader(raw))
 		dec.UseNumber()
 		if err := dec.Decode(out); err != nil {
-			return fmt.Errorf("decode BlindPay response: %w", err)
+			return raw, fmt.Errorf("decode BlindPay response: %w", err)
 		}
 	}
-	return nil
+	return raw, nil
 }
 
 func classifyAPIError(status int, raw []byte) error {

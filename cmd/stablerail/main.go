@@ -25,6 +25,7 @@ import (
 	"stablerail/reconciliation"
 	"stablerail/saga"
 	"stablerail/settlement"
+	"stablerail/settlement/blindpay"
 	"stablerail/workers"
 )
 
@@ -98,7 +99,27 @@ func run() error {
 		return err
 	}
 
-	handler, err := paymentapi.NewHandler(paymentcore.NewPostgresService(db), db)
+	var payoutQuotes paymentapi.BlindPayPayoutQuoteService
+	if config.SettlementProvider == "blindpay" {
+		client, err := blindpay.NewClient(blindpay.Config{
+			APIKey:     config.BlindPay.APIKey,
+			InstanceID: config.BlindPay.InstanceID,
+			BaseURL:    config.BlindPay.BaseURL,
+		})
+		if err != nil {
+			return err
+		}
+		references, err := blindpay.NewRepository(db)
+		if err != nil {
+			return err
+		}
+		payoutQuotes, err = blindpay.NewQuoteService(client, references, config.BlindPay.Network, config.BlindPay.Token)
+		if err != nil {
+			return err
+		}
+	}
+
+	handler, err := paymentapi.NewHandler(paymentcore.NewPostgresService(db), db, payoutQuotes)
 	if err != nil {
 		return err
 	}

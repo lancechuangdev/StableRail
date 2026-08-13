@@ -27,7 +27,7 @@ func TestPostgresPaymentHTTPEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	handler, err := NewHandler(paymentcore.NewPostgresService(db), db)
+	handler, err := NewHandler(paymentcore.NewPostgresService(db), db, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

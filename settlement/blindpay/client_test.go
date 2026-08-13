@@ -35,7 +35,7 @@ func TestCreateQuoteContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if q.ID != "qu_test" || q.CommercialQuotation.String() != "1.001" || q.Contract == nil || q.Contract.Network.ChainID != 8453 {
+	if q.ID != "qu_test" || q.CommercialQuotation.String() != "1.001" || q.Contract == nil || q.Contract.Network.ChainID != 8453 || !strings.Contains(string(q.RawPayload), `"id":"qu_test"`) {
 		t.Fatalf("unexpected quote: %+v", q)
 	}
 }
