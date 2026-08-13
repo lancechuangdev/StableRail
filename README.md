@@ -440,7 +440,7 @@ The initial chart of accounts defines operating cash as an asset and settlement 
    - Implement a deterministic mock provider for local and integration testing
    - Consume settlement commands and correlate asynchronous provider results with the payment saga
    - Make provider submission and webhook handling idempotent
-12. **Provider-bound quote and FX lifecycle — planned**
+12. **Provider-bound quote and FX lifecycle — complete**
    - Create BlindPay payout quotes with exact amounts, rates, fees, and expiration
    - Bind each provider quote to one payment and payout execution
    - Add precision, expiration, idempotency, and concurrency tests
@@ -451,10 +451,11 @@ The initial chart of accounts defines operating cash as an asset and settlement 
    - Publish customer-facing payment status updates
    - Sign webhook deliveries and retry transient failures
    - Provide delivery history, idempotency, and operator redrive controls
-14. **Reconciliation and observability — complete**
+14. **Reconciliation and observability — partial**
    - Compare internal ledger, provider, and settlement records
    - Record discrepancies and support operator resolution workflows
-   - Add structured logs, metrics, traces, and alerts across the payment path
+   - Structured HTTP logs, request metrics, and durable discrepancy records are implemented
+   - Distributed traces and production alert integrations remain operational follow-up work
 15. **Event replay CLI — deferred**
    - Select events by topic, type, aggregate, and time range
    - Replay into a separate destination topic by default
@@ -462,16 +463,16 @@ The initial chart of accounts defines operating cash as an asset and settlement 
 
 ### Phase 6: production settlement rails
 
-16. **Production provider and blockchain adapters — planned**
-   - Implement one real provider behind the settlement boundary
-   - Manage credentials, rate limits, webhooks, and provider-specific failure mapping
-   - Add chain submission and confirmation tracking only where the chosen settlement rail requires it
+16. **Production provider and blockchain adapters — partial**
+   - BlindPay managed-wallet payout quotes, submissions, status webhooks, and recovery are implemented
+   - Production credential rotation, provider rate limiting, alerting, and rollout controls remain
+   - External-wallet chain submission and confirmation tracking remains out of scope for the managed-wallet path
 
 Each step will be implemented and verified independently before work begins on the next one.
 
 ### Recommended BlindPay architecture
 
-BlindPay is the planned first production payout rail. StableRail will fund payouts
+BlindPay is the first implemented payout rail. StableRail funds payouts
 from a BlindPay-managed wallet associated with the configured customer. This avoids
 an application-side approval or signing step: StableRail creates a provider-bound
 quote and submits the payout using the managed wallet's address. Managed wallets do
@@ -483,8 +484,8 @@ BlindPay's payout quote is the authoritative transactional FX quote. It binds th
 recipient bank account, funding network and token, requested amount side, fee policy,
 exact sender and receiver amounts, provider quote ID, and five-minute expiration.
 StableRail must persist those returned values without recalculating them locally.
-StableRail does not currently expose a generic quote service; BlindPay quote support
-will be introduced with the payout integration.
+StableRail exposes provider-bound BlindPay payout quotes rather than a generic quote
+abstraction.
 
 ```text
 BlindPay customer + approved bank account
@@ -586,13 +587,13 @@ or reconciliation confirms it.
    - Deduplicate by `svix-id`, durably store verified payloads, apply monotonic payout
      transitions, and emit internal events through the transactional outbox.
 7. **Saga and accounting completion**
-   - Extend the saga for submission, processing, compliance hold, completion,
-     failure, refund, and manual-review states.
+   - The saga models submission, processing, compliance hold, completion, failure,
+     refund, and manual-review states.
    - Track provider wallet assets and payout funds in transit separately; post final
      settlement only on `completed`, and use distinct accounting for returned funds.
 8. **Reconciliation and operations**
-   - Poll nonterminal and ambiguous payouts to repair missed webhooks and compare
-     provider IDs, amounts, statuses, and return transactions with local records.
+   - Retry ambiguous submissions with the original provider idempotency key, repair
+     early terminal webhooks, and compare provider payout status with local payment state.
    - Alert on expired quotes, prolonged holds, unresolved failures, unknown outcomes,
      and provider/internal balance mismatches.
 9. **Verification and rollout**
@@ -711,7 +712,9 @@ The API listens on `:8080` by default. `STABLERAIL_HTTP_ADDRESS`, `STABLERAIL_SH
 | `GET /readyz` | Check whether PostgreSQL is reachable |
 | `GET /metrics` | Read Prometheus-format HTTP metrics |
 
-Repeating a request with the same idempotency key returns the original payment. The current implementation does not yet compare the repeated request body with the original body; clients must not reuse a key for a different operation.
+Repeating an equivalent request with the same idempotency key returns the original
+payment. Reusing the key with different payment fields, destination, or payout quote
+returns `409 Conflict`.
 
 ### 5. Create and inspect a payment
 
@@ -853,6 +856,15 @@ if err != nil {
 _, err = processor.Process(ctx, "payment-saga", event, coordinator.Handle)
 ```
 
-The workflow emits `policy.evaluate`, `ledger.reserve`, and `settlement.execute` commands. Policy or ledger failure emits `payment.fail`. A settlement failure or timeout emits `ledger.release`; after `ledger.released`, the saga records compensation and emits `payment.fail`. Replies must include the command's `correlation_id` in their payload. Run `coordinator.ExpireOnce(ctx)` periodically to claim overdue sagas safely across multiple workers and initiate failure or compensation.
+The workflow emits `policy.evaluate`, `ledger.reserve`, and `settlement.execute`
+commands. Policy or ledger failure emits `payment.fail`. Settlement completion moves
+through `settling_payment` until `payment.settled` is acknowledged. A settlement
+failure or timeout releases the open reservation before failing the payment. A refund
+before settlement releases the reservation; a refund after settlement records a
+distinct reversing journal before emitting `payment.refund`. BlindPay `on_hold`
+events use a compliance deadline and escalate to `manual_review` without assuming
+funds are available. Replies must include the command's `correlation_id`. Run
+`coordinator.ExpireOnce(ctx)` periodically to claim overdue sagas safely across
+multiple workers and retry or escalate the appropriate operation.
 
 The default development broker address is `localhost:9092`. Although the local broker permits automatic topic creation, explicitly create the application topics before startup so consumer groups receive their partition assignments. Production environments should provision topics with appropriate partition, replication, retention, and access-control settings.
