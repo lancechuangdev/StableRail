@@ -523,6 +523,34 @@ call, and then records the BlindPay payout ID and response. An ambiguous respons
 resolved through provider lookup or reconciliation rather than blind resubmission;
 each BlindPay quote is single-use.
 
+#### Register the BlindPay webhook URL
+
+`POST /v1/providers/blindpay/webhooks` is an **inbound provider webhook**. It is
+not an API that a StableRail client should call. After you deploy StableRail to a
+public HTTPS address, register this exact URL in the BlindPay instance dashboard:
+
+```text
+https://www.example.com/v1/providers/blindpay/webhooks
+```
+
+BlindPay then sends signed `POST` deliveries to that URL for payout events such as
+`payout.new`, `payout.update`, and `payout.complete`. Set
+`STABLERAIL_BLINDPAY_WEBHOOK_SECRET` to the `whsec_...` secret displayed for that
+registered BlindPay webhook endpoint. StableRail uses it to verify the `svix-id`,
+`svix-timestamp`, and `svix-signature` headers before it stores or acts on a
+delivery.
+
+```text
+StableRail client ──► /v1/blindpay/payout-quotes, /v1/payments
+
+BlindPay ──► https://www.example.com/v1/providers/blindpay/webhooks
+             (signed payout status notifications)
+```
+
+The webhook URL must be reachable by BlindPay over HTTPS. Do not expose the webhook
+secret to clients, and do not accept a payout status as final until a verified webhook
+or reconciliation confirms it.
+
 #### BlindPay integration steps
 
 1. **Provider client and configuration**

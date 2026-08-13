@@ -94,6 +94,7 @@ func run() error {
 
 	var payoutQuotes paymentapi.BlindPayPayoutQuoteService
 	var settlementProvider settlement.SettlementProvider = settlement.NewMockProvider(settlement.SettlementResult{})
+	var blindPayWebhookHandler http.Handler
 	if config.SettlementProvider == "blindpay" {
 		client, err := blindpay.NewClient(blindpay.Config{
 			APIKey:     config.BlindPay.APIKey,
@@ -119,6 +120,18 @@ func run() error {
 		if err != nil {
 			return err
 		}
+		verifier, err := blindpay.NewWebhookVerifier(config.BlindPay.WebhookSecret)
+		if err != nil {
+			return err
+		}
+		webhooks, err := blindpay.NewPayoutWebhookService(db)
+		if err != nil {
+			return err
+		}
+		blindPayWebhookHandler, err = blindpay.NewWebhookHandler(verifier, webhooks)
+		if err != nil {
+			return err
+		}
 	}
 	commandLoop := &consumer.Loop{
 		Reader:    consumer.NewKafkaReader(config.KafkaBrokers, string(saga.CommandTopic), "stablerail-core-workers"),
@@ -134,6 +147,9 @@ func run() error {
 	metrics := &observability.Metrics{}
 	root := http.NewServeMux()
 	root.Handle("/metrics", metrics.Handler())
+	if blindPayWebhookHandler != nil {
+		root.Handle("POST /v1/providers/blindpay/webhooks", blindPayWebhookHandler)
+	}
 	root.Handle("/", metrics.Middleware(handler, logger))
 	server := &http.Server{
 		Addr:              config.HTTPAddress,
