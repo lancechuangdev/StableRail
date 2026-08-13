@@ -40,30 +40,30 @@ func (s *PostgresService) CreatePayment(
 	ctx context.Context,
 	externalRef, currency string,
 	amountMinor int64,
-	customerID, idempotencyKey string,
+	tenantID, idempotencyKey string,
 ) (*Payment, error) {
-	return s.createPayment(ctx, externalRef, currency, amountMinor, customerID, idempotencyKey, "", nil)
+	return s.createPayment(ctx, externalRef, currency, amountMinor, tenantID, idempotencyKey, "", nil)
 }
 
 // CreatePaymentWithPayoutQuote atomically consumes one provider-bound payout quote.
-func (s *PostgresService) CreatePaymentWithPayoutQuote(ctx context.Context, externalRef, currency string, amountMinor int64, customerID, idempotencyKey, payoutQuoteID string) (*Payment, error) {
+func (s *PostgresService) CreatePaymentWithPayoutQuote(ctx context.Context, externalRef, currency string, amountMinor int64, tenantID, idempotencyKey, payoutQuoteID string) (*Payment, error) {
 	if payoutQuoteID == "" {
 		return nil, errors.New("payout quote ID is required")
 	}
-	return s.createPayment(ctx, externalRef, currency, amountMinor, customerID, idempotencyKey, payoutQuoteID, nil)
+	return s.createPayment(ctx, externalRef, currency, amountMinor, tenantID, idempotencyKey, payoutQuoteID, nil)
 }
 
-func (s *PostgresService) CreatePaymentWithDestination(ctx context.Context, externalRef, currency string, amountMinor int64, customerID, idempotencyKey string, destination Destination) (*Payment, error) {
+func (s *PostgresService) CreatePaymentWithDestination(ctx context.Context, externalRef, currency string, amountMinor int64, tenantID, idempotencyKey string, destination Destination) (*Payment, error) {
 	if err := destination.Validate(); err != nil {
 		return nil, err
 	}
-	return s.createPayment(ctx, externalRef, currency, amountMinor, customerID, idempotencyKey, "", &destination)
+	return s.createPayment(ctx, externalRef, currency, amountMinor, tenantID, idempotencyKey, "", &destination)
 }
 
 func (s *PostgresService) createPayment(
-	ctx context.Context, externalRef, currency string, amountMinor int64, customerID, idempotencyKey, payoutQuoteID string, destination *Destination,
+	ctx context.Context, externalRef, currency string, amountMinor int64, tenantID, idempotencyKey, payoutQuoteID string, destination *Destination,
 ) (*Payment, error) {
-	if externalRef == "" || currency == "" || amountMinor <= 0 || customerID == "" || idempotencyKey == "" {
+	if externalRef == "" || currency == "" || amountMinor <= 0 || tenantID == "" || idempotencyKey == "" {
 		return nil, errors.New("invalid payment payload")
 	}
 
@@ -80,16 +80,16 @@ func (s *PostgresService) createPayment(
 	now := s.now()
 	payment := &Payment{
 		ID: paymentID, ExternalReference: externalRef, Currency: currency,
-		AmountMinor: amountMinor, CustomerID: customerID, State: StateCreated,
+		AmountMinor: amountMinor, TenantID: tenantID, State: StateCreated,
 		IdempotencyKey: idempotencyKey, PayoutQuoteID: payoutQuoteID, CreatedAt: now, UpdatedAt: now,
 		Destination: destination,
 	}
 	if payoutQuoteID != "" {
-		var quoteCustomer, quoteCurrency string
+		var quoteTenant, quoteCurrency string
 		var quoteAmount int64
 		var quoteStatus string
 		var expiresAt time.Time
-		err := tx.QueryRowContext(ctx, `SELECT local_customer_id,source_currency,sender_amount_minor,status,expires_at FROM blindpay_quotes WHERE id=$1 FOR UPDATE`, payoutQuoteID).Scan(&quoteCustomer, &quoteCurrency, &quoteAmount, &quoteStatus, &expiresAt)
+		err := tx.QueryRowContext(ctx, `SELECT tenant_id,source_currency,sender_amount_minor,status,expires_at FROM blindpay_quotes WHERE id=$1 FOR UPDATE`, payoutQuoteID).Scan(&quoteTenant, &quoteCurrency, &quoteAmount, &quoteStatus, &expiresAt)
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, errors.New("payout quote not found")
 		}
@@ -98,7 +98,7 @@ func (s *PostgresService) createPayment(
 		}
 		if quoteStatus == "accepted" {
 			existing, lookupErr := getPaymentByIdempotencyKey(ctx, tx, idempotencyKey)
-			if lookupErr == nil && paymentRequestMatches(existing, externalRef, currency, amountMinor, customerID, payoutQuoteID, destination) {
+			if lookupErr == nil && paymentRequestMatches(existing, externalRef, currency, amountMinor, tenantID, payoutQuoteID, destination) {
 				if err := tx.Commit(); err != nil {
 					return nil, fmt.Errorf("commit idempotent payout payment lookup: %w", err)
 				}
@@ -115,19 +115,19 @@ func (s *PostgresService) createPayment(
 			}
 			return nil, errors.New("payout quote expired")
 		}
-		if quoteCustomer != customerID || quoteCurrency != currency || quoteAmount != amountMinor {
-			return nil, errors.New("payment customer, amount, or currency does not match payout quote")
+		if quoteTenant != tenantID || quoteCurrency != currency || quoteAmount != amountMinor {
+			return nil, errors.New("payment tenant, amount, or currency does not match payout quote")
 		}
 	}
 
 	result, err := tx.ExecContext(ctx, `
 		INSERT INTO payments
-			(id, external_reference, currency, amount_minor, customer_id, state,
+			(id, external_reference, currency, amount_minor, tenant_id, state,
 			 idempotency_key, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)
 		ON CONFLICT (idempotency_key) DO NOTHING`,
 		payment.ID, payment.ExternalReference, payment.Currency, payment.AmountMinor,
-		payment.CustomerID, payment.State, payment.IdempotencyKey, now,
+		payment.TenantID, payment.State, payment.IdempotencyKey, now,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert payment: %w", err)
@@ -141,7 +141,7 @@ func (s *PostgresService) createPayment(
 		if err != nil {
 			return nil, err
 		}
-		if !paymentRequestMatches(existing, externalRef, currency, amountMinor, customerID, payoutQuoteID, destination) {
+		if !paymentRequestMatches(existing, externalRef, currency, amountMinor, tenantID, payoutQuoteID, destination) {
 			return nil, ErrIdempotencyConflict
 		}
 		if err := tx.Commit(); err != nil {
@@ -173,8 +173,8 @@ func (s *PostgresService) createPayment(
 		ExternalReference string `json:"external_reference"`
 		Currency          string `json:"currency"`
 		AmountMinor       int64  `json:"amount_minor"`
-		CustomerID        string `json:"customer_id"`
-	}{externalRef, currency, amountMinor, customerID})
+		TenantID          string `json:"tenant_id"`
+	}{externalRef, currency, amountMinor, tenantID})
 	if err != nil {
 		return nil, fmt.Errorf("marshal payment created payload: %w", err)
 	}
@@ -200,8 +200,8 @@ func (s *PostgresService) Settle(ctx context.Context, paymentID string) error {
 func (s *PostgresService) GetPayment(ctx context.Context, paymentID string) (*Payment, error) {
 	p := &Payment{}
 	err := s.db.QueryRowContext(ctx, `SELECT id, external_reference, currency, amount_minor,
-		customer_id, state, idempotency_key, created_at, updated_at FROM payments WHERE id = $1`, paymentID).
-		Scan(&p.ID, &p.ExternalReference, &p.Currency, &p.AmountMinor, &p.CustomerID,
+		tenant_id, state, idempotency_key, created_at, updated_at FROM payments WHERE id = $1`, paymentID).
+		Scan(&p.ID, &p.ExternalReference, &p.Currency, &p.AmountMinor, &p.TenantID,
 			&p.State, &p.IdempotencyKey, &p.CreatedAt, &p.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("%w: %s", ErrPaymentNotFound, paymentID)
@@ -404,12 +404,12 @@ func insertHistory(
 func getPaymentByIdempotencyKey(ctx context.Context, tx *sql.Tx, key string) (*Payment, error) {
 	payment := &Payment{}
 	err := tx.QueryRowContext(ctx, `
-		SELECT id, external_reference, currency, amount_minor, customer_id, state,
+		SELECT id, external_reference, currency, amount_minor, tenant_id, state,
 		       idempotency_key, created_at, updated_at
 		FROM payments WHERE idempotency_key = $1`, key,
 	).Scan(
 		&payment.ID, &payment.ExternalReference, &payment.Currency, &payment.AmountMinor,
-		&payment.CustomerID, &payment.State, &payment.IdempotencyKey,
+		&payment.TenantID, &payment.State, &payment.IdempotencyKey,
 		&payment.CreatedAt, &payment.UpdatedAt,
 	)
 	if err != nil {
@@ -427,8 +427,8 @@ func getPaymentByIdempotencyKey(ctx context.Context, tx *sql.Tx, key string) (*P
 	return payment, nil
 }
 
-func paymentRequestMatches(payment *Payment, externalRef, currency string, amountMinor int64, customerID, payoutQuoteID string, destination *Destination) bool {
-	if payment.ExternalReference != externalRef || payment.Currency != currency || payment.AmountMinor != amountMinor || payment.CustomerID != customerID || payment.PayoutQuoteID != payoutQuoteID {
+func paymentRequestMatches(payment *Payment, externalRef, currency string, amountMinor int64, tenantID, payoutQuoteID string, destination *Destination) bool {
+	if payment.ExternalReference != externalRef || payment.Currency != currency || payment.AmountMinor != amountMinor || payment.TenantID != tenantID || payment.PayoutQuoteID != payoutQuoteID {
 		return false
 	}
 	if payment.Destination == nil || destination == nil {

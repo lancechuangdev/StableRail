@@ -22,9 +22,7 @@ func NewOperatorHandler(token string, resolver ManualReviewResolver) (http.Handl
 		return nil, errors.New("operator token and manual review resolver are required")
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		provided, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-		providedHash, tokenHash := sha256.Sum256([]byte(provided)), sha256.Sum256([]byte(token))
-		if !ok || subtle.ConstantTimeCompare(providedHash[:], tokenHash[:]) != 1 {
+		if !validOperatorToken(r, token) {
 			problem(w, http.StatusUnauthorized, "valid operator bearer token is required")
 			return
 		}
@@ -62,4 +60,59 @@ func NewOperatorHandler(token string, resolver ManualReviewResolver) (http.Handl
 		}
 		writeJSON(w, http.StatusAccepted, map[string]string{"payment_id": r.PathValue("id"), "action": input.Action, "status": "accepted"})
 	}), nil
+}
+
+func NewAPIKeyOperatorHandler(token string, keys *APIKeyService) (http.Handler, error) {
+	if strings.TrimSpace(token) == "" || keys == nil {
+		return nil, errors.New("operator token and API key service are required")
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !validOperatorToken(r, token) {
+			problem(w, http.StatusUnauthorized, "valid operator bearer token is required")
+			return
+		}
+		var input struct {
+			Name string `json:"name"`
+		}
+		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&input); err != nil || strings.TrimSpace(input.Name) == "" {
+			problem(w, http.StatusBadRequest, "key name is required")
+			return
+		}
+		var extra any
+		if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+			problem(w, http.StatusBadRequest, "request body must contain one JSON object")
+			return
+		}
+		id, key, err := keys.Issue(r.Context(), r.PathValue("id"), strings.TrimSpace(input.Name))
+		if err != nil {
+			problem(w, http.StatusInternalServerError, "could not issue API key")
+			return
+		}
+		writeJSON(w, http.StatusCreated, map[string]string{"id": id, "tenant_id": r.PathValue("id"), "name": strings.TrimSpace(input.Name), "api_key": key})
+	}), nil
+}
+
+func NewAPIKeyRevokeOperatorHandler(token string, keys *APIKeyService) (http.Handler, error) {
+	if strings.TrimSpace(token) == "" || keys == nil {
+		return nil, errors.New("operator token and API key service are required")
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !validOperatorToken(r, token) {
+			problem(w, http.StatusUnauthorized, "valid operator bearer token is required")
+			return
+		}
+		if err := keys.Revoke(r.Context(), r.PathValue("id")); err != nil {
+			problem(w, http.StatusNotFound, "active API key not found")
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}), nil
+}
+
+func validOperatorToken(r *http.Request, token string) bool {
+	provided, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	providedHash, tokenHash := sha256.Sum256([]byte(provided)), sha256.Sum256([]byte(token))
+	return ok && subtle.ConstantTimeCompare(providedHash[:], tokenHash[:]) == 1
 }

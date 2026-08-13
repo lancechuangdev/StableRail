@@ -10,20 +10,20 @@ import (
 )
 
 type PayoutQuoteRequest struct {
-	IdempotencyKey                                  string
-	LocalCustomerID, BankAccountID, ManagedWalletID string
-	DestinationCurrency                             string
-	CurrencyType                                    string
-	CoverFees                                       bool
-	RequestAmountMinor                              int64
-	PartnerFeeID                                    string
+	IdempotencyKey                           string
+	TenantID, BankAccountID, ManagedWalletID string
+	DestinationCurrency                      string
+	CurrencyType                             string
+	CoverFees                                bool
+	RequestAmountMinor                       int64
+	PartnerFeeID                             string
 }
 
 type PayoutQuote struct {
 	ID                    string    `json:"id"`
 	Provider              string    `json:"provider"`
 	ProviderQuoteID       string    `json:"provider_quote_id"`
-	LocalCustomerID       string    `json:"customer_id"`
+	TenantID              string    `json:"tenant_id"`
 	ProviderBankAccountID string    `json:"bank_account_id"`
 	ProviderWalletID      string    `json:"managed_wallet_id"`
 	SourceCurrency        string    `json:"source_currency"`
@@ -63,10 +63,10 @@ func NewQuoteService(client quoteClient, repo *Repository, network, token string
 
 func (s *QuoteService) Create(ctx context.Context, r PayoutQuoteRequest) (*PayoutQuote, error) {
 	r.DestinationCurrency = strings.ToUpper(strings.TrimSpace(r.DestinationCurrency))
-	if r.IdempotencyKey == "" || r.LocalCustomerID == "" || !strings.HasPrefix(r.BankAccountID, "ba_") || !strings.HasPrefix(r.ManagedWalletID, "bl_") || len(r.DestinationCurrency) != 3 || r.RequestAmountMinor <= 0 || (r.CurrencyType != "sender" && r.CurrencyType != "receiver") {
+	if r.IdempotencyKey == "" || r.TenantID == "" || !strings.HasPrefix(r.BankAccountID, "ba_") || !strings.HasPrefix(r.ManagedWalletID, "bl_") || len(r.DestinationCurrency) != 3 || r.RequestAmountMinor <= 0 || (r.CurrencyType != "sender" && r.CurrencyType != "receiver") {
 		return nil, errors.New("invalid BlindPay payout quote request")
 	}
-	profile, err := s.repo.GetApprovedPayoutProfile(ctx, r.LocalCustomerID, r.BankAccountID, r.ManagedWalletID)
+	profile, err := s.repo.GetApprovedPayoutProfile(ctx, r.TenantID, r.BankAccountID, r.ManagedWalletID)
 	if err != nil {
 		return nil, err
 	}
@@ -96,7 +96,7 @@ func (s *QuoteService) Create(ctx context.Context, r PayoutQuoteRequest) (*Payou
 			return nil, err
 		}
 	}
-	q := &PayoutQuote{ID: providerQuote.ID, Provider: "blindpay", ProviderQuoteID: providerQuote.ID, LocalCustomerID: r.LocalCustomerID, ProviderBankAccountID: r.BankAccountID, ProviderWalletID: r.ManagedWalletID, SourceCurrency: s.token, DestinationCurrency: r.DestinationCurrency, CurrencyType: r.CurrencyType, CoverFees: r.CoverFees, SenderAmountMinor: providerQuote.SenderAmount, ReceiverAmountMinor: providerQuote.ReceiverAmount, CommercialRate: providerQuote.CommercialQuotation.String(), ProviderRate: providerQuote.BlindPayQuotation.String(), FlatFeeMinor: providerQuote.FlatFee, PartnerFeeMinor: providerQuote.PartnerFeeAmount, BillingFeeMinor: providerQuote.BillingFeeAmount, Status: "open", ExpiresAt: expiresAt, CreatedAt: s.now()}
+	q := &PayoutQuote{ID: providerQuote.ID, Provider: "blindpay", ProviderQuoteID: providerQuote.ID, TenantID: r.TenantID, ProviderBankAccountID: r.BankAccountID, ProviderWalletID: r.ManagedWalletID, SourceCurrency: s.token, DestinationCurrency: r.DestinationCurrency, CurrencyType: r.CurrencyType, CoverFees: r.CoverFees, SenderAmountMinor: providerQuote.SenderAmount, ReceiverAmountMinor: providerQuote.ReceiverAmount, CommercialRate: providerQuote.CommercialQuotation.String(), ProviderRate: providerQuote.BlindPayQuotation.String(), FlatFeeMinor: providerQuote.FlatFee, PartnerFeeMinor: providerQuote.PartnerFeeAmount, BillingFeeMinor: providerQuote.BillingFeeAmount, Status: "open", ExpiresAt: expiresAt, CreatedAt: s.now()}
 	if err := s.repo.SavePayoutQuote(ctx, *q, raw); err != nil {
 		return nil, err
 	}

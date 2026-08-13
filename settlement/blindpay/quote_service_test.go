@@ -40,12 +40,12 @@ func TestQuoteServiceRejectsInsufficientManagedWalletBalance(t *testing.T) {
 		t.Fatal(err)
 	}
 	service.now = func() time.Time { return now }
-	mock.ExpectQuery("SELECT c.local_customer_id").
-		WithArgs("customer-1", "ba_test", "bl_test").
-		WillReturnRows(sqlmock.NewRows([]string{"local_customer_id", "provider_customer_id", "kyc_status", "provider_bank_account_id", "rail", "display_name", "account_last_four", "status", "provider_wallet_id", "network", "address", "display_name", "status"}).
-			AddRow("customer-1", "re_test", "approved", "ba_test", "pix", "Bank", "1234", "approved", "bl_test", "sepolia", "0xabc", "Wallet", "active"))
+	mock.ExpectQuery("SELECT c.tenant_id").
+		WithArgs("tenant-1", "ba_test", "bl_test").
+		WillReturnRows(sqlmock.NewRows([]string{"tenant_id", "provider_customer_id", "kyc_status", "provider_bank_account_id", "rail", "display_name", "account_last_four", "status", "provider_wallet_id", "network", "address", "display_name", "status"}).
+			AddRow("tenant-1", "re_test", "approved", "ba_test", "pix", "Bank", "1234", "approved", "bl_test", "sepolia", "0xabc", "Wallet", "active"))
 
-	_, err = service.Create(context.Background(), PayoutQuoteRequest{IdempotencyKey: "idem-1", LocalCustomerID: "customer-1", BankAccountID: "ba_test", ManagedWalletID: "bl_test", DestinationCurrency: "BRL", CurrencyType: "sender", RequestAmountMinor: 2500})
+	_, err = service.Create(context.Background(), PayoutQuoteRequest{IdempotencyKey: "idem-1", TenantID: "tenant-1", BankAccountID: "ba_test", ManagedWalletID: "bl_test", DestinationCurrency: "BRL", CurrencyType: "sender", RequestAmountMinor: 2500})
 	if err == nil || err.Error() != "managed wallet has insufficient USDB balance for payout" {
 		t.Fatalf("error = %v", err)
 	}

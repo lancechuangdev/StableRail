@@ -29,7 +29,7 @@ type Payment struct {
 	ExternalReference string          `json:"external_reference"`
 	Currency          string          `json:"currency"`
 	AmountMinor       int64           `json:"amount_minor"` // The payment amount expressed in the currency’s smallest unit
-	CustomerID        string          `json:"customer_id"`
+	TenantID          string          `json:"tenant_id"`
 	State             PaymentState    `json:"state"`
 	LedgerEntries     []LedgerEntry   `json:"ledger_entries,omitempty"`
 	AuditLog          []AuditEvent    `json:"audit_log,omitempty"`
@@ -122,8 +122,8 @@ func NewService() *Service {
 }
 
 // CreatePayment creates a new payment or returns an existing one for the idempotency key.
-func (s *Service) CreatePayment(externalRef, currency string, amountMinor int64, customerID, idempotencyKey string) (*Payment, error) {
-	if externalRef == "" || currency == "" || amountMinor <= 0 || customerID == "" || idempotencyKey == "" {
+func (s *Service) CreatePayment(externalRef, currency string, amountMinor int64, tenantID, idempotencyKey string) (*Payment, error) {
+	if externalRef == "" || currency == "" || amountMinor <= 0 || tenantID == "" || idempotencyKey == "" {
 		return nil, errors.New("invalid payment payload")
 	}
 
@@ -141,7 +141,7 @@ func (s *Service) CreatePayment(externalRef, currency string, amountMinor int64,
 		ExternalReference: externalRef,
 		Currency:          currency,
 		AmountMinor:       amountMinor,
-		CustomerID:        customerID,
+		TenantID:          tenantID,
 		State:             StateCreated,
 		CreatedAt:         now,
 		UpdatedAt:         now,

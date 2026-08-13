@@ -9,7 +9,7 @@ import (
 func TestCreateAndSettlePaymentLifecycle(t *testing.T) {
 	service := NewService()
 
-	payment, err := service.CreatePayment("order-100", "USD", 2500, "customer-1", "idem-001")
+	payment, err := service.CreatePayment("order-100", "USD", 2500, "tenant-1", "idem-001")
 	if err != nil {
 		t.Fatalf("CreatePayment returned error: %v", err)
 	}
@@ -94,7 +94,7 @@ func assertBalancedJournal(t *testing.T, entries []LedgerEntry) {
 
 func TestReturnedPaymentsAreSnapshots(t *testing.T) {
 	service := NewService()
-	payment, err := service.CreatePayment("order-300", "USD", 500, "customer-3", "idem-snapshot")
+	payment, err := service.CreatePayment("order-300", "USD", 500, "tenant-3", "idem-snapshot")
 	if err != nil {
 		t.Fatalf("CreatePayment returned error: %v", err)
 	}
@@ -154,12 +154,12 @@ func TestConcurrentCreatesHaveUniqueIDs(t *testing.T) {
 func TestDuplicateIdempotencyKeyReturnsExistingPayment(t *testing.T) {
 	service := NewService()
 
-	first, err := service.CreatePayment("order-200", "USD", 1000, "customer-2", "idem-dup")
+	first, err := service.CreatePayment("order-200", "USD", 1000, "tenant-2", "idem-dup")
 	if err != nil {
 		t.Fatalf("CreatePayment returned error: %v", err)
 	}
 
-	second, err := service.CreatePayment("order-201", "USD", 1000, "customer-2", "idem-dup")
+	second, err := service.CreatePayment("order-201", "USD", 1000, "tenant-2", "idem-dup")
 	if err != nil {
 		t.Fatalf("duplicate create returned error: %v", err)
 	}

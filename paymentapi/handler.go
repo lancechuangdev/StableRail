@@ -57,7 +57,7 @@ type createRequest struct {
 	ExternalReference string                   `json:"external_reference"`
 	Currency          string                   `json:"currency"`
 	AmountMinor       int64                    `json:"amount_minor"`
-	CustomerID        string                   `json:"customer_id"`
+	TenantID          string                   `json:"tenant_id"`
 	Destination       *paymentcore.Destination `json:"destination,omitempty"`
 	PayoutQuoteID     string                   `json:"payout_quote_id,omitempty"`
 }
@@ -81,8 +81,16 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	input.Currency = strings.ToUpper(strings.TrimSpace(input.Currency))
-	if strings.TrimSpace(input.ExternalReference) == "" || len(input.Currency) < 3 || len(input.Currency) > 10 || input.AmountMinor <= 0 || strings.TrimSpace(input.CustomerID) == "" {
-		problem(w, http.StatusBadRequest, "external_reference, currency, positive amount_minor, and customer_id are required")
+	tenantID := strings.TrimSpace(input.TenantID)
+	if authenticated, ok := TenantIDFromContext(r.Context()); ok {
+		if tenantID != "" && tenantID != authenticated {
+			problem(w, http.StatusForbidden, "tenant_id does not match the authenticated tenant")
+			return
+		}
+		tenantID = authenticated
+	}
+	if strings.TrimSpace(input.ExternalReference) == "" || len(input.Currency) < 3 || len(input.Currency) > 10 || input.AmountMinor <= 0 || tenantID == "" {
+		problem(w, http.StatusBadRequest, "external_reference, currency, positive amount_minor, and an authenticated tenant are required")
 		return
 	}
 	if input.Destination != nil {
@@ -103,11 +111,11 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 			problem(w, http.StatusBadRequest, "payment destinations are not supported")
 			return
 		}
-		p, err = store.CreatePaymentWithDestination(r.Context(), input.ExternalReference, input.Currency, input.AmountMinor, input.CustomerID, key, *input.Destination)
+		p, err = store.CreatePaymentWithDestination(r.Context(), input.ExternalReference, input.Currency, input.AmountMinor, tenantID, key, *input.Destination)
 	} else if input.PayoutQuoteID != "" {
-		p, err = h.payments.CreatePaymentWithPayoutQuote(r.Context(), input.ExternalReference, input.Currency, input.AmountMinor, input.CustomerID, key, input.PayoutQuoteID)
+		p, err = h.payments.CreatePaymentWithPayoutQuote(r.Context(), input.ExternalReference, input.Currency, input.AmountMinor, tenantID, key, input.PayoutQuoteID)
 	} else {
-		p, err = h.payments.CreatePayment(r.Context(), input.ExternalReference, input.Currency, input.AmountMinor, input.CustomerID, key)
+		p, err = h.payments.CreatePayment(r.Context(), input.ExternalReference, input.Currency, input.AmountMinor, tenantID, key)
 	}
 	if err != nil {
 		if errors.Is(err, paymentcore.ErrIdempotencyConflict) {
@@ -121,7 +129,7 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 }
 
 type createPayoutQuoteRequest struct {
-	CustomerID          string `json:"customer_id"`
+	TenantID            string `json:"tenant_id"`
 	BankAccountID       string `json:"bank_account_id"`
 	ManagedWalletID     string `json:"managed_wallet_id"`
 	DestinationCurrency string `json:"destination_currency"`
@@ -149,7 +157,15 @@ func (h *Handler) createPayoutQuote(w http.ResponseWriter, r *http.Request) {
 		problem(w, http.StatusBadRequest, "request body must contain one JSON object")
 		return
 	}
-	q, err := h.payoutQuotes.Create(r.Context(), blindpay.PayoutQuoteRequest{IdempotencyKey: key, LocalCustomerID: input.CustomerID, BankAccountID: input.BankAccountID, ManagedWalletID: input.ManagedWalletID, DestinationCurrency: input.DestinationCurrency, CurrencyType: input.CurrencyType, CoverFees: input.CoverFees, RequestAmountMinor: input.RequestAmountMinor, PartnerFeeID: input.PartnerFeeID})
+	tenantID := strings.TrimSpace(input.TenantID)
+	if authenticated, ok := TenantIDFromContext(r.Context()); ok {
+		if tenantID != "" && tenantID != authenticated {
+			problem(w, http.StatusForbidden, "tenant_id does not match the authenticated tenant")
+			return
+		}
+		tenantID = authenticated
+	}
+	q, err := h.payoutQuotes.Create(r.Context(), blindpay.PayoutQuoteRequest{IdempotencyKey: key, TenantID: tenantID, BankAccountID: input.BankAccountID, ManagedWalletID: input.ManagedWalletID, DestinationCurrency: input.DestinationCurrency, CurrencyType: input.CurrencyType, CoverFees: input.CoverFees, RequestAmountMinor: input.RequestAmountMinor, PartnerFeeID: input.PartnerFeeID})
 	if err != nil {
 		problem(w, http.StatusBadRequest, err.Error())
 		return
@@ -163,10 +179,25 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
 		h.storeError(w, err)
 		return
 	}
+	if tenantID, ok := TenantIDFromContext(r.Context()); ok && p.TenantID != tenantID {
+		problem(w, http.StatusNotFound, "payment not found")
+		return
+	}
 	writeJSON(w, http.StatusOK, p)
 }
 
 func (h *Handler) timeline(w http.ResponseWriter, r *http.Request) {
+	if tenantID, ok := TenantIDFromContext(r.Context()); ok {
+		payment, err := h.payments.GetPayment(r.Context(), r.PathValue("id"))
+		if err != nil {
+			h.storeError(w, err)
+			return
+		}
+		if payment.TenantID != tenantID {
+			problem(w, http.StatusNotFound, "payment not found")
+			return
+		}
+	}
 	timeline, err := h.payments.Timeline(r.Context(), r.PathValue("id"))
 	if err != nil {
 		h.storeError(w, err)

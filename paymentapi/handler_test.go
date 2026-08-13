@@ -14,14 +14,40 @@ import (
 )
 
 type fakeStore struct {
-	payment *paymentcore.Payment
-	err     error
-	key     string
+	payment  *paymentcore.Payment
+	err      error
+	key      string
+	tenantID string
 }
 
-func (f *fakeStore) CreatePayment(_ context.Context, _, _ string, _ int64, _, key string) (*paymentcore.Payment, error) {
-	f.key = key
+func (f *fakeStore) CreatePayment(_ context.Context, _, _ string, _ int64, tenantID, key string) (*paymentcore.Payment, error) {
+	f.key, f.tenantID = key, tenantID
 	return f.payment, f.err
+}
+
+func TestCreatePaymentDerivesAuthenticatedTenant(t *testing.T) {
+	store := &fakeStore{payment: &paymentcore.Payment{ID: "pay_1", State: paymentcore.StateCreated}}
+	h, _ := NewHandler(store, fakeHealth{}, nil)
+	req := httptest.NewRequest(http.MethodPost, "/v1/payments", strings.NewReader(`{"external_reference":"order-1","currency":"USD","amount_minor":1250}`))
+	req = req.WithContext(context.WithValue(req.Context(), tenantContextKey{}, "tenant-authenticated"))
+	req.Header.Set("Idempotency-Key", "request-1")
+	res := httptest.NewRecorder()
+	h.ServeHTTP(res, req)
+	if res.Code != http.StatusCreated || store.tenantID != "tenant-authenticated" {
+		t.Fatalf("status=%d tenant=%q", res.Code, store.tenantID)
+	}
+}
+
+func TestGetPaymentHidesAnotherTenantsPayment(t *testing.T) {
+	store := &fakeStore{payment: &paymentcore.Payment{ID: "pay_1", TenantID: "tenant-other"}}
+	h, _ := NewHandler(store, fakeHealth{}, nil)
+	req := httptest.NewRequest(http.MethodGet, "/v1/payments/pay_1", nil)
+	req = req.WithContext(context.WithValue(req.Context(), tenantContextKey{}, "tenant-authenticated"))
+	res := httptest.NewRecorder()
+	h.ServeHTTP(res, req)
+	if res.Code != http.StatusNotFound {
+		t.Fatalf("status=%d", res.Code)
+	}
 }
 func (f *fakeStore) CreatePaymentWithPayoutQuote(ctx context.Context, a, b string, c int64, d, e, _ string) (*paymentcore.Payment, error) {
 	return f.CreatePayment(ctx, a, b, c, d, e)
@@ -56,7 +82,7 @@ func (f *fakePayoutQuoteService) Create(_ context.Context, request blindpay.Payo
 func TestCreatePayment(t *testing.T) {
 	store := &fakeStore{payment: &paymentcore.Payment{ID: "pay_1", State: paymentcore.StateCreated}}
 	h, _ := NewHandler(store, fakeHealth{}, nil)
-	req := httptest.NewRequest(http.MethodPost, "/v1/payments", strings.NewReader(`{"external_reference":"order-1","currency":"usd","amount_minor":1250,"customer_id":"cus-1"}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/payments", strings.NewReader(`{"external_reference":"order-1","currency":"usd","amount_minor":1250,"tenant_id":"cus-1"}`))
 	req.Header.Set("Idempotency-Key", "request-1")
 	res := httptest.NewRecorder()
 	h.ServeHTTP(res, req)
@@ -81,7 +107,7 @@ func TestCreatePaymentValidation(t *testing.T) {
 func TestCreatePaymentRejectsDifferentRequestForIdempotencyKey(t *testing.T) {
 	store := &fakeStore{err: paymentcore.ErrIdempotencyConflict}
 	h, _ := NewHandler(store, fakeHealth{}, nil)
-	req := httptest.NewRequest(http.MethodPost, "/v1/payments", strings.NewReader(`{"external_reference":"different","currency":"USD","amount_minor":1250,"customer_id":"cus-1"}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/payments", strings.NewReader(`{"external_reference":"different","currency":"USD","amount_minor":1250,"tenant_id":"cus-1"}`))
 	req.Header.Set("Idempotency-Key", "request-1")
 	res := httptest.NewRecorder()
 	h.ServeHTTP(res, req)
@@ -93,7 +119,7 @@ func TestCreatePaymentRejectsDifferentRequestForIdempotencyKey(t *testing.T) {
 func TestCreateBlindPayPayoutQuote(t *testing.T) {
 	quotes := &fakePayoutQuoteService{}
 	h, _ := NewHandler(&fakeStore{}, fakeHealth{}, quotes)
-	req := httptest.NewRequest(http.MethodPost, "/v1/blindpay/payout-quotes", strings.NewReader(`{"customer_id":"customer-1","bank_account_id":"ba_test","managed_wallet_id":"bl_test","destination_currency":"BRL","currency_type":"sender","cover_fees":true,"request_amount_minor":2500}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/blindpay/payout-quotes", strings.NewReader(`{"tenant_id":"tenant-1","bank_account_id":"ba_test","managed_wallet_id":"bl_test","destination_currency":"BRL","currency_type":"sender","cover_fees":true,"request_amount_minor":2500}`))
 	req.Header.Set("Idempotency-Key", "quote-request-1")
 	res := httptest.NewRecorder()
 	h.ServeHTTP(res, req)

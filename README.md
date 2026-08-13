@@ -1,46 +1,103 @@
 # StableRail
 
-A Go reference implementation of a durable, event-driven payment workflow. The current application exposes an HTTP API, stores payment and ledger state in PostgreSQL, publishes through a transactional outbox, consumes Kafka events with a transactional inbox, and coordinates policy, ledger, and settlement steps with a persisted saga.
+A Go reference implementation of a durable, event-driven payment workflow. StableRail
+accepts payment intents over HTTP, persists payment and ledger state in PostgreSQL,
+publishes events through a transactional outbox, consumes Kafka with a transactional
+inbox, and coordinates policy, ledger, BlindPay settlement, refunds, and manual review
+through a persisted saga.
 
-Policy approval and settlement use deterministic local implementations in the current phase. A provider boundary and idempotent mock provider are implemented; real provider integrations and blockchain adapters remain roadmap items.
+The runtime supports both a deterministic mock provider and BlindPay managed-wallet
+payouts. BlindPay quotes, durable submission attempts, signed provider webhooks,
+ambiguous-outcome recovery, compliance holds, refunds, and provider-state
+reconciliation are implemented. Production deployment still requires environment-
+specific security, alerting, rate limiting, and rollout controls.
 
 ## Current capabilities
 
 - HTTP payment creation, lookup, and timeline endpoints
+- Tenant API-key authentication with hashed-at-rest secrets
 - HTTP idempotency keys backed by a PostgreSQL uniqueness constraint
-- Payment lifecycle: `created → processing → settled`
+- Payment outcomes: `created → processing → settled | failed | refunded`
 - Immutable, balanced double-entry ledger postings
 - Transactional outbox publication with retry, dead-letter, and redrive support
 - Transactional inbox deduplication and manual Kafka offset commits
-- Persisted payment saga with timeouts and compensating commands
+- Persisted payment saga with timeouts, refund accounting, compliance holds, and manual review
 - Injected policy evaluator, transactional ledger service, and settlement provider boundaries
 - Versioned event payloads and consumer upcasting support
-- One runnable process with health checks and graceful shutdown
+- BlindPay provider-bound quotes, payout submission, signed webhooks, and recovery workers
+- Signed tenant webhooks with retry and redrive
+- Authenticated, audited manual-review resolution endpoint
+- One runnable process with health checks, metrics, and graceful shutdown
 
-## Target architecture
+## Architecture
 
-The following is the broader roadmap, not a claim that every component is implemented:
+StableRail runs these components in one process today, but their transactional and
+message boundaries allow them to be split into independently deployed services later.
 
+```mermaid
+flowchart LR
+    Client["Payment client"]
+    Operator["Operator"]
+    BlindPay["BlindPay API + webhooks"]
+    Tenant["Tenant webhook endpoint"]
+
+    subgraph StableRail["StableRail process"]
+        API["Payment API"]
+        OperatorAPI["Operator API"]
+        Saga["Saga coordinator<br/>+ timeout worker"]
+        Workers["Policy / ledger /<br/>settlement workers"]
+        OutboxRelay["Outbox relay"]
+        Consumers["Kafka consumers<br/>+ inbox processor"]
+        ProviderRecovery["BlindPay submission +<br/>webhook recovery"]
+        Reconciler["Reconciliation worker"]
+        Notifications["Tenant webhook dispatcher"]
+    end
+
+    DB[("PostgreSQL<br/>payments · ledger · sagas<br/>outbox · inbox · provider records")]
+    Kafka[["Kafka<br/>payment-events · payment-commands · DLQ"]]
+
+    Client -->|"tenant API key<br/>quotes, payments, reads"| API
+    Operator -->|"Bearer token + audited decision"| OperatorAPI
+    API --> DB
+    OperatorAPI --> Saga
+    Saga --> DB
+    Workers --> DB
+    Consumers --> Saga
+    Consumers --> Workers
+    DB --> OutboxRelay
+    OutboxRelay --> Kafka
+    Kafka --> Consumers
+    Workers <-->|"idempotent payout request"| BlindPay
+    BlindPay -->|"signed payout webhook"| API
+    API --> ProviderRecovery
+    ProviderRecovery --> DB
+    Reconciler --> DB
+    Notifications --> Tenant
+    DB --> Notifications
 ```
-                        REST/gRPC API
-                               │
-                     Payment Command Service
-                               │
-                     Internal Ledger Service
-                               │
-                Kafka Event Bus (or NATS later)
-          ┌────────────┬──────────────┬────────────┐
-          │            │              │            │
-                   Policy Engine   Settlement   Notification
-                                       │
-                        Provider Adapter Interface
-                              │
-                         MockProvider
+
+### Reliability boundaries
+
+```mermaid
+flowchart LR
+    Producer["Producer transaction"] -->|"business update + event"| Outbox[("outbox_events")]
+    Outbox --> Relay["Outbox relay"]
+    Relay --> Kafka[["Kafka"]]
+    Kafka --> Inbox[("inbox_events")]
+    Inbox -->|"same transaction"| Consumer["Consumer side effects"]
+
+    Lost["Prevents DB update<br/>without publication"] -.-> Outbox
+    Duplicate["Prevents duplicate<br/>consumer effects"] -.-> Inbox
 ```
 
-## Implemented Phase 3 data flow
+The outbox answers “what must leave this component?” The inbox answers “what has
+this named consumer already processed?” Delivery is at least once; deterministic
+event IDs, database constraints, and inbox records make retries safe.
 
-Numbered arrows show the initial request followed by the repeating outbox–Kafka–inbox workflow.
+## Core payment data flow
+
+Numbered arrows show payment creation followed by the repeating
+outbox–Kafka–inbox workflow.
 
 ```mermaid
 flowchart TD
@@ -125,8 +182,100 @@ flowchart TD
     TimelineHandler -->|"22. HTTP 200 timeline"| Client
 ```
 
+## Saga lifecycle
+
+The saga state is operational workflow state; it is deliberately more detailed than
+the public payment state. Commands are shown on transition arrows where StableRail
+must perform another durable action.
+
+```mermaid
+stateDiagram-v2
+    [*] --> awaiting_policy: payment.created / policy.evaluate
+    awaiting_policy --> awaiting_ledger: policy.approved / ledger.reserve
+    awaiting_policy --> failed: policy.rejected / payment.fail
+    awaiting_ledger --> awaiting_settlement: ledger.reserved / settlement.execute
+    awaiting_ledger --> failed: ledger.failed / payment.fail
+
+    awaiting_settlement --> settling_payment: settlement.completed / payment.settle
+    settling_payment --> completed: payment.settled
+
+    awaiting_settlement --> releasing_ledger: settlement.failed or timeout / ledger.release
+    releasing_ledger --> ledger_released: ledger.released / payment.fail
+
+    awaiting_settlement --> refunding: settlement.refunded / ledger.release
+    refunding --> refunded: ledger.released / payment.refund
+
+    completed --> recording_refund: settlement.refunded / ledger.record_refund
+    recording_refund --> refunded: ledger.refund_recorded / payment.refund
+
+    awaiting_settlement --> on_hold: settlement.on_hold
+    on_hold --> settling_payment: settlement.completed / payment.settle
+    on_hold --> releasing_ledger: settlement.failed / ledger.release
+    on_hold --> refunding: settlement.refunded / ledger.release
+    on_hold --> manual_review: compliance timeout
+    manual_review --> on_hold: operator retry
+    manual_review --> settling_payment: operator complete / payment.settle
+    manual_review --> releasing_ledger: operator fail / ledger.release
+    manual_review --> refunding: operator refund / ledger.release
+```
+
+Timeout behavior is intentionally conservative:
+
+- A settlement timeout releases a reservation before failing the payment.
+- Settlement-recording and refund-accounting timeouts retry their idempotent command.
+- A compliance-hold timeout moves to `manual_review`; it never assumes funds are safe.
+
+## BlindPay payout and webhook flow
+
+The provider API call cannot participate in a PostgreSQL transaction. StableRail
+therefore commits a durable submission attempt first and uses the same idempotency key
+for recovery if the HTTP outcome is ambiguous.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant W as Settlement worker
+    participant DB as PostgreSQL
+    participant BP as BlindPay
+    participant WH as Webhook handler
+    participant RR as Recovery workers
+    participant K as Kafka
+
+    W->>DB: Commit submission_pending + idempotency key
+    W->>BP: POST payout with Idempotency-Key
+    alt Response arrives normally
+        BP-->>W: po_... + processing/on_hold/terminal
+        W->>DB: Persist payout ID and provider status
+    else Transport outcome is ambiguous
+        W->>DB: Mark payout unknown
+        RR->>BP: Retry with original Idempotency-Key
+        BP-->>RR: Return original payout
+        RR->>DB: Persist payout ID and status
+    end
+
+    BP->>WH: Signed payout webhook
+    WH->>DB: Store verified delivery by svix-id
+    alt payout ID is already associated
+        WH->>DB: Update monotonic provider status + insert outbox event
+    else webhook arrived before payout ID persistence
+        WH->>DB: Commit unmatched verified delivery
+        RR->>DB: Find terminal webhook with no derived outbox event
+        RR->>DB: Reprocess after payout association is visible
+    end
+    DB->>K: Outbox relay publishes settlement outcome
+```
+
+For a webhook with `svix-id = msg_123`, the derived event ID is
+`evt_blindpay_msg_123`. That deterministic mapping prevents reconciliation or webhook
+redelivery from creating duplicate internal outcomes.
+
 <details>
-<summary>Detailed successful-payment transaction sequence</summary>
+<summary>Detailed synchronous mock-provider success sequence</summary>
+
+This expanded sequence shows the deterministic mock provider, which returns success
+inside the `settlement.execute` command. BlindPay normally returns a pending result;
+its later signed webhook produces `settlement.completed`, after which the saga emits
+and awaits `payment.settle` as shown in the state diagram above.
 
 The shaded, dotted regions represent PostgreSQL transaction boundaries. Kafka offset commits deliberately happen after the associated database transaction commits.
 
@@ -311,11 +460,18 @@ sequenceDiagram
         I->>DB: Begin transaction
         I->>DB: Insert saga inbox record
         I->>S: Handle settlement.completed using inbox transaction
-        S->>DB: Saga → completed
-        I->>DB: Commit inbox and saga atomically
+        S->>DB: Saga → settling_payment
+        S->>DB: Insert payment.settle into outbox
+        I->>DB: Commit inbox, saga, and command atomically
     end
 
     I->>K: Commit Kafka offset
+
+    Note over R,W: payment.settle follows the same outbox → Kafka → inbox path
+    W->>DB: Confirm payment state and insert payment.settled into outbox
+    K->>I: Deliver payment.settled to saga consumer
+    I->>S: Handle payment.settled
+    S->>DB: Saga → completed
 
     C->>API: GET /v1/payments/{id}/timeline
     API->>DB: Query ordered timeline entries
@@ -329,23 +485,21 @@ sequenceDiagram
 
 A foundation for the payment lifecycle.
 
-Flow:
+Public payment lifecycle:
 
-```
-CreatePayment
-↓
-PaymentIntent
-↓
-Process
-↓
-Settle
-↓
-Settled
+```mermaid
+stateDiagram-v2
+    [*] --> created
+    created --> processing: ledger reservation
+    processing --> settled: provider completed
+    processing --> failed: policy, ledger, or settlement failure
+    processing --> refunded: provider returned reserved funds
+    settled --> refunded: provider returned settled funds
 ```
 
 Implemented capabilities:
 
-- Payment state machine with created → processing → settled
+- Payment state machine with settled, failed, and refunded terminal outcomes
 - Immutable double-entry ledger postings for processing and settlement
 - Idempotency-key protection for duplicate submissions
 - Audit log for lifecycle events
@@ -414,7 +568,7 @@ The initial chart of accounts defines operating cash as an asset and settlement 
 7. **Payment saga — complete**
    - Coordinate policy, ledger, and settlement steps through events
    - Persist saga state and correlation identifiers
-   - Define timeouts and compensating actions for failed workflows
+   - Define timeouts, reservation release, refund reversal, and manual-review actions
 8. **Event-version evolution — complete**
    - Maintain explicit payload versions per event type
    - Add compatibility tests and consumer upcasters
@@ -448,7 +602,7 @@ The initial chart of accounts defines operating cash as an asset and settlement 
 ### Phase 5: operations and recovery
 
 13. **Notifications and external webhooks — complete**
-   - Publish customer-facing payment status updates
+   - Publish tenant-facing payment status updates
    - Sign webhook deliveries and retry transient failures
    - Provide delivery history, idempotency, and operator redrive controls
 14. **Reconciliation and observability — partial**
@@ -468,7 +622,9 @@ The initial chart of accounts defines operating cash as an asset and settlement 
    - Production credential rotation, provider rate limiting, alerting, and rollout controls remain
    - External-wallet chain submission and confirmation tracking remains out of scope for the managed-wallet path
 
-Each step will be implemented and verified independently before work begins on the next one.
+Items marked partial or deferred are the remaining production-hardening roadmap; the
+core payment, saga, BlindPay managed-wallet, refund, and manual-review paths are
+implemented.
 
 ### Recommended BlindPay architecture
 
@@ -511,8 +667,8 @@ BlindPay customer + approved bank account
       completed       failed       refunded
 ```
 
-The payout workflow must represent `processing`, `on_hold`, `completed`, `failed`,
-and `refunded` separately. `on_hold` is not a transient API failure and must use a
+The payout workflow represents `processing`, `on_hold`, `completed`, `failed`,
+and `refunded` separately. `on_hold` is not a transient API failure and uses a
 compliance-oriented deadline instead of the normal settlement timeout. `refunded`
 is distinct from `failed` because funds were captured and returned. A failed or
 stalled payout must be reconciled before StableRail assumes that source funds are
@@ -521,8 +677,8 @@ available again.
 Provider calls must not occur inside the database transaction that records their
 result. StableRail first commits a durable submission attempt, performs the remote
 call, and then records the BlindPay payout ID and response. An ambiguous response is
-resolved through provider lookup or reconciliation rather than blind resubmission;
-each BlindPay quote is single-use.
+resolved by retrying with the original provider idempotency key and reconciling the
+result; each BlindPay quote is single-use.
 
 #### Register the BlindPay webhook URL
 
@@ -552,12 +708,12 @@ The webhook URL must be reachable by BlindPay over HTTPS. Do not expose the webh
 secret to clients, and do not accept a payout status as final until a verified webhook
 or reconciliation confirms it.
 
-#### BlindPay integration steps
+#### BlindPay implementation map
 
 1. **Provider client and configuration**
-   - Add instance-scoped API key, instance ID, base URL, webhook secret, network,
+   - Uses an instance-scoped API key, instance ID, base URL, webhook secret, network,
      token, managed-wallet ID, and managed-wallet address configuration.
-   - Implement bounded HTTP timeouts, stable error classification, request
+   - Uses bounded HTTP timeouts, stable error classification, request
      idempotency where supported, and contract tests against a fake server.
 2. **Customer and payout destination references**
    - Store opaque BlindPay customer (`re_...`) and bank-account (`ba_...`) IDs plus
@@ -565,9 +721,9 @@ or reconciliation confirms it.
    - Require approved KYC/KYB and an approved bank account before creating a payout
      quote.
 3. **Provider-bound payout quotes**
-   - Add a payout quote interface containing bank account, amount side, network,
+   - Defines a payout quote interface containing bank account, amount side, network,
      token, `cover_fees`, and optional partner-fee reference.
-   - Persist BlindPay's quote ID, exact sender/receiver amounts, commercial and net
+   - Persists BlindPay's quote ID, exact sender/receiver amounts, commercial and net
      rates, fee components, expiration, and immutable raw response. Decode rates
      without binary floating-point arithmetic.
 4. **Managed-wallet funding checks**
@@ -581,10 +737,10 @@ or reconciliation confirms it.
    - Persist the returned payout (`po_...`) ID and map provider errors into retryable,
      permanent, user-action-required, and ambiguous-outcome categories.
 6. **Webhook processing**
-   - Expose `POST /v1/providers/blindpay/webhooks`; verify the raw body using
+   - Exposes `POST /v1/providers/blindpay/webhooks`; verifies the raw body using
      `svix-id`, `svix-timestamp`, and `svix-signature` with a replay tolerance and
      constant-time signature comparison.
-   - Deduplicate by `svix-id`, durably store verified payloads, apply monotonic payout
+   - Deduplicates by `svix-id`, durably stores verified payloads, applies monotonic payout
      transitions, and emit internal events through the transactional outbox.
 7. **Saga and accounting completion**
    - The saga models submission, processing, compliance hold, completion, failure,
@@ -615,9 +771,9 @@ After `settlement.completed`, the saga remains in `settling_payment` until the
 `payment.settle` command produces `payment.settled`. Refund accounting commands are
 retried on timeout, and `payment.refund` is emitted only after the applicable ledger
 operation succeeds. The resulting `payment.refunded` event is delivered to active
-customer webhook endpoints. Regression tests cover settlement acknowledgement,
+tenant webhook endpoints. Regression tests cover settlement acknowledgement,
 both refund accounting paths, timeout retries, early-webhook reconciliation, and
-customer refund notification creation.
+tenant refund notification creation.
 
 ### Reconciliation and observability
 
@@ -638,7 +794,7 @@ minute and can be changed with `STABLERAIL_RECONCILIATION_INTERVAL`.
 
 ### Webhook delivery
 
-Active rows in `webhook_endpoints` subscribe a customer to payment status updates. The
+Active rows in `webhook_endpoints` subscribe a tenant to payment status updates. The
 webhook consumer transactionally creates one delivery per endpoint and event; a
 uniqueness constraint makes Kafka replay harmless. The dispatcher sends the stored
 JSON body with `X-StableRail-Delivery`, `X-StableRail-Timestamp`, and
@@ -710,6 +866,8 @@ The API listens on `:8080` by default. `STABLERAIL_HTTP_ADDRESS`, `STABLERAIL_SH
 | `POST /v1/payments` | Create a payment; requires `Idempotency-Key` |
 | `GET /v1/payments/{id}` | Read the current payment snapshot |
 | `GET /v1/payments/{id}/timeline` | Read ordered lifecycle history |
+| `POST /v1/operator/tenants/{id}/api-keys` | Issue a tenant API key; requires the operator Bearer token |
+| `DELETE /v1/operator/api-keys/{id}` | Revoke a tenant API key; requires the operator Bearer token |
 | `POST /v1/operator/payments/{id}/manual-review` | Resolve a held saga; requires the configured operator Bearer token |
 | `GET /healthz` | Check whether the process is running |
 | `GET /readyz` | Check whether PostgreSQL is reachable |
@@ -718,6 +876,26 @@ The API listens on `:8080` by default. `STABLERAIL_HTTP_ADDRESS`, `STABLERAIL_SH
 Repeating an equivalent request with the same idempotency key returns the original
 payment. Reusing the key with different payment fields, destination, or payout quote
 returns `409 Conflict`.
+
+### Bootstrap a tenant API key
+
+Payment, payout-quote, and payment-read endpoints require a tenant API key. An
+operator creates the first key for a local tenant identifier:
+
+```bash
+curl -i -X POST http://localhost:8080/v1/operator/tenants/tenant-1/api-keys \
+  -H "Authorization: Bearer $STABLERAIL_OPERATOR_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"marketplace production"}'
+```
+
+The response contains an `api_key` beginning with `srk_`. StableRail returns the
+secret once and stores only its SHA-256 digest in `tenant_api_keys`; copy it to the
+tenant's secret manager. The key determines `tenant_id` for payment and quote
+creation. If a request also supplies `tenant_id`, it must match the authenticated
+tenant. Payment lookup and timeline endpoints return 404 for another tenant's
+payment. Operators can immediately disable a key with
+`DELETE /v1/operator/api-keys/{key_id}`.
 
 The manual-review endpoint is mounted only when `STABLERAIL_OPERATOR_TOKEN` is set.
 It requires `Authorization: Bearer <token>` and an audited operator decision:
@@ -735,16 +913,43 @@ successful settlement), `fail` (release the reservation and fail the payment), a
 accepted decision is stored in `saga_manual_review_actions` before the saga state and
 next outbox command commit atomically.
 
+```mermaid
+sequenceDiagram
+    participant O as Operator
+    participant API as Operator API
+    participant DB as PostgreSQL
+    participant R as Outbox relay
+    participant K as Kafka
+
+    O->>API: POST decision + Bearer token
+    API->>API: Authenticate and validate action
+    API->>DB: Lock saga in manual_review
+    API->>DB: Insert immutable operator audit row
+    API->>DB: Update saga + insert next command
+    API->>DB: Commit atomically
+    API-->>O: 202 Accepted
+    DB->>R: Unpublished command
+    R->>K: Publish command
+```
+
+The shared token is suitable for local or small internal deployments. Production
+installations with multiple operators should place the endpoint behind SSO/OIDC or an
+authenticating gateway and derive operator identity from a trusted credential rather
+than relying on the request body alone.
+
 ### 5. Create and inspect a payment
 
 ```bash
 curl -i -X POST http://localhost:8080/v1/payments \
+  -H "Authorization: Bearer $STABLERAIL_API_KEY" \
   -H 'Content-Type: application/json' \
   -H 'Idempotency-Key: request-123' \
-  -d '{"external_reference":"order-123","currency":"USD","amount_minor":2500,"customer_id":"customer-1"}'
+  -d '{"external_reference":"order-123","currency":"USD","amount_minor":2500}'
 
-curl http://localhost:8080/v1/payments/PAYMENT_ID
-curl http://localhost:8080/v1/payments/PAYMENT_ID/timeline
+curl -H "Authorization: Bearer $STABLERAIL_API_KEY" \
+  http://localhost:8080/v1/payments/PAYMENT_ID
+curl -H "Authorization: Bearer $STABLERAIL_API_KEY" \
+  http://localhost:8080/v1/payments/PAYMENT_ID/timeline
 curl http://localhost:8080/healthz
 curl http://localhost:8080/readyz
 ```

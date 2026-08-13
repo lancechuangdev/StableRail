@@ -1,4 +1,4 @@
-// Package notification provides durable, signed customer webhook delivery.
+// Package notification provides durable, signed tenant webhook delivery.
 package notification
 
 import (
@@ -87,9 +87,9 @@ func EventHandler() func(context.Context, *sql.Tx, eventbus.Event) error {
 		default:
 			return nil
 		}
-		var customer string
-		if err := tx.QueryRowContext(ctx, `SELECT customer_id FROM payments WHERE id=$1`, event.AggregateID).Scan(&customer); err != nil {
-			return fmt.Errorf("load webhook customer: %w", err)
+		var tenantID string
+		if err := tx.QueryRowContext(ctx, `SELECT tenant_id FROM payments WHERE id=$1`, event.AggregateID).Scan(&tenantID); err != nil {
+			return fmt.Errorf("load webhook tenant: %w", err)
 		}
 		publicType := map[string]string{"ledger.reserved": "payment.processing"}[event.Type]
 		if publicType == "" {
@@ -100,8 +100,8 @@ func EventHandler() func(context.Context, *sql.Tx, eventbus.Event) error {
 			return fmt.Errorf("encode webhook payload: %w", err)
 		}
 		_, err = tx.ExecContext(ctx, `INSERT INTO webhook_deliveries(id,endpoint_id,event_id,payment_id,event_type,payload,next_attempt_at,created_at)
-			SELECT 'whd_' || md5(id || $1), id, $1, $2, $3, $4, $5, $5 FROM webhook_endpoints WHERE customer_id=$6 AND active
-			ON CONFLICT(endpoint_id,event_id) DO NOTHING`, event.ID, event.AggregateID, publicType, body, event.OccurredAt, customer)
+			SELECT 'whd_' || md5(id || $1), id, $1, $2, $3, $4, $5, $5 FROM webhook_endpoints WHERE tenant_id=$6 AND active
+			ON CONFLICT(endpoint_id,event_id) DO NOTHING`, event.ID, event.AggregateID, publicType, body, event.OccurredAt, tenantID)
 		if err != nil {
 			return fmt.Errorf("enqueue webhook deliveries: %w", err)
 		}

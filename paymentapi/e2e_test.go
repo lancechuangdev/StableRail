@@ -34,7 +34,7 @@ func TestPostgresPaymentHTTPEndToEnd(t *testing.T) {
 	server := httptest.NewServer(handler)
 	defer server.Close()
 	key := fmt.Sprintf("e2e-%d", time.Now().UnixNano())
-	req, _ := http.NewRequest(http.MethodPost, server.URL+"/v1/payments", strings.NewReader(`{"external_reference":"e2e-order","currency":"USD","amount_minor":4200,"customer_id":"e2e-customer"}`))
+	req, _ := http.NewRequest(http.MethodPost, server.URL+"/v1/payments", strings.NewReader(`{"external_reference":"e2e-order","currency":"USD","amount_minor":4200,"tenant_id":"e2e-tenant"}`))
 	req.Header.Set("Idempotency-Key", key)
 	response, err := http.DefaultClient.Do(req)
 	if err != nil {

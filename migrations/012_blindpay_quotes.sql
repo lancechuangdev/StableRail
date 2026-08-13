@@ -2,7 +2,7 @@ CREATE TABLE blindpay_quotes (
     id                        TEXT PRIMARY KEY,
     provider                  TEXT NOT NULL CHECK (provider = 'blindpay'),
     provider_quote_id         TEXT NOT NULL,
-    local_customer_id         TEXT NOT NULL REFERENCES blindpay_customers(local_customer_id),
+    tenant_id         TEXT NOT NULL REFERENCES blindpay_customers(tenant_id),
     provider_bank_account_id  TEXT NOT NULL REFERENCES blindpay_bank_accounts(provider_bank_account_id),
     provider_wallet_id        TEXT NOT NULL REFERENCES blindpay_managed_wallets(provider_wallet_id),
     source_currency           TEXT NOT NULL,
@@ -26,4 +26,4 @@ CREATE TABLE blindpay_quotes (
 );
 
 CREATE INDEX blindpay_quotes_expiry_idx ON blindpay_quotes (status, expires_at);
-CREATE INDEX blindpay_quotes_customer_idx ON blindpay_quotes (local_customer_id, status);
+CREATE INDEX blindpay_quotes_tenant_idx ON blindpay_quotes (tenant_id, status);

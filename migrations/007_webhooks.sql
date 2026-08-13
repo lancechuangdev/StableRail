@@ -1,13 +1,13 @@
 CREATE TABLE webhook_endpoints (
     id          TEXT PRIMARY KEY,
-    customer_id TEXT NOT NULL,
+    tenant_id   TEXT NOT NULL,
     url         TEXT NOT NULL,
     secret      TEXT NOT NULL,
     active      BOOLEAN NOT NULL DEFAULT TRUE,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX webhook_endpoints_customer_idx ON webhook_endpoints (customer_id) WHERE active;
+CREATE INDEX webhook_endpoints_tenant_idx ON webhook_endpoints (tenant_id) WHERE active;
 
 CREATE TABLE webhook_deliveries (
     id              TEXT PRIMARY KEY,

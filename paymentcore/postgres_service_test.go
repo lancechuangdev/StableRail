@@ -21,7 +21,7 @@ func TestPostgresCreateCommitsPaymentAndOutboxTogether(t *testing.T) {
 	service := deterministicPostgresService(db)
 	mock.ExpectBegin()
 	mock.ExpectExec("INSERT INTO payments").
-		WithArgs("pay_test", "order-1", "USD", int64(2500), "customer-1", StateCreated, "idem-1", service.now()).
+		WithArgs("pay_test", "order-1", "USD", int64(2500), "tenant-1", StateCreated, "idem-1", service.now()).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO payment_audit_events").
 		WithArgs("pay_test", "created", "payment intent created", service.now()).
@@ -34,7 +34,7 @@ func TestPostgresCreateCommitsPaymentAndOutboxTogether(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 
-	payment, err := service.CreatePayment(context.Background(), "order-1", "USD", 2500, "customer-1", "idem-1")
+	payment, err := service.CreatePayment(context.Background(), "order-1", "USD", 2500, "tenant-1", "idem-1")
 	if err != nil {
 		t.Fatalf("CreatePayment returned error: %v", err)
 	}
@@ -61,7 +61,7 @@ func TestPostgresCreateRollsBackWhenOutboxInsertFails(t *testing.T) {
 	mock.ExpectExec("INSERT INTO outbox_events").WillReturnError(errors.New("database unavailable"))
 	mock.ExpectRollback()
 
-	_, err = service.CreatePayment(context.Background(), "order-1", "USD", 2500, "customer-1", "idem-1")
+	_, err = service.CreatePayment(context.Background(), "order-1", "USD", 2500, "tenant-1", "idem-1")
 	if err == nil {
 		t.Fatal("expected outbox insert error")
 	}
@@ -79,12 +79,12 @@ func TestPostgresCreateWithPayoutQuoteBindsQuoteAndPaymentAtomically(t *testing.
 
 	service := deterministicPostgresService(db)
 	mock.ExpectBegin()
-	mock.ExpectQuery("SELECT local_customer_id,source_currency,sender_amount_minor,status,expires_at FROM blindpay_quotes").
+	mock.ExpectQuery("SELECT tenant_id,source_currency,sender_amount_minor,status,expires_at FROM blindpay_quotes").
 		WithArgs("qu_test").
-		WillReturnRows(sqlmock.NewRows([]string{"local_customer_id", "source_currency", "sender_amount_minor", "status", "expires_at"}).
-			AddRow("customer-1", "USDB", int64(2500), "open", service.now().Add(time.Minute)))
+		WillReturnRows(sqlmock.NewRows([]string{"tenant_id", "source_currency", "sender_amount_minor", "status", "expires_at"}).
+			AddRow("tenant-1", "USDB", int64(2500), "open", service.now().Add(time.Minute)))
 	mock.ExpectExec("INSERT INTO payments").
-		WithArgs("pay_test", "order-1", "USDB", int64(2500), "customer-1", StateCreated, "idem-1", service.now()).
+		WithArgs("pay_test", "order-1", "USDB", int64(2500), "tenant-1", StateCreated, "idem-1", service.now()).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("UPDATE blindpay_quotes SET status='accepted'").
 		WithArgs("pay_test", service.now(), "qu_test").
@@ -94,7 +94,7 @@ func TestPostgresCreateWithPayoutQuoteBindsQuoteAndPaymentAtomically(t *testing.
 	mock.ExpectExec("INSERT INTO outbox_events").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 
-	payment, err := service.CreatePaymentWithPayoutQuote(context.Background(), "order-1", "USDB", 2500, "customer-1", "idem-1", "qu_test")
+	payment, err := service.CreatePaymentWithPayoutQuote(context.Background(), "order-1", "USDB", 2500, "tenant-1", "idem-1", "qu_test")
 	if err != nil {
 		t.Fatalf("CreatePaymentWithPayoutQuote returned error: %v", err)
 	}

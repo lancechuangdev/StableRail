@@ -157,6 +157,11 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	apiKeys, err := paymentapi.NewAPIKeyService(db)
+	if err != nil {
+		return err
+	}
+	handler = apiKeys.Middleware(handler)
 
 	metrics := &observability.Metrics{}
 	root := http.NewServeMux()
@@ -167,6 +172,16 @@ func run() error {
 			return err
 		}
 		root.Handle("POST /v1/operator/payments/{id}/manual-review", operatorHandler)
+		apiKeyHandler, err := paymentapi.NewAPIKeyOperatorHandler(config.OperatorToken, apiKeys)
+		if err != nil {
+			return err
+		}
+		root.Handle("POST /v1/operator/tenants/{id}/api-keys", apiKeyHandler)
+		apiKeyRevokeHandler, err := paymentapi.NewAPIKeyRevokeOperatorHandler(config.OperatorToken, apiKeys)
+		if err != nil {
+			return err
+		}
+		root.Handle("DELETE /v1/operator/api-keys/{id}", apiKeyRevokeHandler)
 	}
 	if blindPayWebhookHandler != nil {
 		root.Handle("POST /v1/providers/blindpay/webhooks", blindPayWebhookHandler)
