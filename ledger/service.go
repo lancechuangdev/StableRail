@@ -38,12 +38,16 @@ func (*PostgresService) Reserve(ctx context.Context, tx *sql.Tx, request Reserva
 }
 
 func (*PostgresService) Release(ctx context.Context, tx *sql.Tx, request ReleaseRequest) error {
-	return post(ctx, tx, request.PaymentID, paymentcore.StateProcessing, paymentcore.StateProcessing,
+	return postFrom(ctx, tx, request.PaymentID, []paymentcore.PaymentState{paymentcore.StateProcessing, paymentcore.StateSettled}, paymentcore.StateProcessing,
 		"payment.released", "released", paymentcore.SettlementAccount, paymentcore.CashOperatingAccount,
 		"ledger reservation released", "ledger reservation released", request.At, false)
 }
 
 func post(ctx context.Context, tx *sql.Tx, id string, from, to paymentcore.PaymentState, eventType, suffix, debit, credit, message, note string, now time.Time, updateState bool) error {
+	return postFrom(ctx, tx, id, []paymentcore.PaymentState{from}, to, eventType, suffix, debit, credit, message, note, now, updateState)
+}
+
+func postFrom(ctx context.Context, tx *sql.Tx, id string, from []paymentcore.PaymentState, to paymentcore.PaymentState, eventType, suffix, debit, credit, message, note string, now time.Time, updateState bool) error {
 	if tx == nil {
 		return errors.New("ledger transaction is required")
 	}
@@ -53,7 +57,11 @@ func post(ctx context.Context, tx *sql.Tx, id string, from, to paymentcore.Payme
 	if err := tx.QueryRowContext(ctx, `SELECT state, amount_minor, currency FROM payments WHERE id=$1 FOR UPDATE`, id).Scan(&state, &amount, &currency); err != nil {
 		return fmt.Errorf("lock payment: %w", err)
 	}
-	if state != from {
+	allowed := false
+	for _, candidate := range from {
+		allowed = allowed || state == candidate
+	}
+	if !allowed {
 		return fmt.Errorf("%w: payment %s cannot transition from %s", ErrInvalidPaymentState, id, state)
 	}
 	journal := "jrn_" + id + "_" + suffix
@@ -81,7 +89,11 @@ func post(ctx context.Context, tx *sql.Tx, id string, from, to paymentcore.Payme
 	if _, err := tx.ExecContext(ctx, `INSERT INTO payment_audit_events(payment_id,event,message,occurred_at) VALUES($1,$2,$3,$4)`, id, suffix, message, now); err != nil {
 		return fmt.Errorf("insert ledger audit event: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO payment_timeline_entries(payment_id,state,note,occurred_at) VALUES($1,$2,$3,$4)`, id, to, note, now); err != nil {
+	timelineState := state
+	if updateState {
+		timelineState = to
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO payment_timeline_entries(payment_id,state,note,occurred_at) VALUES($1,$2,$3,$4)`, id, timelineState, note, now); err != nil {
 		return fmt.Errorf("insert ledger timeline entry: %w", err)
 	}
 	return nil

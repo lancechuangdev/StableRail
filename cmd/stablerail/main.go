@@ -95,6 +95,10 @@ func run() error {
 	var payoutQuotes paymentapi.BlindPayPayoutQuoteService
 	var settlementProvider settlement.SettlementProvider = settlement.NewMockProvider(settlement.SettlementResult{})
 	var blindPayWebhookHandler http.Handler
+	webhookReconciler := func(ctx context.Context) error {
+		<-ctx.Done()
+		return ctx.Err()
+	}
 	if config.SettlementProvider == "blindpay" {
 		client, err := blindpay.NewClient(blindpay.Config{
 			APIKey:     config.BlindPay.APIKey,
@@ -131,6 +135,9 @@ func run() error {
 		blindPayWebhookHandler, err = blindpay.NewWebhookHandler(verifier, webhooks)
 		if err != nil {
 			return err
+		}
+		webhookReconciler = func(ctx context.Context) error {
+			return webhooks.RunReconciler(ctx, config.ReconciliationInterval)
 		}
 	}
 	commandLoop := &consumer.Loop{
@@ -169,6 +176,7 @@ func run() error {
 		webhookLoop.Run,
 		webhookDispatcher.Run,
 		reconciler.Run,
+		webhookReconciler,
 	)
 	if errors.Is(err, context.Canceled) {
 		return nil

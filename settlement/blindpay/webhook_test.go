@@ -96,3 +96,15 @@ func TestPayoutWebhookServiceEmitsRefundedOutcome(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestPayoutStatusCanAdvanceCompletedToRefunded(t *testing.T) {
+	if !payoutStatusCanAdvance("completed", "refunded") {
+		t.Fatal("completed payout must be allowed to advance to refunded")
+	}
+	if payoutStatusCanAdvance("completed", "failed") {
+		t.Fatal("completed payout must not regress to failed")
+	}
+	if payoutStatusCanAdvance("refunded", "completed") {
+		t.Fatal("refunded payout must be terminal")
+	}
+}

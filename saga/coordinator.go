@@ -165,10 +165,12 @@ func (c *Coordinator) transition(state State, eventType, reason string) (State, 
 	case state == StateAwaitingLedger && eventType == "ledger.failed":
 		return StateFailed, "payment.fail", 0, reasonOrDefault(reason, "ledger reservation failed"), nil
 	case state == StateAwaitingSettlement && eventType == "settlement.completed":
-		return StateCompleted, "", 0, "", nil
+		return StateCompleted, "payment.settle", 0, "", nil
 	case state == StateAwaitingSettlement && eventType == "settlement.failed":
 		return StateReleasingLedger, "ledger.release", c.ledgerTimeout, reasonOrDefault(reason, "settlement failed"), nil
 	case state == StateAwaitingSettlement && eventType == "settlement.refunded":
+		return StateRefunding, "ledger.release", c.ledgerTimeout, reasonOrDefault(reason, "settlement refunded"), nil
+	case state == StateCompleted && eventType == "settlement.refunded":
 		return StateRefunding, "ledger.release", c.ledgerTimeout, reasonOrDefault(reason, "settlement refunded"), nil
 	case state == StateReleasingLedger && eventType == "ledger.released":
 		return StateLedgerReleased, "payment.fail", 0, reason, nil
@@ -224,6 +226,8 @@ func sagaCommandVersion(command string) int {
 		return eventbus.SettlementExecuteVersion
 	case "payment.fail":
 		return eventbus.PaymentFailVersion
+	case "payment.settle":
+		return eventbus.PaymentSettleVersion
 	case "payment.refund":
 		return eventbus.PaymentRefundVersion
 	case "ledger.release":
@@ -251,7 +255,7 @@ func (c *Coordinator) ExpireOnce(ctx context.Context) (int, error) {
 	now := c.now()
 	rows, err := tx.QueryContext(ctx, `SELECT id, payment_id, correlation_id, state
 		FROM payment_sagas WHERE deadline_at <= $1
-		  AND state IN ('awaiting_policy', 'awaiting_ledger', 'awaiting_settlement', 'releasing_ledger')
+		  AND state IN ('awaiting_policy', 'awaiting_ledger', 'awaiting_settlement', 'releasing_ledger', 'refunding')
 		ORDER BY deadline_at FOR UPDATE SKIP LOCKED LIMIT $2`, now, c.timeoutBatchSize)
 	if err != nil {
 		return 0, fmt.Errorf("claim timed out payment sagas: %w", err)
@@ -282,6 +286,9 @@ func (c *Coordinator) ExpireOnce(ctx context.Context) (int, error) {
 		}
 		if s.state == StateReleasingLedger {
 			next, command = StateFailed, "payment.fail"
+		}
+		if s.state == StateRefunding {
+			next, command = StateFailed, "payment.refund"
 		}
 		if err := c.updateAndCommand(ctx, tx, s.id, s.correlationID, s.paymentID, "timeout", next, command, timeout, string(s.state)+" timeout"); err != nil {
 			return 0, err

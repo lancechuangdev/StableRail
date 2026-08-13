@@ -111,6 +111,9 @@ func (h *CommandHandler) Handle(ctx context.Context, tx *sql.Tx, event eventbus.
 			if payload.Reason == "" {
 				payload.Reason = result.FailureCode
 			}
+			if result.FailureCode == "refunded" {
+				return h.enqueueReply(ctx, tx, event, payload, "settlement.refunded")
+			}
 			return h.enqueueReply(ctx, tx, event, payload, "settlement.failed")
 		}
 		if err := transitionPayment(ctx, tx, payload.PaymentID, paymentcore.StateProcessing, paymentcore.StateSettled, h.now()); err != nil {
@@ -125,6 +128,11 @@ func (h *CommandHandler) Handle(ctx context.Context, tx *sql.Tx, event eventbus.
 			return fmt.Errorf("release ledger funds: %w", err)
 		}
 		reply = "ledger.released"
+	case "payment.settle":
+		if err := transitionPayment(ctx, tx, payload.PaymentID, paymentcore.StateProcessing, paymentcore.StateSettled, h.now()); err != nil {
+			return err
+		}
+		return h.enqueueReply(ctx, tx, event, payload, "payment.settled")
 	case "payment.fail", "payment.refund":
 		state, eventName, message := paymentcore.StateFailed, "failed", payload.Reason
 		if event.Type == "payment.refund" {
@@ -134,7 +142,11 @@ func (h *CommandHandler) Handle(ctx context.Context, tx *sql.Tx, event eventbus.
 			}
 		}
 		now := h.now()
-		if _, err := tx.ExecContext(ctx, `UPDATE payments SET state=$1, updated_at=$2 WHERE id=$3 AND state <> 'settled'`, state, now, payload.PaymentID); err != nil {
+		update := `UPDATE payments SET state=$1, updated_at=$2 WHERE id=$3 AND state NOT IN ('settled','refunded')`
+		if event.Type == "payment.refund" {
+			update = `UPDATE payments SET state=$1, updated_at=$2 WHERE id=$3`
+		}
+		if _, err := tx.ExecContext(ctx, update, state, now, payload.PaymentID); err != nil {
 			return fmt.Errorf("record payment outcome: %w", err)
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO payment_audit_events(payment_id,event,message,occurred_at) VALUES($1,$2,$3,$4)`, payload.PaymentID, eventName, message, now); err != nil {
@@ -224,7 +236,7 @@ func (h *CommandHandler) enqueueReply(ctx context.Context, tx *sql.Tx, caused ev
 		return err
 	}
 	body, _ := json.Marshal(map[string]string{"correlation_id": p.CorrelationID, "caused_by_event_id": caused.ID, "reason": p.Reason})
-	version := map[string]int{"policy.approved": eventbus.PolicyApprovedVersion, "policy.rejected": eventbus.PolicyRejectedVersion, "ledger.reserved": eventbus.LedgerReservedVersion, "ledger.released": eventbus.LedgerReleasedVersion, "settlement.completed": eventbus.SettlementCompletedVersion, "settlement.failed": eventbus.SettlementFailedVersion, "settlement.refunded": eventbus.SettlementRefundedVersion, "payment.failed": eventbus.PaymentFailedVersion, "payment.refunded": eventbus.PaymentRefundedVersion}[reply]
+	version := map[string]int{"policy.approved": eventbus.PolicyApprovedVersion, "policy.rejected": eventbus.PolicyRejectedVersion, "ledger.reserved": eventbus.LedgerReservedVersion, "ledger.released": eventbus.LedgerReleasedVersion, "settlement.completed": eventbus.SettlementCompletedVersion, "settlement.failed": eventbus.SettlementFailedVersion, "settlement.refunded": eventbus.SettlementRefundedVersion, "payment.settled": eventbus.PaymentSettledVersion, "payment.failed": eventbus.PaymentFailedVersion, "payment.refunded": eventbus.PaymentRefundedVersion}[reply]
 	_, err = tx.ExecContext(ctx, `INSERT INTO outbox_events(id,topic,event_type,event_version,aggregate_id,aggregate_type,payload,occurred_at) VALUES($1,$2,$3,$4,$5,'payment',$6,$7)`, id, paymentcore.PaymentEventsTopic, reply, version, p.PaymentID, body, h.now())
 	if err != nil {
 		return fmt.Errorf("enqueue %s: %w", reply, err)

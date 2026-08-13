@@ -12,6 +12,7 @@ const (
 	LedgerReserveVersion       = 1
 	SettlementExecuteVersion   = 1
 	PaymentFailVersion         = 1
+	PaymentSettleVersion       = 1
 	PaymentRefundVersion       = 1
 	LedgerReleaseVersion       = 1
 	DeadLetterVersion          = 1

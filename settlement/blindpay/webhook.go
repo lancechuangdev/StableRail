@@ -122,15 +122,11 @@ func (s *PayoutWebhookService) Process(ctx context.Context, svixID string, raw j
 	}
 	defer tx.Rollback()
 	now := s.now()
-	result, err := tx.ExecContext(ctx, `INSERT INTO blindpay_webhook_events(svix_id,webhook_event,provider_payout_id,payload,received_at) VALUES($1,$2,NULLIF($3,''),$4,$5) ON CONFLICT(svix_id) DO NOTHING`, svixID, payload.WebhookEvent, payload.ID, raw, now)
+	_, err = tx.ExecContext(ctx, `INSERT INTO blindpay_webhook_events(svix_id,webhook_event,provider_payout_id,payload,received_at) VALUES($1,$2,NULLIF($3,''),$4,$5) ON CONFLICT(svix_id) DO NOTHING`, svixID, payload.WebhookEvent, payload.ID, raw, now)
 	if err != nil {
 		return fmt.Errorf("persist BlindPay webhook: %w", err)
 	}
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("inspect BlindPay webhook: %w", err)
-	}
-	if rows == 0 || !strings.HasPrefix(payload.WebhookEvent, "payout.") {
+	if !strings.HasPrefix(payload.WebhookEvent, "payout.") {
 		return tx.Commit()
 	}
 	if !strings.HasPrefix(payload.ID, "po_") || !validPayoutStatus(payload.Status) {
@@ -144,7 +140,12 @@ func (s *PayoutWebhookService) Process(ctx context.Context, svixID string, raw j
 	if err != nil {
 		return fmt.Errorf("lock BlindPay payout webhook target: %w", err)
 	}
-	if payoutStatusRank(payload.Status) <= payoutStatusRank(current) {
+	if !payoutStatusCanAdvance(current, payload.Status) {
+		if current == payload.Status && isTerminalPayoutStatus(payload.Status) {
+			if err := s.enqueueSagaResult(ctx, tx, svixID, paymentID, payload.Status, now); err != nil {
+				return err
+			}
+		}
 		return tx.Commit()
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE blindpay_payouts SET provider_status=$1,provider_payload=$2,updated_at=$3 WHERE payment_id=$4`, payload.Status, raw, now, paymentID); err != nil {
@@ -159,16 +160,94 @@ func (s *PayoutWebhookService) Process(ctx context.Context, svixID string, raw j
 }
 
 func validPayoutStatus(status string) bool { return payoutStatusRank(status) > 0 }
+func isTerminalPayoutStatus(status string) bool {
+	return status == "completed" || status == "failed" || status == "refunded"
+}
+
+func payoutStatusCanAdvance(current, next string) bool {
+	if current == next || current == "failed" || current == "refunded" {
+		return false
+	}
+	if current == "completed" {
+		return next == "refunded"
+	}
+	return payoutStatusRank(next) > payoutStatusRank(current)
+}
+
 func payoutStatusRank(status string) int {
 	switch status {
-	case "processing":
+	case "submission_pending", "unknown":
 		return 1
-	case "on_hold":
+	case "processing":
 		return 2
-	case "completed", "failed", "refunded":
+	case "on_hold":
 		return 3
+	case "completed", "failed", "refunded":
+		return 4
 	default:
 		return 0
+	}
+}
+
+// ReconcileOnce retries verified terminal deliveries whose derived saga event
+// has not yet been written. This repairs webhooks that arrived before their
+// payout or saga record was visible.
+func (s *PayoutWebhookService) ReconcileOnce(ctx context.Context) (int, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT w.svix_id,w.payload
+		FROM blindpay_webhook_events w
+		WHERE w.webhook_event LIKE 'payout.%'
+		  AND (w.payload->>'status') IN ('completed','failed','refunded')
+		  AND NOT EXISTS (SELECT 1 FROM outbox_events o WHERE o.id='evt_blindpay_' || w.svix_id)
+		ORDER BY w.received_at LIMIT 100`)
+	if err != nil {
+		return 0, fmt.Errorf("find unreconciled BlindPay webhooks: %w", err)
+	}
+	type delivery struct {
+		id  string
+		raw json.RawMessage
+	}
+	var deliveries []delivery
+	for rows.Next() {
+		var d delivery
+		if err := rows.Scan(&d.id, &d.raw); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		deliveries = append(deliveries, d)
+	}
+	if err := rows.Close(); err != nil {
+		return 0, err
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	processed := 0
+	for _, d := range deliveries {
+		if err := s.Process(ctx, d.id, d.raw); err != nil {
+			return processed, err
+		}
+		processed++
+	}
+	return processed, nil
+}
+
+func (s *PayoutWebhookService) RunReconciler(ctx context.Context, interval time.Duration) error {
+	if interval <= 0 {
+		interval = time.Minute
+	}
+	for {
+		if _, err := s.ReconcileOnce(ctx); err != nil {
+			return err
+		}
+		timer := time.NewTimer(interval)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return ctx.Err()
+		case <-timer.C:
+		}
 	}
 }
 

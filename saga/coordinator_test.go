@@ -24,9 +24,10 @@ func TestWorkflowTransitions(t *testing.T) {
 		{StateAwaitingPolicy, "policy.rejected", StateFailed, "payment.fail"},
 		{StateAwaitingLedger, "ledger.reserved", StateAwaitingSettlement, "settlement.execute"},
 		{StateAwaitingLedger, "ledger.failed", StateFailed, "payment.fail"},
-		{StateAwaitingSettlement, "settlement.completed", StateCompleted, ""},
+		{StateAwaitingSettlement, "settlement.completed", StateCompleted, "payment.settle"},
 		{StateAwaitingSettlement, "settlement.failed", StateReleasingLedger, "ledger.release"},
 		{StateAwaitingSettlement, "settlement.refunded", StateRefunding, "ledger.release"},
+		{StateCompleted, "settlement.refunded", StateRefunding, "ledger.release"},
 		{StateReleasingLedger, "ledger.released", StateLedgerReleased, "payment.fail"},
 		{StateRefunding, "ledger.released", StateRefunded, "payment.refund"},
 	}
@@ -123,6 +124,34 @@ func TestExpireOnceCompensatesSettlementTimeout(t *testing.T) {
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet database expectations: %v", err)
+	}
+}
+
+func TestExpireOnceFailsRefundWhoseLedgerReleaseTimedOut(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	c := testCoordinator(t, db)
+	now := c.now()
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT id, payment_id, correlation_id, state").WithArgs(now, 10).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "payment_id", "correlation_id", "state"}).
+			AddRow("saga-1", "pay-1", "corr-1", StateRefunding))
+	mock.ExpectExec("UPDATE payment_sagas").
+		WithArgs(StateFailed, nil, "refunding timeout", now, "saga-1").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO outbox_events").
+		WithArgs("evt_1", CommandTopic, "payment.refund", eventbus.PaymentRefundVersion, "pay-1", sqlmock.AnyArg(), now).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+	count, err := c.ExpireOnce(context.Background())
+	if err != nil || count != 1 {
+		t.Fatalf("ExpireOnce = (%d, %v)", count, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
 	}
 }
 
