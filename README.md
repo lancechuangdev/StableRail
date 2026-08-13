@@ -866,6 +866,9 @@ The API listens on `:8080` by default. `STABLERAIL_HTTP_ADDRESS`, `STABLERAIL_SH
 | `POST /v1/payments` | Create a payment; requires `Idempotency-Key` |
 | `GET /v1/payments/{id}` | Read the current payment snapshot |
 | `GET /v1/payments/{id}/timeline` | Read ordered lifecycle history |
+| `POST /v1/webhook-endpoints` | Register a tenant webhook endpoint and return its signing secret once |
+| `GET /v1/webhook-endpoints` | List the authenticated tenant's webhook endpoints without secrets |
+| `DELETE /v1/webhook-endpoints/{id}` | Disable one of the authenticated tenant's webhook endpoints |
 | `POST /v1/operator/tenants/{id}/api-keys` | Issue a tenant API key; requires the operator Bearer token |
 | `DELETE /v1/operator/api-keys/{id}` | Revoke a tenant API key; requires the operator Bearer token |
 | `POST /v1/operator/payments/{id}/manual-review` | Resolve a held saga; requires the configured operator Bearer token |
@@ -896,6 +899,27 @@ creation. If a request also supplies `tenant_id`, it must match the authenticate
 tenant. Payment lookup and timeline endpoints return 404 for another tenant's
 payment. Operators can immediately disable a key with
 `DELETE /v1/operator/api-keys/{key_id}`.
+
+### Register tenant webhooks
+
+An authenticated tenant may register up to five active HTTPS endpoints. StableRail
+returns the `signing_secret` only in the registration response; list responses never
+include it. Events are delivered independently to every active endpoint.
+
+```bash
+curl -i -X POST http://localhost:8080/v1/webhook-endpoints \
+  -H "Authorization: Bearer $STABLERAIL_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"url":"https://merchant.example/webhooks/stablerail"}'
+
+curl -H "Authorization: Bearer $STABLERAIL_API_KEY" \
+  http://localhost:8080/v1/webhook-endpoints
+```
+
+Registration rejects non-HTTPS URLs, local hostnames, and private or otherwise
+non-public literal IP addresses. Registering the same active URL twice returns
+`409 Conflict`. Deleting an endpoint disables future deliveries and is scoped to
+the tenant authenticated by the API key.
 
 The manual-review endpoint is mounted only when `STABLERAIL_OPERATOR_TOKEN` is set.
 It requires `Authorization: Bearer <token>` and an audited operator decision:

@@ -162,6 +162,14 @@ func run() error {
 		return err
 	}
 	handler = apiKeys.Middleware(handler)
+	webhookEndpoints, err := paymentapi.NewWebhookEndpointService(db)
+	if err != nil {
+		return err
+	}
+	webhookEndpointHandler, err := paymentapi.NewWebhookEndpointHandler(webhookEndpoints)
+	if err != nil {
+		return err
+	}
 
 	metrics := &observability.Metrics{}
 	root := http.NewServeMux()
@@ -186,6 +194,9 @@ func run() error {
 	if blindPayWebhookHandler != nil {
 		root.Handle("POST /v1/providers/blindpay/webhooks", blindPayWebhookHandler)
 	}
+	root.Handle("POST /v1/webhook-endpoints", apiKeys.Middleware(webhookEndpointHandler))
+	root.Handle("GET /v1/webhook-endpoints", apiKeys.Middleware(webhookEndpointHandler))
+	root.Handle("DELETE /v1/webhook-endpoints/{id}", apiKeys.Middleware(webhookEndpointHandler))
 	root.Handle("/", metrics.Middleware(handler, logger))
 	server := &http.Server{
 		Addr:              config.HTTPAddress,
