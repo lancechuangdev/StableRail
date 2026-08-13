@@ -98,7 +98,7 @@ func (s *PostgresService) createPayment(
 		}
 		if quoteStatus == "accepted" {
 			existing, lookupErr := getPaymentByIdempotencyKey(ctx, tx, idempotencyKey)
-			if lookupErr == nil && existing.PayoutQuoteID == payoutQuoteID {
+			if lookupErr == nil && paymentRequestMatches(existing, externalRef, currency, amountMinor, customerID, payoutQuoteID, destination) {
 				if err := tx.Commit(); err != nil {
 					return nil, fmt.Errorf("commit idempotent payout payment lookup: %w", err)
 				}
@@ -141,8 +141,8 @@ func (s *PostgresService) createPayment(
 		if err != nil {
 			return nil, err
 		}
-		if payoutQuoteID != "" && existing.PayoutQuoteID != payoutQuoteID {
-			return nil, errors.New("idempotency key is already bound to a different payment or payout quote")
+		if !paymentRequestMatches(existing, externalRef, currency, amountMinor, customerID, payoutQuoteID, destination) {
+			return nil, ErrIdempotencyConflict
 		}
 		if err := tx.Commit(); err != nil {
 			return nil, fmt.Errorf("commit idempotent payment lookup: %w", err)
@@ -418,5 +418,21 @@ func getPaymentByIdempotencyKey(ctx context.Context, tx *sql.Tx, key string) (*P
 	if err := tx.QueryRowContext(ctx, `SELECT id FROM blindpay_quotes WHERE payment_id=$1`, payment.ID).Scan(&payment.PayoutQuoteID); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("get idempotent payment payout quote: %w", err)
 	}
+	var destination Destination
+	if err := tx.QueryRowContext(ctx, `SELECT kind,COALESCE(chain,''),COALESCE(address,'') FROM payment_destinations WHERE payment_id=$1`, payment.ID).Scan(&destination.Type, &destination.Chain, &destination.Address); err == nil {
+		payment.Destination = &destination
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("get idempotent payment destination: %w", err)
+	}
 	return payment, nil
+}
+
+func paymentRequestMatches(payment *Payment, externalRef, currency string, amountMinor int64, customerID, payoutQuoteID string, destination *Destination) bool {
+	if payment.ExternalReference != externalRef || payment.Currency != currency || payment.AmountMinor != amountMinor || payment.CustomerID != customerID || payment.PayoutQuoteID != payoutQuoteID {
+		return false
+	}
+	if payment.Destination == nil || destination == nil {
+		return payment.Destination == nil && destination == nil
+	}
+	return *payment.Destination == *destination
 }

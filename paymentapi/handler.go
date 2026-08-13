@@ -110,6 +110,10 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 		p, err = h.payments.CreatePayment(r.Context(), input.ExternalReference, input.Currency, input.AmountMinor, input.CustomerID, key)
 	}
 	if err != nil {
+		if errors.Is(err, paymentcore.ErrIdempotencyConflict) {
+			problem(w, http.StatusConflict, err.Error())
+			return
+		}
 		problem(w, http.StatusInternalServerError, "could not create payment")
 		return
 	}

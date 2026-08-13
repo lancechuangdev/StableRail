@@ -78,6 +78,18 @@ func TestCreatePaymentValidation(t *testing.T) {
 	}
 }
 
+func TestCreatePaymentRejectsDifferentRequestForIdempotencyKey(t *testing.T) {
+	store := &fakeStore{err: paymentcore.ErrIdempotencyConflict}
+	h, _ := NewHandler(store, fakeHealth{}, nil)
+	req := httptest.NewRequest(http.MethodPost, "/v1/payments", strings.NewReader(`{"external_reference":"different","currency":"USD","amount_minor":1250,"customer_id":"cus-1"}`))
+	req.Header.Set("Idempotency-Key", "request-1")
+	res := httptest.NewRecorder()
+	h.ServeHTTP(res, req)
+	if res.Code != http.StatusConflict {
+		t.Fatalf("status = %d, body=%s", res.Code, res.Body.String())
+	}
+}
+
 func TestCreateBlindPayPayoutQuote(t *testing.T) {
 	quotes := &fakePayoutQuoteService{}
 	h, _ := NewHandler(&fakeStore{}, fakeHealth{}, quotes)

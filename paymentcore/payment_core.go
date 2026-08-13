@@ -7,7 +7,10 @@ import (
 	"time"
 )
 
-var ErrPaymentNotFound = errors.New("payment not found")
+var (
+	ErrPaymentNotFound     = errors.New("payment not found")
+	ErrIdempotencyConflict = errors.New("idempotency key is bound to a different request")
+)
 
 // PaymentState represents the lifecycle state of a payment.
 type PaymentState string
