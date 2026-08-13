@@ -602,6 +602,22 @@ or reconciliation confirms it.
    - Run a limited production pilot before enabling general traffic; development
      instances simulate fiat completion and do not validate real bank-rail timing.
 
+#### Refund lifecycle
+
+StableRail distinguishes releasing a reservation for a payout that never settled
+from recording funds returned after settlement. Reservation release debits
+`settlement:payable` and credits `cash:operating`; post-settlement refund accounting
+reverses the settlement journal by debiting `cash:operating` and crediting
+`settlement:payable`. The two paths use distinct ledger commands and event types.
+
+After `settlement.completed`, the saga remains in `settling_payment` until the
+`payment.settle` command produces `payment.settled`. Refund accounting commands are
+retried on timeout, and `payment.refund` is emitted only after the applicable ledger
+operation succeeds. The resulting `payment.refunded` event is delivered to active
+customer webhook endpoints. Regression tests cover settlement acknowledgement,
+both refund accounting paths, timeout retries, early-webhook reconciliation, and
+customer refund notification creation.
+
 ### Reconciliation and observability
 
 The reconciliation worker periodically compares debit and credit totals for every

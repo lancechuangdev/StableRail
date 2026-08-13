@@ -108,3 +108,31 @@ func TestPayoutStatusCanAdvanceCompletedToRefunded(t *testing.T) {
 		t.Fatal("refunded payout must be terminal")
 	}
 }
+
+func TestReconcileOnceRepairsInitiallyUnmatchedTerminalWebhook(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	service, _ := NewPayoutWebhookService(db)
+	now := time.Date(2026, time.August, 13, 20, 0, 0, 0, time.UTC)
+	service.now = func() time.Time { return now }
+	body := []byte(`{"webhook_event":"payout.complete","id":"po_early","status":"completed"}`)
+	mock.ExpectQuery("SELECT w.svix_id,w.payload").WillReturnRows(sqlmock.NewRows([]string{"svix_id", "payload"}).AddRow("msg_early", body))
+	mock.ExpectBegin()
+	mock.ExpectExec("INSERT INTO blindpay_webhook_events").WithArgs("msg_early", "payout.complete", "po_early", body, now).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery("SELECT payment_id,provider_status FROM blindpay_payouts").WithArgs("po_early").WillReturnRows(sqlmock.NewRows([]string{"payment_id", "provider_status"}).AddRow("pay_early", "processing"))
+	mock.ExpectExec("UPDATE blindpay_payouts SET provider_status").WithArgs("completed", body, now, "pay_early").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery("SELECT correlation_id FROM payment_sagas").WithArgs("pay_early").WillReturnRows(sqlmock.NewRows([]string{"correlation_id"}).AddRow("corr_early"))
+	mock.ExpectExec("INSERT INTO outbox_events").WithArgs("evt_blindpay_msg_early", paymentcore.PaymentEventsTopic, "settlement.completed", 1, "pay_early", sqlmock.AnyArg(), now).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	count, err := service.ReconcileOnce(context.Background())
+	if err != nil || count != 1 {
+		t.Fatalf("ReconcileOnce = (%d, %v)", count, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}

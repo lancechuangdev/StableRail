@@ -157,6 +157,34 @@ func TestExpireOnceRetriesRefundWhoseLedgerReleaseTimedOut(t *testing.T) {
 	}
 }
 
+func TestExpireOnceRetriesPostSettlementRefundAccounting(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	c := testCoordinator(t, db)
+	now := c.now()
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT id, payment_id, correlation_id, state").WithArgs(now, 10).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "payment_id", "correlation_id", "state"}).
+			AddRow("saga-1", "pay-1", "corr-1", StateRecordingRefund))
+	mock.ExpectExec("UPDATE payment_sagas").
+		WithArgs(StateRecordingRefund, now.Add(time.Minute), "recording_refund timeout", now, "saga-1").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO outbox_events").
+		WithArgs("evt_1", CommandTopic, "ledger.record_refund", eventbus.LedgerRecordRefundVersion, "pay-1", sqlmock.AnyArg(), now).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+	count, err := c.ExpireOnce(context.Background())
+	if err != nil || count != 1 {
+		t.Fatalf("ExpireOnce = (%d, %v)", count, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func testCoordinator(t *testing.T, db *sql.DB) *Coordinator {
 	t.Helper()
 	c, err := NewCoordinator(db, Config{TimeoutBatchSize: 10})
