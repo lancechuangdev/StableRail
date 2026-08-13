@@ -167,6 +167,31 @@ type Payout struct {
 	BankAccountID       string `json:"bank_account_id"`
 }
 
+type ManagedWalletAsset struct {
+	Address, ID, Symbol string
+	Amount              int64
+}
+
+// GetManagedWalletBalance returns raw token amounts, expressed in minor units.
+func (c *Client) GetManagedWalletBalance(ctx context.Context, customerID, walletID string) (map[string]ManagedWalletAsset, error) {
+	if !strings.HasPrefix(customerID, "re_") || !strings.HasPrefix(walletID, "bl_") {
+		return nil, errors.New("invalid BlindPay customer or managed wallet ID")
+	}
+	var out map[string]ManagedWalletAsset
+	_, err := c.do(ctx, http.MethodGet, "/customers/"+url.PathEscape(customerID)+"/wallets/"+url.PathEscape(walletID)+"/balance", "", nil, &out)
+	if err != nil {
+		return nil, err
+	}
+	for symbol, asset := range out {
+		asset.Symbol = strings.ToUpper(asset.Symbol)
+		if asset.Symbol == "" {
+			asset.Symbol = strings.ToUpper(symbol)
+		}
+		out[strings.ToUpper(symbol)] = asset
+	}
+	return out, nil
+}
+
 func (c *Client) CreateEVMPayout(ctx context.Context, r PayoutRequest) (Payout, error) {
 	if !strings.HasPrefix(r.QuoteID, "qu_") || r.SenderWalletAddress == "" {
 		return Payout{}, errors.New("invalid BlindPay payout request")

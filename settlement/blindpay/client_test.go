@@ -53,6 +53,22 @@ func TestCreatePayoutContract(t *testing.T) {
 	}
 }
 
+func TestGetManagedWalletBalanceContract(t *testing.T) {
+	c := testClient(t, func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path != "/instances/in_test/customers/re_test/wallets/bl_test/balance" {
+			t.Fatalf("path=%s", r.URL.Path)
+		}
+		return response(http.StatusOK, `{"USDB":{"address":"0xabc","id":"","symbol":"USDB","amount":2500}}`), nil
+	})
+	balance, err := c.GetManagedWalletBalance(context.Background(), "re_test", "bl_test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if balance["USDB"].Amount != 2500 || balance["USDB"].Address != "0xabc" {
+		t.Fatalf("unexpected balance: %+v", balance)
+	}
+}
+
 func TestErrorClassification(t *testing.T) {
 	c := testClient(t, func(*http.Request) (*http.Response, error) {
 		return response(http.StatusBadRequest, `{"code":"please_accept_terms_of_service","message":"accept terms"}`), nil

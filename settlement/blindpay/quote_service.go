@@ -51,6 +51,7 @@ type QuoteService struct {
 
 type quoteClient interface {
 	CreateQuote(context.Context, QuoteRequest) (Quote, error)
+	GetManagedWalletBalance(context.Context, string, string) (map[string]ManagedWalletAsset, error)
 }
 
 func NewQuoteService(client quoteClient, repo *Repository, network, token string) (*QuoteService, error) {
@@ -79,6 +80,14 @@ func (s *QuoteService) Create(ctx context.Context, r PayoutQuoteRequest) (*Payou
 	expiresAt := time.UnixMilli(providerQuote.ExpiresAt).UTC()
 	if !expiresAt.After(s.now()) {
 		return nil, errors.New("BlindPay returned an expired payout quote")
+	}
+	balance, err := s.client.GetManagedWalletBalance(ctx, profile.Customer.ProviderCustomerID, r.ManagedWalletID)
+	if err != nil {
+		return nil, fmt.Errorf("get BlindPay managed wallet balance: %w", err)
+	}
+	asset, ok := balance[strings.ToUpper(s.token)]
+	if !ok || asset.Amount < providerQuote.SenderAmount {
+		return nil, fmt.Errorf("managed wallet has insufficient %s balance for payout", s.token)
 	}
 	raw := providerQuote.RawPayload
 	if len(raw) == 0 {
