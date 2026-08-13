@@ -245,7 +245,7 @@ func (h *CommandHandler) enqueueReply(ctx context.Context, tx *sql.Tx, caused ev
 }
 
 func SagaHandler(coordinator *saga.Coordinator) func(context.Context, *sql.Tx, eventbus.Event) error {
-	allowed := map[string]bool{"payment.created": true, "policy.approved": true, "policy.rejected": true, "ledger.reserved": true, "ledger.failed": true, "ledger.released": true, "settlement.completed": true, "settlement.failed": true, "settlement.refunded": true}
+	allowed := map[string]bool{"payment.created": true, "payment.settled": true, "policy.approved": true, "policy.rejected": true, "ledger.reserved": true, "ledger.failed": true, "ledger.released": true, "settlement.completed": true, "settlement.failed": true, "settlement.refunded": true}
 	return func(ctx context.Context, tx *sql.Tx, event eventbus.Event) error {
 		if !allowed[event.Type] {
 			return nil

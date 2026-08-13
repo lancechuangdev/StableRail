@@ -24,6 +24,7 @@ const (
 	StateAwaitingSettlement State = "awaiting_settlement"
 	StateReleasingLedger    State = "releasing_ledger"
 	StateRefunding          State = "refunding"
+	StateSettlingPayment    State = "settling_payment"
 	StateCompleted          State = "completed"
 	StateLedgerReleased     State = "ledger_released"
 	StateFailed             State = "failed"
@@ -165,7 +166,9 @@ func (c *Coordinator) transition(state State, eventType, reason string) (State, 
 	case state == StateAwaitingLedger && eventType == "ledger.failed":
 		return StateFailed, "payment.fail", 0, reasonOrDefault(reason, "ledger reservation failed"), nil
 	case state == StateAwaitingSettlement && eventType == "settlement.completed":
-		return StateCompleted, "payment.settle", 0, "", nil
+		return StateSettlingPayment, "payment.settle", c.ledgerTimeout, "", nil
+	case state == StateSettlingPayment && eventType == "payment.settled":
+		return StateCompleted, "", 0, "", nil
 	case state == StateAwaitingSettlement && eventType == "settlement.failed":
 		return StateReleasingLedger, "ledger.release", c.ledgerTimeout, reasonOrDefault(reason, "settlement failed"), nil
 	case state == StateAwaitingSettlement && eventType == "settlement.refunded":
@@ -255,7 +258,7 @@ func (c *Coordinator) ExpireOnce(ctx context.Context) (int, error) {
 	now := c.now()
 	rows, err := tx.QueryContext(ctx, `SELECT id, payment_id, correlation_id, state
 		FROM payment_sagas WHERE deadline_at <= $1
-		  AND state IN ('awaiting_policy', 'awaiting_ledger', 'awaiting_settlement', 'releasing_ledger', 'refunding')
+		  AND state IN ('awaiting_policy', 'awaiting_ledger', 'awaiting_settlement', 'releasing_ledger', 'refunding', 'settling_payment')
 		ORDER BY deadline_at FOR UPDATE SKIP LOCKED LIMIT $2`, now, c.timeoutBatchSize)
 	if err != nil {
 		return 0, fmt.Errorf("claim timed out payment sagas: %w", err)
@@ -289,6 +292,9 @@ func (c *Coordinator) ExpireOnce(ctx context.Context) (int, error) {
 		}
 		if s.state == StateRefunding {
 			next, command = StateFailed, "payment.refund"
+		}
+		if s.state == StateSettlingPayment {
+			next, command, timeout = StateSettlingPayment, "payment.settle", c.ledgerTimeout
 		}
 		if err := c.updateAndCommand(ctx, tx, s.id, s.correlationID, s.paymentID, "timeout", next, command, timeout, string(s.state)+" timeout"); err != nil {
 			return 0, err
