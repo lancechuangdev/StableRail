@@ -19,6 +19,7 @@ type Status string
 
 const (
 	StatusPending   Status = "pending"
+	StatusOnHold    Status = "on_hold"
 	StatusSucceeded Status = "succeeded"
 	StatusFailed    Status = "failed"
 )
@@ -52,7 +53,7 @@ func (r SettlementResult) Validate() error {
 		return errors.New("provider reference is required")
 	}
 	switch r.Status {
-	case StatusPending, StatusSucceeded:
+	case StatusPending, StatusOnHold, StatusSucceeded:
 		return nil
 	case StatusFailed:
 		if r.FailureCode == "" {

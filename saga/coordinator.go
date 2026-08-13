@@ -22,6 +22,8 @@ const (
 	StateAwaitingPolicy     State = "awaiting_policy"
 	StateAwaitingLedger     State = "awaiting_ledger"
 	StateAwaitingSettlement State = "awaiting_settlement"
+	StateOnHold             State = "on_hold"
+	StateManualReview       State = "manual_review"
 	StateReleasingLedger    State = "releasing_ledger"
 	StateRefunding          State = "refunding"
 	StateRecordingRefund    State = "recording_refund"
@@ -36,6 +38,7 @@ type Config struct {
 	PolicyTimeout     time.Duration
 	LedgerTimeout     time.Duration
 	SettlementTimeout time.Duration
+	ComplianceTimeout time.Duration
 	TimeoutBatchSize  int
 }
 
@@ -44,6 +47,7 @@ type Coordinator struct {
 	policyTimeout     time.Duration
 	ledgerTimeout     time.Duration
 	settlementTimeout time.Duration
+	complianceTimeout time.Duration
 	timeoutBatchSize  int
 	now               func() time.Time
 	newID             func(string) (string, error)
@@ -53,7 +57,7 @@ func NewCoordinator(db *sql.DB, config Config) (*Coordinator, error) {
 	if db == nil {
 		return nil, errors.New("saga database is required")
 	}
-	if config.PolicyTimeout < 0 || config.LedgerTimeout < 0 || config.SettlementTimeout < 0 || config.TimeoutBatchSize < 0 {
+	if config.PolicyTimeout < 0 || config.LedgerTimeout < 0 || config.SettlementTimeout < 0 || config.ComplianceTimeout < 0 || config.TimeoutBatchSize < 0 {
 		return nil, errors.New("saga configuration cannot be negative")
 	}
 	if config.PolicyTimeout == 0 {
@@ -65,12 +69,15 @@ func NewCoordinator(db *sql.DB, config Config) (*Coordinator, error) {
 	if config.SettlementTimeout == 0 {
 		config.SettlementTimeout = 10 * time.Minute
 	}
+	if config.ComplianceTimeout == 0 {
+		config.ComplianceTimeout = 24 * time.Hour
+	}
 	if config.TimeoutBatchSize == 0 {
 		config.TimeoutBatchSize = 100
 	}
 	return &Coordinator{
 		db: db, policyTimeout: config.PolicyTimeout, ledgerTimeout: config.LedgerTimeout,
-		settlementTimeout: config.SettlementTimeout, timeoutBatchSize: config.TimeoutBatchSize,
+		settlementTimeout: config.SettlementTimeout, complianceTimeout: config.ComplianceTimeout, timeoutBatchSize: config.TimeoutBatchSize,
 		now: func() time.Time { return time.Now().UTC() },
 		newID: func(prefix string) (string, error) {
 			value := make([]byte, 16)
@@ -168,6 +175,14 @@ func (c *Coordinator) transition(state State, eventType, reason string) (State, 
 		return StateFailed, "payment.fail", 0, reasonOrDefault(reason, "ledger reservation failed"), nil
 	case state == StateAwaitingSettlement && eventType == "settlement.completed":
 		return StateSettlingPayment, "payment.settle", c.ledgerTimeout, "", nil
+	case state == StateAwaitingSettlement && eventType == "settlement.on_hold":
+		return StateOnHold, "", c.complianceTimeout, reasonOrDefault(reason, "settlement on hold"), nil
+	case state == StateOnHold && eventType == "settlement.completed":
+		return StateSettlingPayment, "payment.settle", c.ledgerTimeout, "", nil
+	case state == StateOnHold && eventType == "settlement.failed":
+		return StateReleasingLedger, "ledger.release", c.ledgerTimeout, reasonOrDefault(reason, "settlement failed"), nil
+	case state == StateOnHold && eventType == "settlement.refunded":
+		return StateRefunding, "ledger.release", c.ledgerTimeout, reasonOrDefault(reason, "settlement refunded"), nil
 	case state == StateSettlingPayment && eventType == "payment.settled":
 		return StateCompleted, "", 0, "", nil
 	case state == StateAwaitingSettlement && eventType == "settlement.failed":
@@ -263,7 +278,7 @@ func (c *Coordinator) ExpireOnce(ctx context.Context) (int, error) {
 	now := c.now()
 	rows, err := tx.QueryContext(ctx, `SELECT id, payment_id, correlation_id, state
 		FROM payment_sagas WHERE deadline_at <= $1
-		  AND state IN ('awaiting_policy', 'awaiting_ledger', 'awaiting_settlement', 'releasing_ledger', 'refunding', 'recording_refund', 'settling_payment')
+		  AND state IN ('awaiting_policy', 'awaiting_ledger', 'awaiting_settlement', 'on_hold', 'releasing_ledger', 'refunding', 'recording_refund', 'settling_payment')
 		ORDER BY deadline_at FOR UPDATE SKIP LOCKED LIMIT $2`, now, c.timeoutBatchSize)
 	if err != nil {
 		return 0, fmt.Errorf("claim timed out payment sagas: %w", err)
@@ -291,6 +306,9 @@ func (c *Coordinator) ExpireOnce(ctx context.Context) (int, error) {
 		next, command, timeout := StateFailed, "payment.fail", time.Duration(0)
 		if s.state == StateAwaitingSettlement {
 			next, command, timeout = StateReleasingLedger, "ledger.release", c.ledgerTimeout
+		}
+		if s.state == StateOnHold {
+			next, command, timeout = StateManualReview, "", 0
 		}
 		if s.state == StateReleasingLedger {
 			next, command = StateFailed, "payment.fail"

@@ -13,7 +13,7 @@ import (
 )
 
 func TestWorkflowTransitions(t *testing.T) {
-	c := &Coordinator{ledgerTimeout: time.Minute, settlementTimeout: 10 * time.Minute}
+	c := &Coordinator{ledgerTimeout: time.Minute, settlementTimeout: 10 * time.Minute, complianceTimeout: 24 * time.Hour}
 	tests := []struct {
 		state       State
 		event       string
@@ -25,6 +25,10 @@ func TestWorkflowTransitions(t *testing.T) {
 		{StateAwaitingLedger, "ledger.reserved", StateAwaitingSettlement, "settlement.execute"},
 		{StateAwaitingLedger, "ledger.failed", StateFailed, "payment.fail"},
 		{StateAwaitingSettlement, "settlement.completed", StateSettlingPayment, "payment.settle"},
+		{StateAwaitingSettlement, "settlement.on_hold", StateOnHold, ""},
+		{StateOnHold, "settlement.completed", StateSettlingPayment, "payment.settle"},
+		{StateOnHold, "settlement.failed", StateReleasingLedger, "ledger.release"},
+		{StateOnHold, "settlement.refunded", StateRefunding, "ledger.release"},
 		{StateSettlingPayment, "payment.settled", StateCompleted, ""},
 		{StateAwaitingSettlement, "settlement.failed", StateReleasingLedger, "ledger.release"},
 		{StateAwaitingSettlement, "settlement.refunded", StateRefunding, "ledger.release"},

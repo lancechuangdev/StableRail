@@ -40,8 +40,10 @@ func (p *Provider) Submit(ctx context.Context, request settlement.SettlementRequ
 	switch payout.ProviderStatus {
 	case "completed":
 		result.Status = settlement.StatusSucceeded
-	case "processing", "on_hold", "submission_pending", "unknown":
+	case "processing", "submission_pending", "unknown":
 		result.Status = settlement.StatusPending
+	case "on_hold":
+		result.Status = settlement.StatusOnHold
 	case "failed", "refunded", "submission_failed":
 		result.Status, result.FailureCode = settlement.StatusFailed, payout.ProviderStatus
 	default:

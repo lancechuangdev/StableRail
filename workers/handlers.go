@@ -106,6 +106,9 @@ func (h *CommandHandler) Handle(ctx context.Context, tx *sql.Tx, event eventbus.
 		if result.Status == settlement.StatusPending {
 			return nil
 		}
+		if result.Status == settlement.StatusOnHold {
+			return h.enqueueReply(ctx, tx, event, payload, "settlement.on_hold")
+		}
 		if result.Status == settlement.StatusFailed {
 			payload.Reason = result.FailureMessage
 			if payload.Reason == "" {
@@ -244,7 +247,7 @@ func (h *CommandHandler) enqueueReply(ctx context.Context, tx *sql.Tx, caused ev
 		return err
 	}
 	body, _ := json.Marshal(map[string]string{"correlation_id": p.CorrelationID, "caused_by_event_id": caused.ID, "reason": p.Reason})
-	version := map[string]int{"policy.approved": eventbus.PolicyApprovedVersion, "policy.rejected": eventbus.PolicyRejectedVersion, "ledger.reserved": eventbus.LedgerReservedVersion, "ledger.released": eventbus.LedgerReleasedVersion, "ledger.refund_recorded": eventbus.LedgerRefundRecordedVersion, "settlement.completed": eventbus.SettlementCompletedVersion, "settlement.failed": eventbus.SettlementFailedVersion, "settlement.refunded": eventbus.SettlementRefundedVersion, "payment.settled": eventbus.PaymentSettledVersion, "payment.failed": eventbus.PaymentFailedVersion, "payment.refunded": eventbus.PaymentRefundedVersion}[reply]
+	version := map[string]int{"policy.approved": eventbus.PolicyApprovedVersion, "policy.rejected": eventbus.PolicyRejectedVersion, "ledger.reserved": eventbus.LedgerReservedVersion, "ledger.released": eventbus.LedgerReleasedVersion, "ledger.refund_recorded": eventbus.LedgerRefundRecordedVersion, "settlement.completed": eventbus.SettlementCompletedVersion, "settlement.failed": eventbus.SettlementFailedVersion, "settlement.refunded": eventbus.SettlementRefundedVersion, "settlement.on_hold": eventbus.SettlementOnHoldVersion, "payment.settled": eventbus.PaymentSettledVersion, "payment.failed": eventbus.PaymentFailedVersion, "payment.refunded": eventbus.PaymentRefundedVersion}[reply]
 	_, err = tx.ExecContext(ctx, `INSERT INTO outbox_events(id,topic,event_type,event_version,aggregate_id,aggregate_type,payload,occurred_at) VALUES($1,$2,$3,$4,$5,'payment',$6,$7)`, id, paymentcore.PaymentEventsTopic, reply, version, p.PaymentID, body, h.now())
 	if err != nil {
 		return fmt.Errorf("enqueue %s: %w", reply, err)
@@ -253,7 +256,7 @@ func (h *CommandHandler) enqueueReply(ctx context.Context, tx *sql.Tx, caused ev
 }
 
 func SagaHandler(coordinator *saga.Coordinator) func(context.Context, *sql.Tx, eventbus.Event) error {
-	allowed := map[string]bool{"payment.created": true, "payment.settled": true, "policy.approved": true, "policy.rejected": true, "ledger.reserved": true, "ledger.failed": true, "ledger.released": true, "ledger.refund_recorded": true, "settlement.completed": true, "settlement.failed": true, "settlement.refunded": true}
+	allowed := map[string]bool{"payment.created": true, "payment.settled": true, "policy.approved": true, "policy.rejected": true, "ledger.reserved": true, "ledger.failed": true, "ledger.released": true, "ledger.refund_recorded": true, "settlement.completed": true, "settlement.failed": true, "settlement.refunded": true, "settlement.on_hold": true}
 	return func(ctx context.Context, tx *sql.Tx, event eventbus.Event) error {
 		if !allowed[event.Type] {
 			return nil

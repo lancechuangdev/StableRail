@@ -3,7 +3,7 @@ CREATE TABLE payment_sagas (
     payment_id     TEXT NOT NULL UNIQUE REFERENCES payments(id),
     correlation_id TEXT NOT NULL UNIQUE,
     state          TEXT NOT NULL CHECK (state IN (
-        'awaiting_policy', 'awaiting_ledger', 'awaiting_settlement',
+        'awaiting_policy', 'awaiting_ledger', 'awaiting_settlement', 'on_hold', 'manual_review',
         'releasing_ledger', 'refunding', 'recording_refund', 'settling_payment', 'completed',
         'ledger_released', 'refunded', 'failed'
     )),

@@ -26,4 +26,5 @@ const (
 	SettlementCompletedVersion  = 1
 	SettlementFailedVersion     = 1
 	SettlementRefundedVersion   = 1
+	SettlementOnHoldVersion     = 1
 )

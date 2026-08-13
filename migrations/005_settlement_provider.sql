@@ -4,7 +4,7 @@ CREATE TABLE settlement_submissions (
     command_event_id      TEXT NOT NULL UNIQUE,
     provider              TEXT NOT NULL,
     provider_reference    TEXT NOT NULL UNIQUE,
-    status                TEXT NOT NULL CHECK (status IN ('pending', 'succeeded', 'failed')),
+    status                TEXT NOT NULL CHECK (status IN ('pending', 'on_hold', 'succeeded', 'failed')),
     failure_code          TEXT,
     failure_message       TEXT,
     created_at            TIMESTAMPTZ NOT NULL,

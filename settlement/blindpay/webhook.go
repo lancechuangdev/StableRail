@@ -151,7 +151,7 @@ func (s *PayoutWebhookService) Process(ctx context.Context, svixID string, raw j
 	if _, err := tx.ExecContext(ctx, `UPDATE blindpay_payouts SET provider_status=$1,provider_payload=$2,updated_at=$3 WHERE payment_id=$4`, payload.Status, raw, now, paymentID); err != nil {
 		return fmt.Errorf("update BlindPay payout status: %w", err)
 	}
-	if payload.Status == "completed" || payload.Status == "failed" || payload.Status == "refunded" {
+	if payload.Status == "completed" || payload.Status == "failed" || payload.Status == "refunded" || payload.Status == "on_hold" {
 		if err := s.enqueueSagaResult(ctx, tx, svixID, paymentID, payload.Status, now); err != nil {
 			return err
 		}
@@ -264,6 +264,8 @@ func (s *PayoutWebhookService) enqueueSagaResult(ctx context.Context, tx *sql.Tx
 		eventType, version, reason = "settlement.completed", eventbus.SettlementCompletedVersion, ""
 	} else if status == "refunded" {
 		eventType, version = "settlement.refunded", eventbus.SettlementRefundedVersion
+	} else if status == "on_hold" {
+		eventType, version, reason = "settlement.on_hold", eventbus.SettlementOnHoldVersion, "settlement on hold"
 	}
 	body, err := json.Marshal(map[string]string{"correlation_id": correlationID, "reason": reason})
 	if err != nil {
