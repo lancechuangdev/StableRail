@@ -98,11 +98,17 @@ func (s *PostgresService) createPayment(
 		}
 		if quoteStatus == "accepted" {
 			existing, lookupErr := getPaymentByIdempotencyKey(ctx, tx, idempotencyKey)
-			if lookupErr == nil && paymentRequestMatches(existing, externalRef, currency, amountMinor, tenantID, payoutQuoteID, destination) {
+			if lookupErr == nil {
+				if !paymentRequestMatches(existing, externalRef, currency, amountMinor, tenantID, payoutQuoteID, destination) {
+					return nil, ErrIdempotencyConflict
+				}
 				if err := tx.Commit(); err != nil {
 					return nil, fmt.Errorf("commit idempotent payout payment lookup: %w", err)
 				}
 				return existing, nil
+			}
+			if !errors.Is(lookupErr, sql.ErrNoRows) {
+				return nil, lookupErr
 			}
 			return nil, errors.New("payout quote already accepted")
 		}
