@@ -170,6 +170,34 @@ func TestPostgresTransitionRollsBackWhenLedgerInsertFails(t *testing.T) {
 	}
 }
 
+func TestPostgresGetPaymentAllowsMissingDestination(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	service := deterministicPostgresService(db)
+	now := service.now()
+	mock.ExpectQuery("SELECT id, external_reference, currency, amount_minor").WithArgs("pay_test").
+		WillReturnRows(sqlmock.NewRows([]string{"id", "external_reference", "currency", "amount_minor", "tenant_id", "state", "idempotency_key", "created_at", "updated_at"}).
+			AddRow("pay_test", "order-1", "USD", int64(2500), "tenant-1", StateCreated, "idem-1", now, now))
+	mock.ExpectQuery("SELECT kind,COALESCE").WithArgs("pay_test").WillReturnError(sql.ErrNoRows)
+	mock.ExpectQuery("SELECT id FROM blindpay_quotes").WithArgs("pay_test").WillReturnError(sql.ErrNoRows)
+	mock.ExpectQuery("SELECT state, occurred_at, note FROM payment_timeline_entries").WithArgs("pay_test").
+		WillReturnRows(sqlmock.NewRows([]string{"state", "occurred_at", "note"}).AddRow(StateCreated, now, "payment created"))
+
+	payment, err := service.GetPayment(context.Background(), "pay_test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if payment.ID != "pay_test" || payment.Destination != nil || len(payment.Timeline) != 1 {
+		t.Fatalf("unexpected payment: %+v", payment)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func deterministicPostgresService(db *sql.DB) *PostgresService {
 	fixedTime := time.Date(2026, time.August, 7, 12, 0, 0, 0, time.UTC)
 	service := NewPostgresService(db)

@@ -1,0 +1,31 @@
+services:
+  postgres:
+    image: postgres:18.0
+    ports:
+      - "15432:5432"
+    environment:
+      POSTGRES_DB: stablerail
+      POSTGRES_USER: stablerail
+      POSTGRES_PASSWORD: stablerail
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U stablerail -d stablerail"]
+      interval: 1s
+      timeout: 5s
+      retries: 30
+
+  kafka:
+    image: apache/kafka:4.1.1
+    ports:
+      - "19092:19092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:19092,CONTROLLER://:19093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:19092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:19093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"

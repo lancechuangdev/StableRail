@@ -17,7 +17,7 @@ import (
 
 // Run with STABLERAIL_E2E_DATABASE_URL pointing at a database with migrations
 // applied. This covers HTTP -> payment transaction -> outbox -> query.
-func TestPostgresPaymentHTTPEndToEnd(t *testing.T) {
+func TestPostgresPaymentHTTPIntegration(t *testing.T) {
 	url := os.Getenv("STABLERAIL_E2E_DATABASE_URL")
 	if url == "" {
 		t.Skip("STABLERAIL_E2E_DATABASE_URL is not set")

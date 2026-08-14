@@ -22,9 +22,9 @@ func TestAPIKeyMiddlewareAuthenticatesTenant(t *testing.T) {
 	service.now = func() time.Time { return now }
 	digest := sha256.Sum256([]byte("secret"))
 	mock.ExpectBegin()
-	mock.ExpectQuery("SELECT tenant_id FROM tenant_api_keys").WithArgs("key_abc", digest[:]).
+	mock.ExpectQuery("SELECT tenant_id FROM tenant_api_keys").WithArgs("key_0123456789abcdef01234567", digest[:]).
 		WillReturnRows(sqlmock.NewRows([]string{"tenant_id"}).AddRow("tenant-1"))
-	mock.ExpectExec("UPDATE tenant_api_keys SET last_used_at").WithArgs(now, "key_abc").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("UPDATE tenant_api_keys SET last_used_at").WithArgs(now, "key_0123456789abcdef01234567").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 
 	called := false
@@ -37,7 +37,7 @@ func TestAPIKeyMiddlewareAuthenticatesTenant(t *testing.T) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	req := httptest.NewRequest(http.MethodGet, "/v1/payments/pay_1", nil)
-	req.Header.Set("Authorization", "Bearer srk_key_abc_secret")
+	req.Header.Set("Authorization", "Bearer srk_key_0123456789abcdef01234567_secret")
 	res := httptest.NewRecorder()
 	h.ServeHTTP(res, req)
 	if res.Code != http.StatusNoContent || !called {
@@ -45,6 +45,24 @@ func TestAPIKeyMiddlewareAuthenticatesTenant(t *testing.T) {
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestAPIKeySecretMayContainUnderscores(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	service, _ := NewAPIKeyService(db)
+	digest := sha256.Sum256([]byte("secret_with_underscores"))
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT tenant_id FROM tenant_api_keys").WithArgs("key_0123456789abcdef01234567", digest[:]).
+		WillReturnRows(sqlmock.NewRows([]string{"tenant_id"}).AddRow("tenant-1"))
+	mock.ExpectExec("UPDATE tenant_api_keys SET last_used_at").WithArgs(sqlmock.AnyArg(), "key_0123456789abcdef01234567").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+	if tenantID, err := service.authenticate(context.Background(), "srk_key_0123456789abcdef01234567_secret_with_underscores"); err != nil || tenantID != "tenant-1" {
+		t.Fatalf("authenticate tenant=%q error=%v", tenantID, err)
 	}
 }
 

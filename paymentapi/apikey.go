@@ -77,14 +77,14 @@ func (s *APIKeyService) Revoke(ctx context.Context, id string) error {
 
 func (s *APIKeyService) authenticate(ctx context.Context, token string) (string, error) {
 	rest, ok := strings.CutPrefix(token, "srk_")
-	if !ok {
+	const idLength = len("key_") + 24
+	if !ok || len(rest) <= idLength || rest[idLength] != '_' {
 		return "", ErrInvalidAPIKey
 	}
-	separator := strings.LastIndex(rest, "_")
-	if separator <= 0 || separator == len(rest)-1 {
+	id, secret := rest[:idLength], rest[idLength+1:]
+	if !strings.HasPrefix(id, "key_") || secret == "" {
 		return "", ErrInvalidAPIKey
 	}
-	id, secret := rest[:separator], rest[separator+1:]
 	digest := sha256.Sum256([]byte(secret))
 	var tenantID string
 	tx, err := s.db.BeginTx(ctx, nil)

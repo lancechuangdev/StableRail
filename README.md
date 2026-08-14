@@ -523,12 +523,31 @@ go test -race ./...
 go vet ./...
 ```
 
-Run the opt-in HTTP/PostgreSQL end-to-end test against a migrated disposable database:
+Run the focused HTTP/PostgreSQL integration test against a migrated disposable database:
 
 ```bash
 STABLERAIL_E2E_DATABASE_URL=postgresql://stablerail:stablerail@localhost:5432/stablerail \
-  go test -v ./paymentapi -run EndToEnd
+  go test -v ./paymentapi -run PostgresPaymentHTTPIntegration
 ```
+
+Run the provider-free local payment lifecycle suite against the Compose PostgreSQL
+and Kafka services:
+
+```bash
+./scripts/test-e2e-local.sh
+```
+
+Set `STABLERAIL_E2E_KEEP_STACK=1` to retain the isolated PostgreSQL and Kafka
+containers after the test for manual inspection.
+
+Run a single scenario by passing normal `go test` arguments to the runner:
+
+```bash
+./scripts/test-e2e-local.sh -run '^TestLOCAL001SuccessfulPaymentLifecycle$'
+```
+
+The executable scenario specification is documented in
+[`docs/testing/local-payment-lifecycle.md`](docs/testing/local-payment-lifecycle.md).
 
 ## Delivery roadmap
 

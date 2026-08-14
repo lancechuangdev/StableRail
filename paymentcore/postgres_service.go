@@ -206,15 +206,15 @@ func (s *PostgresService) GetPayment(ctx context.Context, paymentID string) (*Pa
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("%w: %s", ErrPaymentNotFound, paymentID)
 	}
+	if err != nil {
+		return nil, fmt.Errorf("get payment: %w", err)
+	}
 	var destination Destination
 	err = s.db.QueryRowContext(ctx, `SELECT kind,COALESCE(chain,''),COALESCE(address,'') FROM payment_destinations WHERE payment_id=$1`, paymentID).Scan(&destination.Type, &destination.Chain, &destination.Address)
 	if err == nil {
 		p.Destination = &destination
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("get payment destination: %w", err)
-	}
-	if err != nil {
-		return nil, fmt.Errorf("get payment: %w", err)
 	}
 	if err := s.db.QueryRowContext(ctx, `SELECT id FROM blindpay_quotes WHERE payment_id=$1`, paymentID).Scan(&p.PayoutQuoteID); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("get payment payout quote: %w", err)
