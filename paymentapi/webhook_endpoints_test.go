@@ -79,11 +79,11 @@ func TestDisableWebhookEndpointIsTenantScoped(t *testing.T) {
 
 func TestWebhookURLValidationRejectsUnsafeAddresses(t *testing.T) {
 	for _, rawURL := range []string{"http://example.com/hook", "https://localhost/hook", "https://127.0.0.1/hook", "https://10.0.0.1/hook", "https://example.com/hook#fragment"} {
-		if _, err := validateWebhookURL(rawURL); err == nil {
+		if _, err := validateWebhookURL(rawURL, false); err == nil {
 			t.Fatalf("accepted unsafe URL %q", rawURL)
 		}
 	}
-	if got, err := validateWebhookURL("https://merchant.example/webhooks"); err != nil || got == "" {
+	if got, err := validateWebhookURL("https://merchant.example/webhooks", false); err != nil || got == "" {
 		t.Fatalf("valid URL rejected: %q, %v", got, err)
 	}
 }

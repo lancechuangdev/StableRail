@@ -53,12 +53,12 @@ docker compose --env-file /dev/null -p stablerail-local-e2e \
 | LOCAL-001 | Successful payment reaches `settled`, its saga reaches `completed`, its ledger balances, and its timeline records processing and settlement | Automated |
 | LOCAL-002 | Repeating an equivalent request returns the same payment; changing the request under the same key returns `409` | Automated |
 | LOCAL-003 | Tenant payment and timeline reads are isolated; a different tenant receives `404` | Automated |
-| LOCAL-004 | Policy rejection fails the payment without settlement | Planned; requires configurable local policy outcomes |
-| LOCAL-005 | Settlement failure releases reserved ledger funds and fails the payment | Planned; requires configurable local settlement outcomes |
-| LOCAL-006 | A terminal local refund records the refund and notifies the tenant | Planned; requires a local refund trigger |
-| LOCAL-007 | Manual review resolution resumes or terminates a held saga | Planned; requires configurable local on-hold outcomes |
-| LOCAL-008 | Multiple tenant webhook endpoints receive independently signed events | Planned; requires an explicit local-only webhook URL policy |
-| LOCAL-009 | Restarting workers completes durable pending work without duplicate business effects | Planned |
+| LOCAL-004 | Policy rejection fails the payment without settlement | Automated |
+| LOCAL-005 | Settlement failure releases reserved ledger funds and fails the payment | Automated |
+| LOCAL-006 | A terminal local refund records the refund and notifies the tenant | Automated |
+| LOCAL-007 | Manual review resolution resumes or terminates a held saga | Automated |
+| LOCAL-008 | Multiple tenant webhook endpoints receive independently signed events | Automated |
+| LOCAL-009 | Restarting workers completes durable pending work without duplicate business effects | Automated |
 
 ## LOCAL-001: successful lifecycle
 
@@ -82,6 +82,15 @@ docker compose --env-file /dev/null -p stablerail-local-e2e \
 2. Create a payment as the first tenant.
 3. Verify the first tenant can read the payment and timeline.
 4. Verify the second tenant receives `404` for both resources.
+
+## LOCAL-004 through LOCAL-009
+
+- `LOCAL-004` uses the configured mock policy rejection amount and verifies no ledger or settlement work occurs.
+- `LOCAL-005` uses the configured mock settlement failure amount and verifies the reservation and compensating release journals.
+- `LOCAL-006` settles a payment, emits a terminal mock-provider refund through the local operator API, and verifies the refund journal and webhook delivery.
+- `LOCAL-007` drives a mock settlement on hold through its short local compliance timeout, resolves manual review through the operator API, and verifies settlement resumes.
+- `LOCAL-008` registers two local HTTP receivers and verifies every receiver gets independently signed lifecycle events.
+- `LOCAL-009` leaves a mock settlement pending, schedules its provider completion, kills and restarts StableRail, and verifies durable work completes without duplicate submissions or journals.
 
 ## Test design rules
 

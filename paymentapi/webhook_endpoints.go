@@ -33,9 +33,10 @@ type WebhookEndpoint struct {
 }
 
 type WebhookEndpointService struct {
-	db     *sql.DB
-	now    func() time.Time
-	random func([]byte) (int, error)
+	db               *sql.DB
+	now              func() time.Time
+	random           func([]byte) (int, error)
+	allowPrivateURLs bool
 }
 
 func NewWebhookEndpointService(db *sql.DB) (*WebhookEndpointService, error) {
@@ -45,11 +46,13 @@ func NewWebhookEndpointService(db *sql.DB) (*WebhookEndpointService, error) {
 	return &WebhookEndpointService{db: db, now: func() time.Time { return time.Now().UTC() }, random: rand.Read}, nil
 }
 
+func (s *WebhookEndpointService) AllowPrivateURLs() { s.allowPrivateURLs = true }
+
 func (s *WebhookEndpointService) Register(ctx context.Context, tenantID, rawURL string) (*WebhookEndpoint, string, error) {
 	if strings.TrimSpace(tenantID) == "" {
 		return nil, "", errors.New("tenant ID is required")
 	}
-	endpointURL, err := validateWebhookURL(rawURL)
+	endpointURL, err := validateWebhookURL(rawURL, s.allowPrivateURLs)
 	if err != nil {
 		return nil, "", err
 	}
@@ -197,10 +200,14 @@ func NewWebhookEndpointHandler(service *WebhookEndpointService) (http.Handler, e
 
 var errInvalidWebhookURL = errors.New("webhook URL must be an HTTPS public address")
 
-func validateWebhookURL(raw string) (string, error) {
+func validateWebhookURL(raw string, allowPrivate bool) (string, error) {
 	parsed, err := url.Parse(strings.TrimSpace(raw))
-	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.Fragment != "" {
+	validScheme := parsed != nil && (parsed.Scheme == "https" || (allowPrivate && parsed.Scheme == "http"))
+	if err != nil || !validScheme || parsed.Host == "" || parsed.User != nil || parsed.Fragment != "" {
 		return "", errInvalidWebhookURL
+	}
+	if allowPrivate {
+		return parsed.String(), nil
 	}
 	host := strings.TrimSuffix(strings.ToLower(parsed.Hostname()), ".")
 	if host == "localhost" || strings.HasSuffix(host, ".localhost") || strings.HasSuffix(host, ".local") {

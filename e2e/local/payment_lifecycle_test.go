@@ -3,13 +3,21 @@
 package local_test
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"net/http/httptest"
+	"os"
+	"os/exec"
+	"strconv"
+	"syscall"
 	"testing"
 	"time"
 
 	"stablerail/e2e/internal/testenv"
+	"stablerail/notification"
 )
 
 func TestLOCAL001SuccessfulPaymentLifecycle(t *testing.T) {
@@ -44,7 +52,7 @@ func TestLOCAL001SuccessfulPaymentLifecycle(t *testing.T) {
 		WHERE t.payment_id = $1
 		GROUP BY t.event_type
 	`, payment.ID)
-	
+
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,4 +141,168 @@ func TestLOCAL003TenantIsolation(t *testing.T) {
 			t.Fatalf("cross-tenant GET %s status=%d body=%s", path, response.StatusCode, body)
 		}
 	}
+}
+
+func TestLOCAL004PolicyRejection(t *testing.T) {
+	env, tenant := testenv.Open(t), (*testenv.Tenant)(nil)
+	tenant = env.NewTenant(t)
+	payment, status := tenant.CreatePayment(t, "local-004-"+fmt.Sprint(time.Now().UnixNano()), "order-local-004", 4004)
+	if status != http.StatusCreated {
+		t.Fatalf("create status=%d", status)
+	}
+	tenant.WaitForPaymentState(t, payment.ID, "failed")
+	env.WaitForSagaState(t, payment.ID, "failed")
+	env.WaitForCount(t, `SELECT count(*) FROM settlement_submissions WHERE payment_id=$1`, 0, payment.ID)
+	env.WaitForCount(t, `SELECT count(*) FROM ledger_transactions WHERE payment_id=$1`, 0, payment.ID)
+}
+
+func TestLOCAL005SettlementFailureReleasesFunds(t *testing.T) {
+	env := testenv.Open(t)
+	tenant := env.NewTenant(t)
+	payment, status := tenant.CreatePayment(t, "local-005-"+fmt.Sprint(time.Now().UnixNano()), "order-local-005", 5005)
+	if status != http.StatusCreated {
+		t.Fatalf("create status=%d", status)
+	}
+	tenant.WaitForPaymentState(t, payment.ID, "failed")
+	env.WaitForSagaState(t, payment.ID, "ledger_released")
+	for _, eventType := range []string{"payment.processing", "payment.released"} {
+		env.WaitForCount(t, `SELECT count(*) FROM ledger_transactions WHERE payment_id=$1 AND event_type=$2`, 1, payment.ID, eventType)
+	}
+}
+
+func TestLOCAL006TerminalRefund(t *testing.T) {
+	env := testenv.Open(t)
+	tenant := env.NewTenant(t)
+	receiver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }))
+	defer receiver.Close()
+	if response, body := tenant.Post(t, "/v1/webhook-endpoints", map[string]string{"url": receiver.URL}); response.StatusCode != http.StatusCreated {
+		t.Fatalf("register webhook status=%d body=%s", response.StatusCode, body)
+	}
+	payment, status := tenant.CreatePayment(t, "local-006-"+fmt.Sprint(time.Now().UnixNano()), "order-local-006", 6006)
+	if status != http.StatusCreated {
+		t.Fatalf("create status=%d", status)
+	}
+	tenant.WaitForPaymentState(t, payment.ID, "settled")
+	env.WaitForSagaState(t, payment.ID, "completed")
+	response, body := env.OperatorPost(t, "/v1/operator/mock-settlements/"+payment.ID, map[string]string{"status": "refunded", "reason": "local terminal refund"})
+	if response.StatusCode != http.StatusAccepted {
+		t.Fatalf("refund trigger status=%d body=%s", response.StatusCode, body)
+	}
+	tenant.WaitForPaymentState(t, payment.ID, "refunded")
+	env.WaitForSagaState(t, payment.ID, "refunded")
+	env.WaitForCount(t, `SELECT count(*) FROM ledger_transactions WHERE payment_id=$1 AND event_type='payment.refund_recorded'`, 1, payment.ID)
+	env.WaitForCount(t, `SELECT count(*) FROM webhook_deliveries WHERE payment_id=$1 AND event_type='payment.refunded' AND status='delivered'`, 1, payment.ID)
+}
+
+func TestLOCAL007ManualReviewResolution(t *testing.T) {
+	env := testenv.Open(t)
+	tenant := env.NewTenant(t)
+	payment, status := tenant.CreatePayment(t, "local-007-"+fmt.Sprint(time.Now().UnixNano()), "order-local-007", 7007)
+	if status != http.StatusCreated {
+		t.Fatalf("create status=%d", status)
+	}
+	env.WaitForSagaState(t, payment.ID, "manual_review")
+	response, body := env.OperatorPost(t, "/v1/operator/payments/"+payment.ID+"/manual-review", map[string]string{"action": "complete", "operator": "local-e2e", "note": "review passed"})
+	if response.StatusCode != http.StatusAccepted {
+		t.Fatalf("manual review status=%d body=%s", response.StatusCode, body)
+	}
+	tenant.WaitForPaymentState(t, payment.ID, "settled")
+	env.WaitForSagaState(t, payment.ID, "completed")
+	env.WaitForCount(t, `SELECT count(*) FROM saga_manual_review_actions a JOIN payment_sagas s ON s.id=a.saga_id WHERE s.payment_id=$1`, 1, payment.ID)
+}
+
+func TestLOCAL008IndependentSignedWebhooks(t *testing.T) {
+	env := testenv.Open(t)
+	tenant := env.NewTenant(t)
+	type received struct {
+		endpoint             int
+		timestamp, signature string
+		body                 []byte
+	}
+	deliveries := make(chan received, 20)
+	servers := make([]*httptest.Server, 2)
+	secrets := make([]string, 2)
+	for i := range servers {
+		i := i
+		servers[i] = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			body, _ := io.ReadAll(r.Body)
+			deliveries <- received{i, r.Header.Get("X-StableRail-Timestamp"), r.Header.Get("X-StableRail-Signature"), body}
+			w.WriteHeader(http.StatusNoContent)
+		}))
+		defer servers[i].Close()
+		response, body := tenant.Post(t, "/v1/webhook-endpoints", map[string]string{"url": servers[i].URL})
+		if response.StatusCode != http.StatusCreated {
+			t.Fatalf("register endpoint %d status=%d body=%s", i, response.StatusCode, body)
+		}
+		var created struct {
+			Secret string `json:"signing_secret"`
+		}
+		if err := json.Unmarshal(body, &created); err != nil {
+			t.Fatal(err)
+		}
+		secrets[i] = created.Secret
+	}
+	payment, status := tenant.CreatePayment(t, "local-008-"+fmt.Sprint(time.Now().UnixNano()), "order-local-008", 8008)
+	if status != http.StatusCreated {
+		t.Fatalf("create status=%d", status)
+	}
+	tenant.WaitForPaymentState(t, payment.ID, "settled")
+	seen := [2]int{}
+	deadline := time.After(60 * time.Second)
+	for seen[0] < 3 || seen[1] < 3 {
+		select {
+		case delivery := <-deliveries:
+			if delivery.signature != notification.Signature(secrets[delivery.endpoint], delivery.timestamp, delivery.body) {
+				t.Fatalf("endpoint %d signature is invalid", delivery.endpoint)
+			}
+			if !bytes.Contains(delivery.body, []byte(payment.ID)) {
+				t.Fatalf("webhook does not identify payment: %s", delivery.body)
+			}
+			seen[delivery.endpoint]++
+		case <-deadline:
+			t.Fatalf("webhook counts=%v, want at least three each", seen)
+		}
+	}
+}
+
+func TestLOCAL009RestartCompletesDurableWorkOnce(t *testing.T) {
+	env := testenv.Open(t)
+	tenant := env.NewTenant(t)
+	binary, rawPID := os.Getenv("STABLERAIL_E2E_SERVER_BINARY"), os.Getenv("STABLERAIL_E2E_SERVER_PID")
+	if binary == "" || rawPID == "" {
+		t.Skip("runner-managed server is required")
+	}
+	payment, status := tenant.CreatePayment(t, "local-009-"+fmt.Sprint(time.Now().UnixNano()), "order-local-009", 9009)
+	if status != http.StatusCreated {
+		t.Fatalf("create status=%d", status)
+	}
+	env.WaitForSagaState(t, payment.ID, "awaiting_settlement")
+	response, body := env.OperatorPost(t, "/v1/operator/mock-settlements/"+payment.ID, map[string]any{"status": "completed", "delay_milliseconds": 2000})
+	if response.StatusCode != http.StatusAccepted {
+		t.Fatalf("completion trigger status=%d body=%s", response.StatusCode, body)
+	}
+	pid, err := strconv.Atoi(rawPID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Kill(pid, syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(300 * time.Millisecond)
+	command := exec.Command(binary)
+	command.Env = os.Environ()
+	command.Stdout, command.Stderr = io.Discard, io.Discard
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	if pidFile := os.Getenv("STABLERAIL_E2E_SERVER_PID_FILE"); pidFile != "" {
+		if err := os.WriteFile(pidFile, []byte(strconv.Itoa(command.Process.Pid)), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	env.WaitReady(t)
+	tenant.WaitForPaymentState(t, payment.ID, "settled")
+	env.WaitForSagaState(t, payment.ID, "completed")
+	env.WaitForCount(t, `SELECT count(*) FROM settlement_submissions WHERE payment_id=$1`, 1, payment.ID)
+	env.WaitForCount(t, `SELECT count(*) FROM ledger_transactions WHERE payment_id=$1 AND event_type='payment.settled'`, 1, payment.ID)
 }

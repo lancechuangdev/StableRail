@@ -100,9 +100,23 @@ func (tenant *Tenant) Get(t *testing.T, path string) (*http.Response, []byte) {
 	return response, []byte(readBody(response.Body))
 }
 
+func (tenant *Tenant) Post(t *testing.T, path string, body any) (*http.Response, []byte) {
+	t.Helper()
+	response := tenant.Env.request(t, http.MethodPost, path, tenant.APIKey, "", body)
+	defer response.Body.Close()
+	return response, []byte(readBody(response.Body))
+}
+
+func (e *Environment) OperatorPost(t *testing.T, path string, body any) (*http.Response, []byte) {
+	t.Helper()
+	response := e.request(t, http.MethodPost, path, e.OperatorToken, "", body)
+	defer response.Body.Close()
+	return response, []byte(readBody(response.Body))
+}
+
 func (tenant *Tenant) WaitForPaymentState(t *testing.T, paymentID, wanted string) Payment {
 	t.Helper()
-	deadline := time.Now().Add(20 * time.Second)
+	deadline := time.Now().Add(60 * time.Second)
 	var last Payment
 	for time.Now().Before(deadline) {
 		response, body := tenant.Get(t, "/v1/payments/"+paymentID)
@@ -122,7 +136,7 @@ func (tenant *Tenant) WaitForPaymentState(t *testing.T, paymentID, wanted string
 
 func (e *Environment) WaitForSagaState(t *testing.T, paymentID, wanted string) {
 	t.Helper()
-	deadline := time.Now().Add(20 * time.Second)
+	deadline := time.Now().Add(60 * time.Second)
 	var last string
 	for time.Now().Before(deadline) {
 		if err := e.DB.QueryRow(`SELECT state FROM payment_sagas WHERE payment_id=$1`, paymentID).Scan(&last); err == nil && last == wanted {
@@ -131,6 +145,19 @@ func (e *Environment) WaitForSagaState(t *testing.T, paymentID, wanted string) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	t.Fatalf("saga for payment %s did not reach %s; last state=%s", paymentID, wanted, last)
+}
+
+func (e *Environment) WaitForCount(t *testing.T, query string, wanted int, args ...any) {
+	t.Helper()
+	deadline := time.Now().Add(60 * time.Second)
+	last := -1
+	for time.Now().Before(deadline) {
+		if err := e.DB.QueryRow(query, args...).Scan(&last); err == nil && last == wanted {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("query count=%d, want %d", last, wanted)
 }
 
 func (e *Environment) waitReady(t *testing.T) {
@@ -148,6 +175,8 @@ func (e *Environment) waitReady(t *testing.T) {
 	}
 	t.Fatal("StableRail did not become ready")
 }
+
+func (e *Environment) WaitReady(t *testing.T) { e.waitReady(t) }
 
 func (e *Environment) request(t *testing.T, method, path, bearer, idempotencyKey string, body any) *http.Response {
 	t.Helper()

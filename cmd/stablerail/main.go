@@ -62,7 +62,7 @@ func run() error {
 		return err
 	}
 
-	coordinator, err := saga.NewCoordinator(db, saga.Config{})
+	coordinator, err := saga.NewCoordinator(db, saga.Config{ComplianceTimeout: config.SagaComplianceTimeout})
 	if err != nil {
 		return err
 	}
@@ -93,7 +93,18 @@ func run() error {
 	}
 
 	var payoutQuotes paymentapi.BlindPayPayoutQuoteService
-	var settlementProvider settlement.SettlementProvider = settlement.NewMockProvider(settlement.SettlementResult{})
+	mockProvider := settlement.NewMockProvider(settlement.SettlementResult{})
+	mockProvider.ResultsByAmount = map[int64]settlement.SettlementResult{}
+	if config.MockSettlementFailAmount > 0 {
+		mockProvider.ResultsByAmount[config.MockSettlementFailAmount] = settlement.SettlementResult{Status: settlement.StatusFailed, FailureCode: "local_failure", FailureMessage: "local settlement failed"}
+	}
+	if config.MockSettlementHoldAmount > 0 {
+		mockProvider.ResultsByAmount[config.MockSettlementHoldAmount] = settlement.SettlementResult{Status: settlement.StatusOnHold}
+	}
+	if config.MockSettlementPendingAmount > 0 {
+		mockProvider.ResultsByAmount[config.MockSettlementPendingAmount] = settlement.SettlementResult{Status: settlement.StatusPending}
+	}
+	var settlementProvider settlement.SettlementProvider = mockProvider
 	var blindPayWebhookHandler http.Handler
 	webhookReconciler := func(ctx context.Context) error {
 		<-ctx.Done()
@@ -149,7 +160,7 @@ func run() error {
 	}
 	commandLoop := &consumer.Loop{
 		Reader:    consumer.NewKafkaReader(config.KafkaBrokers, string(saga.CommandTopic), "stablerail-core-workers"),
-		Processor: inbox.BoundProcessor{Processor: inboxProcessor, Handler: workers.NewCommandHandler(policy.DeterministicEvaluator{}, ledger.NewPostgresService(), settlementProvider).Handle},
+		Processor: inbox.BoundProcessor{Processor: inboxProcessor, Handler: workers.NewCommandHandler(policy.DeterministicEvaluator{RejectAmountMinor: config.MockPolicyRejectAmount}, ledger.NewPostgresService(), settlementProvider).Handle},
 		Consumer:  "core-workers",
 	}
 
@@ -165,6 +176,9 @@ func run() error {
 	webhookEndpoints, err := paymentapi.NewWebhookEndpointService(db)
 	if err != nil {
 		return err
+	}
+	if config.AllowPrivateWebhookURLs {
+		webhookEndpoints.AllowPrivateURLs()
 	}
 	webhookEndpointHandler, err := paymentapi.NewWebhookEndpointHandler(webhookEndpoints)
 	if err != nil {
@@ -190,6 +204,17 @@ func run() error {
 			return err
 		}
 		root.Handle("DELETE /v1/operator/api-keys/{id}", apiKeyRevokeHandler)
+		if config.SettlementProvider == "mock" {
+			control, err := paymentapi.NewLocalSettlementControl(db)
+			if err != nil {
+				return err
+			}
+			controlHandler, err := paymentapi.NewLocalSettlementHandler(config.OperatorToken, control)
+			if err != nil {
+				return err
+			}
+			root.Handle("POST /v1/operator/mock-settlements/{id}", controlHandler)
+		}
 	}
 	if blindPayWebhookHandler != nil {
 		root.Handle("POST /v1/providers/blindpay/webhooks", blindPayWebhookHandler)

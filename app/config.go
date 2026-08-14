@@ -3,6 +3,7 @@ package app
 import (
 	"errors"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -12,6 +13,10 @@ type Config struct {
 	BlindPay                                                    BlindPayConfig
 	KafkaBrokers                                                []string
 	ShutdownTimeout, SagaPollInterval, ReconciliationInterval   time.Duration
+	SagaComplianceTimeout                                       time.Duration
+	MockPolicyRejectAmount, MockSettlementFailAmount            int64
+	MockSettlementHoldAmount, MockSettlementPendingAmount       int64
+	AllowPrivateWebhookURLs                                     bool
 }
 
 type BlindPayConfig struct {
@@ -53,7 +58,23 @@ func ConfigFromEnv() (Config, error) {
 		ShutdownTimeout:        10 * time.Second,
 		SagaPollInterval:       time.Second,
 		ReconciliationInterval: time.Minute,
+		SagaComplianceTimeout:  24 * time.Hour,
 	}
+	for name, target := range map[string]*int64{
+		"STABLERAIL_MOCK_POLICY_REJECT_AMOUNT":      &c.MockPolicyRejectAmount,
+		"STABLERAIL_MOCK_SETTLEMENT_FAIL_AMOUNT":    &c.MockSettlementFailAmount,
+		"STABLERAIL_MOCK_SETTLEMENT_HOLD_AMOUNT":    &c.MockSettlementHoldAmount,
+		"STABLERAIL_MOCK_SETTLEMENT_PENDING_AMOUNT": &c.MockSettlementPendingAmount,
+	} {
+		if raw := os.Getenv(name); raw != "" {
+			value, err := strconv.ParseInt(raw, 10, 64)
+			if err != nil || value <= 0 {
+				return Config{}, errors.New("invalid " + name)
+			}
+			*target = value
+		}
+	}
+	c.AllowPrivateWebhookURLs = os.Getenv("STABLERAIL_ALLOW_PRIVATE_WEBHOOK_URLS") == "1"
 	if c.DatabaseURL == "" {
 		return Config{}, errors.New("STABLERAIL_DATABASE_URL is required")
 	}
@@ -85,6 +106,13 @@ func ConfigFromEnv() (Config, error) {
 			return Config{}, errors.New("invalid STABLERAIL_RECONCILIATION_INTERVAL")
 		}
 		c.ReconciliationInterval = d
+	}
+	if raw := os.Getenv("STABLERAIL_SAGA_COMPLIANCE_TIMEOUT"); raw != "" {
+		d, err := time.ParseDuration(raw)
+		if err != nil || d <= 0 {
+			return Config{}, errors.New("invalid STABLERAIL_SAGA_COMPLIANCE_TIMEOUT")
+		}
+		c.SagaComplianceTimeout = d
 	}
 	for i := range c.KafkaBrokers {
 		c.KafkaBrokers[i] = strings.TrimSpace(c.KafkaBrokers[i])

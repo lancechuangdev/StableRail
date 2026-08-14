@@ -73,9 +73,10 @@ type SettlementProvider interface {
 // MockProvider is deterministic and idempotent. It is safe for concurrent use.
 // By default every new request succeeds; Result can be set to exercise other outcomes.
 type MockProvider struct {
-	mu     sync.Mutex
-	Result SettlementResult
-	seen   map[string]SettlementResult
+	mu              sync.Mutex
+	Result          SettlementResult
+	ResultsByAmount map[int64]SettlementResult
+	seen            map[string]SettlementResult
 }
 
 func NewMockProvider(result SettlementResult) *MockProvider {
@@ -97,6 +98,9 @@ func (p *MockProvider) Submit(_ context.Context, request SettlementRequest) (Set
 		return result, nil
 	}
 	result := p.Result
+	if configured, ok := p.ResultsByAmount[request.AmountMinor]; ok {
+		result = configured
+	}
 	if result.ProviderReference == "" {
 		result.ProviderReference = "mock_" + request.IdempotencyKey
 	}
