@@ -30,7 +30,7 @@ tenant notification code paths.
 | BLINDPAY-003 | Tenant isolation for BlindPay-backed payments |
 | BLINDPAY-004 | Policy rejection before BlindPay submission |
 | BLINDPAY-005 | Failed payout webhook and compensating ledger release |
-| BLINDPAY-006 | BlindPay `refunded` outcome mapped to a terminal StableRail return before success |
+| BLINDPAY-006 | BlindPay `refunded` mapped to `payment_status=failed` and `funds_status=returned` |
 | BLINDPAY-007 | On-hold payout entering and leaving manual review |
 | BLINDPAY-008 | Independent signed tenant lifecycle webhooks |
 | BLINDPAY-009 | Restart recovery of an early durable BlindPay completion webhook |

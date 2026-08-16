@@ -80,7 +80,7 @@ func (s *PostgresService) createPayment(
 	now := s.now()
 	payment := &Payment{
 		ID: paymentID, ExternalReference: externalRef, Currency: currency,
-		AmountMinor: amountMinor, TenantID: tenantID, State: StateCreated,
+		AmountMinor: amountMinor, TenantID: tenantID, PaymentStatus: PaymentStatusCreated, FundsStatus: FundsStatusAvailable,
 		IdempotencyKey: idempotencyKey, PayoutQuoteID: payoutQuoteID, CreatedAt: now, UpdatedAt: now,
 		Destination: destination,
 	}
@@ -128,12 +128,12 @@ func (s *PostgresService) createPayment(
 
 	result, err := tx.ExecContext(ctx, `
 		INSERT INTO payments
-			(id, external_reference, currency, amount_minor, tenant_id, state,
+			(id, external_reference, currency, amount_minor, tenant_id, payment_status, funds_status,
 			 idempotency_key, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9)
 		ON CONFLICT (idempotency_key) DO NOTHING`,
 		payment.ID, payment.ExternalReference, payment.Currency, payment.AmountMinor,
-		payment.TenantID, payment.State, payment.IdempotencyKey, now,
+		payment.TenantID, payment.PaymentStatus, payment.FundsStatus, payment.IdempotencyKey, now,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert payment: %w", err)
@@ -169,18 +169,20 @@ func (s *PostgresService) createPayment(
 			return nil, errors.New("payout quote already accepted")
 		}
 	}
-	if err := insertHistory(ctx, tx, payment.ID, "created", "payment intent created", StateCreated, "payment created", now); err != nil {
+	if err := insertHistory(ctx, tx, payment.ID, "created", "payment intent created", PaymentStatusCreated, "payment created", now); err != nil {
 		return nil, err
 	}
 	payment.AuditLog = []AuditEvent{{Event: "created", Message: "payment intent created", At: now}}
-	payment.Timeline = []TimelineEntry{{State: StateCreated, At: now, Note: "payment created"}}
+	payment.Timeline = []TimelineEntry{{PaymentStatus: PaymentStatusCreated, At: now, Note: "payment created"}}
 
 	payload, err := json.Marshal(struct {
 		ExternalReference string `json:"external_reference"`
 		Currency          string `json:"currency"`
 		AmountMinor       int64  `json:"amount_minor"`
 		TenantID          string `json:"tenant_id"`
-	}{externalRef, currency, amountMinor, tenantID})
+		PaymentStatus     string `json:"payment_status"`
+		FundsStatus       string `json:"funds_status"`
+	}{externalRef, currency, amountMinor, tenantID, string(PaymentStatusCreated), string(FundsStatusAvailable)})
 	if err != nil {
 		return nil, fmt.Errorf("marshal payment created payload: %w", err)
 	}
@@ -195,20 +197,20 @@ func (s *PostgresService) createPayment(
 }
 
 func (s *PostgresService) Process(ctx context.Context, paymentID string) error {
-	return s.transition(ctx, paymentID, StateCreated, StateProcessing, "processing", "payment processing started", "payment processing")
+	return s.transition(ctx, paymentID, PaymentStatusCreated, PaymentStatusProcessing, "processing", "payment processing started", "payment processing")
 }
 
 func (s *PostgresService) Settle(ctx context.Context, paymentID string) error {
-	return s.transition(ctx, paymentID, StateProcessing, StateSucceeded, "succeeded", "payment succeeded", "payment succeeded")
+	return s.transition(ctx, paymentID, PaymentStatusProcessing, PaymentStatusSucceeded, "succeeded", "payment succeeded", "payment succeeded")
 }
 
 // GetPayment returns the durable payment and its history.
 func (s *PostgresService) GetPayment(ctx context.Context, paymentID string) (*Payment, error) {
 	p := &Payment{}
 	err := s.db.QueryRowContext(ctx, `SELECT id, external_reference, currency, amount_minor,
-		tenant_id, state, idempotency_key, created_at, updated_at FROM payments WHERE id = $1`, paymentID).
+		tenant_id, payment_status, funds_status, idempotency_key, created_at, updated_at FROM payments WHERE id = $1`, paymentID).
 		Scan(&p.ID, &p.ExternalReference, &p.Currency, &p.AmountMinor, &p.TenantID,
-			&p.State, &p.IdempotencyKey, &p.CreatedAt, &p.UpdatedAt)
+			&p.PaymentStatus, &p.FundsStatus, &p.IdempotencyKey, &p.CreatedAt, &p.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("%w: %s", ErrPaymentNotFound, paymentID)
 	}
@@ -225,7 +227,7 @@ func (s *PostgresService) GetPayment(ctx context.Context, paymentID string) (*Pa
 	if err := s.db.QueryRowContext(ctx, `SELECT id FROM blindpay_quotes WHERE payment_id=$1`, paymentID).Scan(&p.PayoutQuoteID); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("get payment payout quote: %w", err)
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT state, occurred_at, note FROM payment_timeline_entries
+	rows, err := s.db.QueryContext(ctx, `SELECT payment_status, occurred_at, note FROM payment_timeline_entries
 		WHERE payment_id = $1 ORDER BY occurred_at, id`, paymentID)
 	if err != nil {
 		return nil, fmt.Errorf("get payment timeline: %w", err)
@@ -233,7 +235,7 @@ func (s *PostgresService) GetPayment(ctx context.Context, paymentID string) (*Pa
 	defer rows.Close()
 	for rows.Next() {
 		var entry TimelineEntry
-		if err := rows.Scan(&entry.State, &entry.At, &entry.Note); err != nil {
+		if err := rows.Scan(&entry.PaymentStatus, &entry.At, &entry.Note); err != nil {
 			return nil, fmt.Errorf("scan payment timeline: %w", err)
 		}
 		p.Timeline = append(p.Timeline, entry)
@@ -255,7 +257,7 @@ func (s *PostgresService) Timeline(ctx context.Context, paymentID string) ([]Tim
 func (s *PostgresService) transition(
 	ctx context.Context,
 	paymentID string,
-	from, to PaymentState,
+	from, to PaymentStatus,
 	auditEvent, auditMessage, timelineNote string,
 ) error {
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -264,11 +266,11 @@ func (s *PostgresService) transition(
 	}
 	defer tx.Rollback()
 
-	var current PaymentState
+	var current PaymentStatus
 	var amountMinor int64
 	var currency string
 	if err := tx.QueryRowContext(ctx,
-		`SELECT state, amount_minor, currency FROM payments WHERE id = $1 FOR UPDATE`, paymentID,
+		`SELECT payment_status, amount_minor, currency FROM payments WHERE id = $1 FOR UPDATE`, paymentID,
 	).Scan(&current, &amountMinor, &currency); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return fmt.Errorf("payment %s not found", paymentID)
@@ -281,8 +283,8 @@ func (s *PostgresService) transition(
 
 	now := s.now()
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE payments SET state = $1, updated_at = $2 WHERE id = $3`,
-		to, now, paymentID,
+		`UPDATE payments SET payment_status = $1, funds_status = $2, updated_at = $3 WHERE id = $4`,
+		to, fundsStatusForPaymentStatus(to), now, paymentID,
 	); err != nil {
 		return fmt.Errorf("update payment: %w", err)
 	}
@@ -297,8 +299,9 @@ func (s *PostgresService) transition(
 		return err
 	}
 	payload, err := json.Marshal(struct {
-		State PaymentState `json:"state"`
-	}{to})
+		PaymentStatus PaymentStatus `json:"payment_status"`
+		FundsStatus   FundsStatus   `json:"funds_status"`
+	}{to, fundsStatusForPaymentStatus(to)})
 	if err != nil {
 		return fmt.Errorf("marshal payment transition payload: %w", err)
 	}
@@ -311,14 +314,29 @@ func (s *PostgresService) transition(
 	return nil
 }
 
-func transitionAccounts(state PaymentState) (string, string, error) {
+func transitionAccounts(state PaymentStatus) (string, string, error) {
 	switch state {
-	case StateProcessing:
+	case PaymentStatusProcessing:
 		return CashOperatingAccount, SettlementAccount, nil
-	case StateSucceeded:
+	case PaymentStatusSucceeded:
 		return SettlementAccount, CashOperatingAccount, nil
 	default:
 		return "", "", fmt.Errorf("no ledger posting defined for state %s", state)
+	}
+}
+
+func fundsStatusForPaymentStatus(status PaymentStatus) FundsStatus {
+	switch status {
+	case PaymentStatusCreated:
+		return FundsStatusAvailable
+	case PaymentStatusProcessing:
+		return FundsStatusReserved
+	case PaymentStatusSucceeded:
+		return FundsStatusConsumed
+	case PaymentStatusFailed:
+		return FundsStatusAvailable
+	default:
+		panic("unknown payment status: " + status)
 	}
 }
 
@@ -390,7 +408,7 @@ func paymentEventVersion(eventType string) int {
 
 func insertHistory(
 	ctx context.Context, tx *sql.Tx, paymentID, event, message string,
-	state PaymentState, note string, now time.Time,
+	state PaymentStatus, note string, now time.Time,
 ) error {
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO payment_audit_events (payment_id, event, message, occurred_at) VALUES ($1, $2, $3, $4)`,
@@ -399,7 +417,7 @@ func insertHistory(
 		return fmt.Errorf("insert audit event: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO payment_timeline_entries (payment_id, state, note, occurred_at) VALUES ($1, $2, $3, $4)`,
+		`INSERT INTO payment_timeline_entries (payment_id, payment_status, note, occurred_at) VALUES ($1, $2, $3, $4)`,
 		paymentID, state, note, now,
 	); err != nil {
 		return fmt.Errorf("insert timeline entry: %w", err)
@@ -410,12 +428,12 @@ func insertHistory(
 func getPaymentByIdempotencyKey(ctx context.Context, tx *sql.Tx, key string) (*Payment, error) {
 	payment := &Payment{}
 	err := tx.QueryRowContext(ctx, `
-		SELECT id, external_reference, currency, amount_minor, tenant_id, state,
+		SELECT id, external_reference, currency, amount_minor, tenant_id, payment_status, funds_status,
 		       idempotency_key, created_at, updated_at
 		FROM payments WHERE idempotency_key = $1`, key,
 	).Scan(
 		&payment.ID, &payment.ExternalReference, &payment.Currency, &payment.AmountMinor,
-		&payment.TenantID, &payment.State, &payment.IdempotencyKey,
+		&payment.TenantID, &payment.PaymentStatus, &payment.FundsStatus, &payment.IdempotencyKey,
 		&payment.CreatedAt, &payment.UpdatedAt,
 	)
 	if err != nil {

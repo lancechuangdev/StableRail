@@ -12,15 +12,25 @@ var (
 	ErrIdempotencyConflict = errors.New("idempotency key is bound to a different request")
 )
 
-// PaymentState represents the lifecycle state of a payment.
-type PaymentState string
+// PaymentStatus represents the delivery lifecycle of a payment.
+type PaymentStatus string
 
 const (
-	StateCreated    PaymentState = "created"
-	StateProcessing PaymentState = "processing"
-	StateSucceeded  PaymentState = "succeeded"
-	StateFailed     PaymentState = "failed"
-	StateReturned   PaymentState = "returned"
+	PaymentStatusCreated    PaymentStatus = "created"
+	PaymentStatusProcessing PaymentStatus = "processing"
+	PaymentStatusSucceeded  PaymentStatus = "succeeded"
+	PaymentStatusFailed     PaymentStatus = "failed"
+)
+
+// FundsStatus represents the disposition of funds for a payment.
+type FundsStatus string
+
+const (
+	FundsStatusAvailable FundsStatus = "available"
+	FundsStatusReserved  FundsStatus = "reserved"
+	FundsStatusConsumed  FundsStatus = "consumed"
+	FundsStatusReturned  FundsStatus = "returned"
+	FundsStatusUnknown   FundsStatus = "unknown"
 )
 
 // Payment represents a payment intent and its ledger state.
@@ -30,7 +40,8 @@ type Payment struct {
 	Currency          string          `json:"currency"`
 	AmountMinor       int64           `json:"amount_minor"` // The payment amount expressed in the currency’s smallest unit
 	TenantID          string          `json:"tenant_id"`
-	State             PaymentState    `json:"state"`
+	PaymentStatus     PaymentStatus   `json:"payment_status"`
+	FundsStatus       FundsStatus     `json:"funds_status"`
 	LedgerEntries     []LedgerEntry   `json:"ledger_entries,omitempty"`
 	AuditLog          []AuditEvent    `json:"audit_log,omitempty"`
 	Timeline          []TimelineEntry `json:"timeline,omitempty"`
@@ -100,9 +111,9 @@ type AuditEvent struct {
 
 // TimelineEntry is a public-facing entry for the timeline API.
 type TimelineEntry struct {
-	State PaymentState `json:"state"`
-	At    time.Time    `json:"at"`
-	Note  string       `json:"note"`
+	PaymentStatus PaymentStatus `json:"payment_status"`
+	At            time.Time     `json:"at"`
+	Note          string        `json:"note"`
 }
 
 // Service provides payment lifecycle operations.
@@ -142,14 +153,15 @@ func (s *Service) CreatePayment(externalRef, currency string, amountMinor int64,
 		Currency:          currency,
 		AmountMinor:       amountMinor,
 		TenantID:          tenantID,
-		State:             StateCreated,
+		PaymentStatus:     PaymentStatusCreated,
+		FundsStatus:       FundsStatusAvailable,
 		CreatedAt:         now,
 		UpdatedAt:         now,
 		IdempotencyKey:    idempotencyKey,
 	}
 
 	payment.AuditLog = []AuditEvent{{Event: "created", Message: "payment intent created", At: now}}
-	payment.Timeline = []TimelineEntry{{State: StateCreated, At: now, Note: "payment created"}}
+	payment.Timeline = []TimelineEntry{{PaymentStatus: PaymentStatusCreated, At: now, Note: "payment created"}}
 
 	s.payments[payment.ID] = payment
 	s.byIdempotency[idempotencyKey] = payment.ID
@@ -164,19 +176,20 @@ func (s *Service) Process(paymentID string) error {
 	if !ok {
 		return fmt.Errorf("payment %s not found", paymentID)
 	}
-	if payment.State != StateCreated {
-		return fmt.Errorf("payment %s cannot transition from %s", paymentID, payment.State)
+	if payment.PaymentStatus != PaymentStatusCreated {
+		return fmt.Errorf("payment %s cannot transition from %s", paymentID, payment.PaymentStatus)
 	}
 
 	now := time.Now().UTC()
-	payment.State = StateProcessing
+	payment.PaymentStatus = PaymentStatusProcessing
+	payment.FundsStatus = FundsStatusReserved
 	payment.UpdatedAt = now
 	payment.LedgerEntries = append(payment.LedgerEntries,
 		newLedgerLine(payment, "processing", CashOperatingAccount, EntryDebit, now),
 		newLedgerLine(payment, "processing", SettlementAccount, EntryCredit, now),
 	)
 	payment.AuditLog = append(payment.AuditLog, AuditEvent{Event: "processing", Message: "payment processing started", At: now})
-	payment.Timeline = append(payment.Timeline, TimelineEntry{State: StateProcessing, At: now, Note: "payment processing"})
+	payment.Timeline = append(payment.Timeline, TimelineEntry{PaymentStatus: PaymentStatusProcessing, At: now, Note: "payment processing"})
 	return nil
 }
 
@@ -188,19 +201,20 @@ func (s *Service) Settle(paymentID string) error {
 	if !ok {
 		return fmt.Errorf("payment %s not found", paymentID)
 	}
-	if payment.State != StateProcessing {
-		return fmt.Errorf("payment %s cannot settle from %s", paymentID, payment.State)
+	if payment.PaymentStatus != PaymentStatusProcessing {
+		return fmt.Errorf("payment %s cannot settle from %s", paymentID, payment.PaymentStatus)
 	}
 
 	now := time.Now().UTC()
-	payment.State = StateSucceeded
+	payment.PaymentStatus = PaymentStatusSucceeded
+	payment.FundsStatus = FundsStatusConsumed
 	payment.UpdatedAt = now
 	payment.LedgerEntries = append(payment.LedgerEntries,
 		newLedgerLine(payment, "succeeded", SettlementAccount, EntryDebit, now),
 		newLedgerLine(payment, "succeeded", CashOperatingAccount, EntryCredit, now),
 	)
 	payment.AuditLog = append(payment.AuditLog, AuditEvent{Event: "succeeded", Message: "payment succeeded", At: now})
-	payment.Timeline = append(payment.Timeline, TimelineEntry{State: StateSucceeded, At: now, Note: "payment succeeded"})
+	payment.Timeline = append(payment.Timeline, TimelineEntry{PaymentStatus: PaymentStatusSucceeded, At: now, Note: "payment succeeded"})
 	return nil
 }
 

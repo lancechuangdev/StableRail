@@ -39,7 +39,7 @@ func complete(t *testing.T, env *testenv.Environment, tenant *testenv.Tenant, qu
 	env.WaitForSagaState(t, payment.ID, "awaiting_settlement")
 	env.WaitForCount(t, `SELECT count(*) FROM blindpay_payouts WHERE payment_id=$1 AND provider_payout_id=$2 AND provider_status='processing'`, 1, payment.ID, testenv.PayoutID(quote.ID))
 	env.SendBlindPayWebhook(t, testenv.PayoutID(quote.ID), "completed")
-	tenant.WaitForPaymentState(t, payment.ID, "succeeded")
+	tenant.WaitForPaymentStatus(t, payment.ID, "succeeded")
 	env.WaitForSagaState(t, payment.ID, "completed")
 }
 
@@ -82,8 +82,8 @@ func TestBLINDPAY001SuccessfulPaymentLifecycle(t *testing.T) {
 		t.Fatalf("timeline=%v", timeline.Entries)
 	}
 	for i, state := range want {
-		if timeline.Entries[i].State != state {
-			t.Fatalf("timeline[%d]=%s want %s", i, timeline.Entries[i].State, state)
+		if timeline.Entries[i].PaymentStatus != state {
+			t.Fatalf("timeline[%d]=%s want %s", i, timeline.Entries[i].PaymentStatus, state)
 		}
 	}
 }
@@ -131,7 +131,10 @@ func TestBLINDPAY003TenantIsolation(t *testing.T) {
 
 func TestBLINDPAY004PolicyRejection(t *testing.T) {
 	env, tenant, _, payment := newPayment(t, 4004, "004")
-	tenant.WaitForPaymentState(t, payment.ID, "failed")
+	failed := tenant.WaitForPaymentStatus(t, payment.ID, "failed")
+	if failed.FundsStatus != "available" {
+		t.Fatalf("funds_status=%s, want available", failed.FundsStatus)
+	}
 	env.WaitForSagaState(t, payment.ID, "failed")
 	env.WaitForCount(t, `SELECT count(*) FROM blindpay_payouts WHERE payment_id=$1`, 0, payment.ID)
 	env.WaitForCount(t, `SELECT count(*) FROM ledger_transactions WHERE payment_id=$1`, 0, payment.ID)
@@ -142,7 +145,10 @@ func TestBLINDPAY005SettlementFailureReleasesFunds(t *testing.T) {
 	env.WaitForSagaState(t, payment.ID, "awaiting_settlement")
 	env.WaitForCount(t, `SELECT count(*) FROM blindpay_payouts WHERE payment_id=$1 AND provider_payout_id=$2 AND provider_status='processing'`, 1, payment.ID, testenv.PayoutID(quote.ID))
 	env.SendBlindPayWebhook(t, testenv.PayoutID(quote.ID), "failed")
-	tenant.WaitForPaymentState(t, payment.ID, "failed")
+	failed := tenant.WaitForPaymentStatus(t, payment.ID, "failed")
+	if failed.FundsStatus != "available" {
+		t.Fatalf("funds_status=%s, want available", failed.FundsStatus)
+	}
 	env.WaitForSagaState(t, payment.ID, "ledger_released")
 	for _, event := range []string{"payment.processing", "payment.released"} {
 		env.WaitForCount(t, `SELECT count(*) FROM ledger_transactions WHERE payment_id=$1 AND event_type=$2`, 1, payment.ID, event)
@@ -157,10 +163,13 @@ func TestBLINDPAY006TerminalReturn(t *testing.T) {
 		t.Fatalf("register webhook status=%d body=%s", response.StatusCode, body)
 	}
 	env.SendBlindPayWebhook(t, testenv.PayoutID(quote.ID), "refunded")
-	tenant.WaitForPaymentState(t, payment.ID, "returned")
+	returned := tenant.WaitForPaymentStatus(t, payment.ID, "failed")
+	if returned.FundsStatus != "returned" {
+		t.Fatalf("funds_status=%s, want returned", returned.FundsStatus)
+	}
 	env.WaitForSagaState(t, payment.ID, "returned")
 	env.WaitForCount(t, `SELECT count(*) FROM ledger_transactions WHERE payment_id=$1 AND event_type='payment.released'`, 1, payment.ID)
-	env.WaitForCount(t, `SELECT count(*) FROM webhook_deliveries WHERE payment_id=$1 AND event_type='payment.returned' AND status='delivered'`, 1, payment.ID)
+	env.WaitForCount(t, `SELECT count(*) FROM webhook_deliveries WHERE payment_id=$1 AND event_type='payment.funds_returned' AND status='delivered'`, 1, payment.ID)
 }
 
 func TestBLINDPAY007ManualReviewResolution(t *testing.T) {
@@ -173,7 +182,7 @@ func TestBLINDPAY007ManualReviewResolution(t *testing.T) {
 	if response.StatusCode != http.StatusAccepted {
 		t.Fatalf("manual review status=%d body=%s", response.StatusCode, body)
 	}
-	tenant.WaitForPaymentState(t, payment.ID, "succeeded")
+	tenant.WaitForPaymentStatus(t, payment.ID, "succeeded")
 	env.WaitForSagaState(t, payment.ID, "completed")
 	env.WaitForCount(t, `SELECT count(*) FROM saga_manual_review_actions a JOIN payment_sagas s ON s.id=a.saga_id WHERE s.payment_id=$1`, 1, payment.ID)
 }
@@ -271,7 +280,7 @@ func TestBLINDPAY009RestartCompletesDurableWorkOnce(t *testing.T) {
 		}
 	}
 	env.WaitReady(t)
-	tenant.WaitForPaymentState(t, payment.ID, "succeeded")
+	tenant.WaitForPaymentStatus(t, payment.ID, "succeeded")
 	env.WaitForSagaState(t, payment.ID, "completed")
 	env.WaitForCount(t, `SELECT count(*) FROM blindpay_payouts WHERE payment_id=$1`, 1, payment.ID)
 	env.WaitForCount(t, `SELECT count(*) FROM ledger_transactions WHERE payment_id=$1 AND event_type='payment.succeeded'`, 1, payment.ID)

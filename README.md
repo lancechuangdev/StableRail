@@ -4,7 +4,7 @@ StableRail is a Go reference implementation of a durable, event-driven payment w
 
 ## Highlights
 
-- Payment states: `created -> processing -> succeeded | failed | returned`
+- Separate payment and funds statuses so delivery outcome never obscures fund disposition
 - Immutable, balanced double-entry ledger postings
 - Transactional outbox and inbox with retries, dead-lettering, and redrive
 - Persisted sagas with timeouts, provider returns, compliance holds, and audited manual review
@@ -36,23 +36,48 @@ Every business update and outgoing event commits in one PostgreSQL transaction. 
 
 ## Payment lifecycle
 
-The public payment state describes the net outcome of the original payout instruction:
+The API exposes two independent dimensions:
 
 ```mermaid
 stateDiagram-v2
-    [*] --> created
-    created --> processing: ledger reserved
-    created --> failed: policy or ledger rejected
-    processing --> succeeded: payout completed
-    processing --> failed: payout failed
-    processing --> returned: provider confirmed funds returned
+    state "Payment status" as payment {
+        [*] --> created
+        created --> processing: submitted
+        created --> failed: rejected before submission
+        processing --> succeeded: recipient paid
+        processing --> failed: payout unsuccessful
+    }
+
+    state "Funds status" as funds {
+        [*] --> available
+        available --> reserved: ledger reservation
+        reserved --> consumed: payout succeeded
+        reserved --> available: payout failed before capture
+        reserved --> returned: provider returned captured funds
+        reserved --> unknown: outcome is ambiguous
+        unknown --> reserved: submission recovered as pending
+        unknown --> consumed: completion confirmed
+        unknown --> available: failure confirmed
+        unknown --> returned: return confirmed
+    }
 ```
 
-`succeeded`, `failed`, and `returned` are mutually exclusive terminal outcomes. A payment never transitions from `succeeded` to `returned`. BlindPay's external `refunded` payout status maps to StableRail's `returned`; merchant-initiated refunds are separate financial operations and are not currently implemented.
+Common combinations are:
+
+| `payment_status` | `funds_status` | Meaning |
+| --- | --- | --- |
+| `created` | `available` | Recorded but not funded |
+| `processing` | `reserved` | Funds committed while the payout runs |
+| `processing` | `unknown` | Submission outcome requires recovery or reconciliation |
+| `succeeded` | `consumed` | Recipient payout completed |
+| `failed` | `available` | Payout failed and funds are available |
+| `failed` | `returned` | Payout failed after capture and the provider returned the funds |
+
+BlindPay's external `refunded` payout status maps to `payment_status=failed` and `funds_status=returned`. Merchant-issued refunds require separate linked refund records and are not currently implemented.
 
 ## Saga lifecycle
 
-The persisted saga tracks internal workflow progress in more detail than the public payment state:
+The persisted saga tracks internal workflow progress in more detail than the public payment and funds statuses:
 
 ```mermaid
 stateDiagram-v2
@@ -147,7 +172,7 @@ curl -H "Authorization: Bearer $STABLERAIL_API_KEY" \
   http://localhost:8080/v1/payments/PAYMENT_ID/timeline
 ```
 
-Payment processing is asynchronous. Poll the payment or timeline endpoint to observe state changes. Reusing an idempotency key with the same request returns the original payment; reusing it with different fields returns `409 Conflict`.
+Payment processing is asynchronous. Poll the payment or timeline endpoint to observe status changes. Reusing an idempotency key with the same request returns the original payment; reusing it with different fields returns `409 Conflict`.
 
 Stop the environment with `docker compose down`. Add `--volumes` to permanently remove local PostgreSQL data.
 
@@ -174,7 +199,7 @@ Tenant endpoints require `Authorization: Bearer <api-key>`. Operator endpoints a
 
 ## Settlement Providers
 
-The runtime includes a deterministic mock settlement provider for local development and a BlindPay managed-wallet integration with provider-bound quotes, durable payout submission, signed webhooks, compliance holds, reconciliation, and ambiguous-outcome recovery. BlindPay's provider status `refunded` maps to StableRail's `returned` outcome; it is not a merchant-initiated refund.
+The runtime includes a deterministic mock settlement provider for local development and a BlindPay managed-wallet integration with provider-bound quotes, durable payout submission, signed webhooks, compliance holds, reconciliation, and ambiguous-outcome recovery. BlindPay's provider status `refunded` maps to a failed StableRail payment with returned funds; it is not a merchant-initiated refund.
 
 Configure the BlindPay provider with:
 
@@ -190,7 +215,7 @@ export STABLERAIL_BLINDPAY_MANAGED_WALLET_ADDRESS='0x...'
 
 Register the public HTTPS URL `https://your-host/v1/providers/blindpay/webhooks` in the BlindPay dashboard. This is an inbound provider endpoint, not a client API. StableRail verifies its Svix signature headers before storing or processing a delivery.
 
-StableRail persists a payout submission attempt before calling BlindPay. If the response is lost, recovery retries with the original provider idempotency key and reconciliation confirms the result. A verified webhook or reconciliation result, rather than the initial HTTP response alone, determines the final payout state.
+StableRail persists a payout submission attempt before calling BlindPay. If the response is lost, recovery retries with the original provider idempotency key and reconciliation confirms the result. A verified webhook or reconciliation result, rather than the initial HTTP response alone, determines the final payment and funds statuses.
 
 See [BlindPay lifecycle testing](docs/testing/blindpay-payment-lifecycle.md) for provider scenarios and expected accounting behavior.
 

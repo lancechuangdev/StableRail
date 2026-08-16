@@ -28,8 +28,8 @@ func TestLOCAL001SuccessfulPaymentLifecycle(t *testing.T) {
 	if status != http.StatusCreated {
 		t.Fatalf("create payment status=%d", status)
 	}
-	succeeded := tenant.WaitForPaymentState(t, payment.ID, "succeeded")
-	if succeeded.TenantID != tenant.ID || succeeded.AmountMinor != 2500 || succeeded.Currency != "USD" {
+	succeeded := tenant.WaitForPaymentStatus(t, payment.ID, "succeeded")
+	if succeeded.TenantID != tenant.ID || succeeded.AmountMinor != 2500 || succeeded.Currency != "USD" || succeeded.FundsStatus != "consumed" {
 		t.Fatalf("unexpected succeeded payment: %+v", succeeded)
 	}
 
@@ -91,8 +91,8 @@ func TestLOCAL001SuccessfulPaymentLifecycle(t *testing.T) {
 		t.Fatalf("timeline=%v, want states %v", timeline.Entries, want)
 	}
 	for i, state := range want {
-		if timeline.Entries[i].State != state {
-			t.Fatalf("timeline[%d]=%q, want %q", i, timeline.Entries[i].State, state)
+		if timeline.Entries[i].PaymentStatus != state {
+			t.Fatalf("timeline[%d]=%q, want %q", i, timeline.Entries[i].PaymentStatus, state)
 		}
 	}
 }
@@ -150,7 +150,7 @@ func TestLOCAL004PolicyRejection(t *testing.T) {
 	if status != http.StatusCreated {
 		t.Fatalf("create status=%d", status)
 	}
-	tenant.WaitForPaymentState(t, payment.ID, "failed")
+	tenant.WaitForPaymentStatus(t, payment.ID, "failed")
 	env.WaitForSagaState(t, payment.ID, "failed")
 	env.WaitForCount(t, `SELECT count(*) FROM settlement_submissions WHERE payment_id=$1`, 0, payment.ID)
 	env.WaitForCount(t, `SELECT count(*) FROM ledger_transactions WHERE payment_id=$1`, 0, payment.ID)
@@ -163,7 +163,7 @@ func TestLOCAL005SettlementFailureReleasesFunds(t *testing.T) {
 	if status != http.StatusCreated {
 		t.Fatalf("create status=%d", status)
 	}
-	tenant.WaitForPaymentState(t, payment.ID, "failed")
+	tenant.WaitForPaymentStatus(t, payment.ID, "failed")
 	env.WaitForSagaState(t, payment.ID, "ledger_released")
 	for _, eventType := range []string{"payment.processing", "payment.released"} {
 		env.WaitForCount(t, `SELECT count(*) FROM ledger_transactions WHERE payment_id=$1 AND event_type=$2`, 1, payment.ID, eventType)
@@ -182,7 +182,7 @@ func TestLOCAL007ManualReviewResolution(t *testing.T) {
 	if response.StatusCode != http.StatusAccepted {
 		t.Fatalf("manual review status=%d body=%s", response.StatusCode, body)
 	}
-	tenant.WaitForPaymentState(t, payment.ID, "succeeded")
+	tenant.WaitForPaymentStatus(t, payment.ID, "succeeded")
 	env.WaitForSagaState(t, payment.ID, "completed")
 	env.WaitForCount(t, `SELECT count(*) FROM saga_manual_review_actions a JOIN payment_sagas s ON s.id=a.saga_id WHERE s.payment_id=$1`, 1, payment.ID)
 }
@@ -222,7 +222,7 @@ func TestLOCAL008IndependentSignedWebhooks(t *testing.T) {
 	if status != http.StatusCreated {
 		t.Fatalf("create status=%d", status)
 	}
-	tenant.WaitForPaymentState(t, payment.ID, "succeeded")
+	tenant.WaitForPaymentStatus(t, payment.ID, "succeeded")
 	seen := [2]int{}
 	deadline := time.After(60 * time.Second)
 	for seen[0] < 3 || seen[1] < 3 {
@@ -277,7 +277,7 @@ func TestLOCAL009RestartCompletesDurableWorkOnce(t *testing.T) {
 		}
 	}
 	env.WaitReady(t)
-	tenant.WaitForPaymentState(t, payment.ID, "succeeded")
+	tenant.WaitForPaymentStatus(t, payment.ID, "succeeded")
 	env.WaitForSagaState(t, payment.ID, "completed")
 	env.WaitForCount(t, `SELECT count(*) FROM settlement_submissions WHERE payment_id=$1`, 1, payment.ID)
 	env.WaitForCount(t, `SELECT count(*) FROM ledger_transactions WHERE payment_id=$1 AND event_type='payment.succeeded'`, 1, payment.ID)

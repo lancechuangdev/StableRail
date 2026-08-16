@@ -56,6 +56,9 @@ func (s *PayoutService) SubmitPayment(ctx context.Context, paymentID, idempotenc
 	}
 	if !attempt.new {
 		if attempt.ProviderPayoutID != "" {
+			if err := s.setPaymentFundsStatus(ctx, paymentID, "reserved"); err != nil {
+				return nil, err
+			}
 			return &attempt.PayoutSubmission, nil
 		}
 		if attempt.ProviderStatus != "unknown" {
@@ -94,6 +97,9 @@ func (s *PayoutService) SubmitPayment(ctx context.Context, paymentID, idempotenc
 	_, err = s.db.ExecContext(ctx, `UPDATE blindpay_payouts SET provider_payout_id=$1,provider_status=$2,provider_payload=$3,last_error=NULL,updated_at=$4,submitted_at=$4 WHERE payment_id=$5 AND provider_status IN ('submission_pending','unknown')`, payout.ID, payout.Status, raw, now, paymentID)
 	if err != nil {
 		return nil, fmt.Errorf("record BlindPay payout response: %w", err)
+	}
+	if err := s.setPaymentFundsStatus(ctx, paymentID, "reserved"); err != nil {
+		return nil, err
 	}
 	return &PayoutSubmission{PaymentID: paymentID, QuoteID: attempt.QuoteID, ProviderPayoutID: payout.ID, ProviderStatus: payout.Status, IdempotencyKey: idempotencyKey, SenderWalletID: attempt.SenderWalletID, SenderWalletAddress: attempt.SenderWalletAddress, CreatedAt: attempt.CreatedAt, UpdatedAt: now, SubmittedAt: &now}, nil
 }
@@ -199,5 +205,18 @@ func (s *PayoutService) prepare(ctx context.Context, paymentID, idempotencyKey s
 
 func (s *PayoutService) recordError(ctx context.Context, paymentID, status string, cause error) error {
 	_, err := s.db.ExecContext(ctx, `UPDATE blindpay_payouts SET provider_status=$1,last_error=$2,updated_at=$3 WHERE payment_id=$4 AND provider_status='submission_pending'`, status, cause.Error(), s.now(), paymentID)
-	return err
+	if err != nil {
+		return err
+	}
+	if status == "unknown" {
+		return s.setPaymentFundsStatus(ctx, paymentID, "unknown")
+	}
+	return nil
+}
+
+func (s *PayoutService) setPaymentFundsStatus(ctx context.Context, paymentID, status string) error {
+	if _, err := s.db.ExecContext(ctx, `UPDATE payments SET funds_status=$1,updated_at=$2 WHERE id=$3 AND payment_status='processing'`, status, s.now(), paymentID); err != nil {
+		return fmt.Errorf("update payment funds status: %w", err)
+	}
+	return nil
 }

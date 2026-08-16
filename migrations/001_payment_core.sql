@@ -4,10 +4,17 @@ CREATE TABLE payments (
     currency            TEXT NOT NULL,
     amount_minor        BIGINT NOT NULL CHECK (amount_minor > 0),
     tenant_id          TEXT NOT NULL,
-    state               TEXT NOT NULL CHECK (state IN ('created', 'processing', 'succeeded', 'failed', 'returned')),
+    payment_status      TEXT NOT NULL CHECK (payment_status IN ('created', 'processing', 'succeeded', 'failed')),
+    funds_status        TEXT NOT NULL CHECK (funds_status IN ('available', 'reserved', 'consumed', 'returned', 'unknown')),
     idempotency_key     TEXT NOT NULL UNIQUE,
     created_at          TIMESTAMPTZ NOT NULL,
-    updated_at          TIMESTAMPTZ NOT NULL
+    updated_at          TIMESTAMPTZ NOT NULL,
+    CHECK (
+        (payment_status = 'created' AND funds_status = 'available') OR
+        (payment_status = 'processing' AND funds_status IN ('reserved', 'unknown')) OR
+        (payment_status = 'succeeded' AND funds_status = 'consumed') OR
+        (payment_status = 'failed' AND funds_status IN ('available', 'returned'))
+    )
 );
 
 CREATE TABLE ledger_accounts (
@@ -54,7 +61,7 @@ CREATE TABLE payment_audit_events (
 CREATE TABLE payment_timeline_entries (
     id          BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     payment_id  TEXT NOT NULL REFERENCES payments(id),
-    state       TEXT NOT NULL,
+    payment_status TEXT NOT NULL,
     note        TEXT NOT NULL,
     occurred_at TIMESTAMPTZ NOT NULL
 );

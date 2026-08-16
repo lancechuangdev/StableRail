@@ -13,8 +13,8 @@ func TestCreateAndSettlePaymentLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreatePayment returned error: %v", err)
 	}
-	if payment.State != StateCreated {
-		t.Fatalf("expected state %q, got %q", StateCreated, payment.State)
+	if payment.PaymentStatus != PaymentStatusCreated || payment.FundsStatus != FundsStatusAvailable {
+		t.Fatalf("unexpected initial statuses: %+v", payment)
 	}
 
 	if err := service.Process(payment.ID); err != nil {
@@ -24,8 +24,8 @@ func TestCreateAndSettlePaymentLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetPayment returned error: %v", err)
 	}
-	if payment.State != StateProcessing {
-		t.Fatalf("expected state %q, got %q", StateProcessing, payment.State)
+	if payment.PaymentStatus != PaymentStatusProcessing || payment.FundsStatus != FundsStatusReserved {
+		t.Fatalf("unexpected processing statuses: %+v", payment)
 	}
 
 	if err := service.Settle(payment.ID); err != nil {
@@ -35,8 +35,8 @@ func TestCreateAndSettlePaymentLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetPayment returned error: %v", err)
 	}
-	if payment.State != StateSucceeded {
-		t.Fatalf("expected state %q, got %q", StateSucceeded, payment.State)
+	if payment.PaymentStatus != PaymentStatusSucceeded || payment.FundsStatus != FundsStatusConsumed {
+		t.Fatalf("unexpected succeeded statuses: %+v", payment)
 	}
 	if len(payment.LedgerEntries) != 4 {
 		t.Fatalf("expected four ledger lines, got %d", len(payment.LedgerEntries))
@@ -99,14 +99,14 @@ func TestReturnedPaymentsAreSnapshots(t *testing.T) {
 		t.Fatalf("CreatePayment returned error: %v", err)
 	}
 
-	payment.State = StateFailed
+	payment.PaymentStatus = PaymentStatusFailed
 	payment.AuditLog[0].Message = "modified"
 
 	stored, err := service.GetPayment(payment.ID)
 	if err != nil {
 		t.Fatalf("GetPayment returned error: %v", err)
 	}
-	if stored.State != StateCreated || stored.AuditLog[0].Message == "modified" {
+	if stored.PaymentStatus != PaymentStatusCreated || stored.AuditLog[0].Message == "modified" {
 		t.Fatal("mutating a returned payment changed service state")
 	}
 }

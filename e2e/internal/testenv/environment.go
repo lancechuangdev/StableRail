@@ -36,11 +36,12 @@ type Payment struct {
 	Currency          string `json:"currency"`
 	AmountMinor       int64  `json:"amount_minor"`
 	TenantID          string `json:"tenant_id"`
-	State             string `json:"state"`
+	PaymentStatus     string `json:"payment_status"`
+	FundsStatus       string `json:"funds_status"`
 }
 
 type TimelineEntry struct {
-	State string `json:"state"`
+	PaymentStatus string `json:"payment_status"`
 }
 
 func Open(t *testing.T) *Environment {
@@ -114,7 +115,7 @@ func (e *Environment) OperatorPost(t *testing.T, path string, body any) (*http.R
 	return response, []byte(readBody(response.Body))
 }
 
-func (tenant *Tenant) WaitForPaymentState(t *testing.T, paymentID, wanted string) Payment {
+func (tenant *Tenant) WaitForPaymentStatus(t *testing.T, paymentID, wanted string) Payment {
 	t.Helper()
 	deadline := time.Now().Add(60 * time.Second)
 	var last Payment
@@ -124,13 +125,13 @@ func (tenant *Tenant) WaitForPaymentState(t *testing.T, paymentID, wanted string
 			if err := json.Unmarshal(body, &last); err != nil {
 				t.Fatal(err)
 			}
-			if last.State == wanted {
+			if last.PaymentStatus == wanted {
 				return last
 			}
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	t.Fatalf("payment %s did not reach %s; last state=%s", paymentID, wanted, last.State)
+	t.Fatalf("payment %s did not reach status %s; last status=%s", paymentID, wanted, last.PaymentStatus)
 	return Payment{}
 }
 

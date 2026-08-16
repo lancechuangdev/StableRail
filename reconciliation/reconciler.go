@@ -113,22 +113,22 @@ func find(ctx context.Context, tx *sql.Tx) ([]Finding, error) {
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	rows, err = tx.QueryContext(ctx, `SELECT p.id,p.state,COALESCE(s.status,'missing'),COALESCE(s.provider_reference,'')
+	rows, err = tx.QueryContext(ctx, `SELECT p.id,p.payment_status,COALESCE(s.status,'missing'),COALESCE(s.provider_reference,'')
 		FROM payments p LEFT JOIN LATERAL (
 			SELECT status,provider_reference FROM settlement_submissions
 			WHERE payment_id=p.id AND provider<>'blindpay' ORDER BY created_at DESC LIMIT 1
 		) s ON true
-		WHERE s.status IS NOT NULL AND ((p.state='succeeded' AND s.status<>'succeeded') OR (s.status='succeeded' AND p.state<>'succeeded'))`)
+		WHERE s.status IS NOT NULL AND ((p.payment_status='succeeded' AND s.status<>'succeeded') OR (s.status='succeeded' AND p.payment_status<>'succeeded'))`)
 	if err != nil {
 		return nil, fmt.Errorf("compare provider settlements: %w", err)
 	}
 	for rows.Next() {
-		var payment, state, status, reference string
-		if err := rows.Scan(&payment, &state, &status, &reference); err != nil {
+		var payment, paymentStatus, providerStatus, reference string
+		if err := rows.Scan(&payment, &paymentStatus, &providerStatus, &reference); err != nil {
 			rows.Close()
 			return nil, err
 		}
-		out = append(out, Finding{"settlement:" + payment, "settlement_state_mismatch", payment, map[string]any{"payment_state": state, "provider_status": status, "provider_reference": reference}})
+		out = append(out, Finding{"settlement:" + payment, "settlement_status_mismatch", payment, map[string]any{"payment_status": paymentStatus, "provider_status": providerStatus, "provider_reference": reference}})
 	}
 	if err := rows.Close(); err != nil {
 		return nil, err
@@ -136,21 +136,21 @@ func find(ctx context.Context, tx *sql.Tx) ([]Finding, error) {
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	rows, err = tx.QueryContext(ctx, `SELECT p.id,p.state,b.provider_status,COALESCE(b.provider_payout_id,'')
+	rows, err = tx.QueryContext(ctx, `SELECT p.id,p.payment_status,b.provider_status,COALESCE(b.provider_payout_id,'')
 		FROM payments p JOIN blindpay_payouts b ON b.payment_id=p.id
-		WHERE (b.provider_status='completed' AND p.state<>'succeeded')
-		   OR (b.provider_status='refunded' AND p.state<>'returned')
-		   OR (b.provider_status='failed' AND p.state<>'failed')`)
+		WHERE (b.provider_status='completed' AND p.payment_status<>'succeeded')
+		   OR (b.provider_status='refunded' AND (p.payment_status<>'failed' OR p.funds_status<>'returned'))
+		   OR (b.provider_status='failed' AND p.payment_status<>'failed')`)
 	if err != nil {
 		return nil, fmt.Errorf("compare BlindPay payout states: %w", err)
 	}
 	for rows.Next() {
-		var payment, state, status, reference string
-		if err := rows.Scan(&payment, &state, &status, &reference); err != nil {
+		var payment, paymentStatus, providerStatus, reference string
+		if err := rows.Scan(&payment, &paymentStatus, &providerStatus, &reference); err != nil {
 			rows.Close()
 			return nil, err
 		}
-		out = append(out, Finding{"blindpay:" + payment, "blindpay_state_mismatch", payment, map[string]any{"payment_state": state, "provider_status": status, "provider_reference": reference}})
+		out = append(out, Finding{"blindpay:" + payment, "blindpay_status_mismatch", payment, map[string]any{"payment_status": paymentStatus, "provider_status": providerStatus, "provider_reference": reference}})
 	}
 	if err := rows.Close(); err != nil {
 		return nil, err

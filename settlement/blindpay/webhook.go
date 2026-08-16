@@ -151,6 +151,11 @@ func (s *PayoutWebhookService) Process(ctx context.Context, svixID string, raw j
 	if _, err := tx.ExecContext(ctx, `UPDATE blindpay_payouts SET provider_status=$1,provider_payload=$2,updated_at=$3 WHERE payment_id=$4`, payload.Status, raw, now, paymentID); err != nil {
 		return fmt.Errorf("update BlindPay payout status: %w", err)
 	}
+	if payload.Status == "processing" || payload.Status == "on_hold" {
+		if _, err := tx.ExecContext(ctx, `UPDATE payments SET funds_status='reserved',updated_at=$1 WHERE id=$2 AND payment_status='processing' AND funds_status='unknown'`, now, paymentID); err != nil {
+			return fmt.Errorf("restore reserved payment funds status: %w", err)
+		}
+	}
 	if payload.Status == "completed" || payload.Status == "failed" || payload.Status == "refunded" || payload.Status == "on_hold" {
 		if err := s.enqueueSagaResult(ctx, tx, svixID, paymentID, payload.Status, now); err != nil {
 			return err

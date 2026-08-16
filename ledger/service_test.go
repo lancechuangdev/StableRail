@@ -22,7 +22,7 @@ func TestReleaseWritesReversingJournal(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
-	mock.ExpectQuery(regexp.QuoteMeta(`SELECT state, amount_minor, currency FROM payments WHERE id=$1 FOR UPDATE`)).
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT payment_status, amount_minor, currency FROM payments WHERE id=$1 FOR UPDATE`)).
 		WithArgs("pay_1").WillReturnRows(sqlmock.NewRows([]string{"state", "amount_minor", "currency"}).AddRow("processing", 2500, "USD"))
 	mock.ExpectExec("INSERT INTO ledger_transactions").WithArgs("jrn_pay_1_released", "pay_1", "payment.released", now).WillReturnResult(sqlmock.NewResult(0, 1))
 	lines := []struct{ id, account, side string }{

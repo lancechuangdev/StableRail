@@ -25,6 +25,7 @@ func TestProviderMapsProcessingPayoutToPendingSettlement(t *testing.T) {
 	mock.ExpectExec("INSERT INTO blindpay_payouts").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 	mock.ExpectExec("UPDATE blindpay_payouts SET provider_payout_id").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("UPDATE payments SET funds_status").WillReturnResult(sqlmock.NewResult(0, 1))
 
 	result, err := provider.Submit(context.Background(), settlement.SettlementRequest{IdempotencyKey: "idem-1", PaymentID: "pay_test", AmountMinor: 1, Currency: "USDB"})
 	if err != nil {

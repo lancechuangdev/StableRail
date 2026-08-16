@@ -71,7 +71,7 @@ func (h *CommandHandler) Handle(ctx context.Context, tx *sql.Tx, event eventbus.
 		}
 	case "ledger.reserve":
 		if err := h.ledgerService.Reserve(ctx, tx, ledger.ReservationRequest{PaymentID: payload.PaymentID, At: h.now()}); err != nil {
-			if errors.Is(err, ledger.ErrInvalidPaymentState) {
+			if errors.Is(err, ledger.ErrInvalidPaymentStatus) {
 				return consumer.Permanent(err)
 			}
 			return fmt.Errorf("reserve ledger funds: %w", err)
@@ -119,45 +119,45 @@ func (h *CommandHandler) Handle(ctx context.Context, tx *sql.Tx, event eventbus.
 			}
 			return h.enqueueReply(ctx, tx, event, payload, "settlement.failed")
 		}
-		if err := transitionPayment(ctx, tx, payload.PaymentID, paymentcore.StateProcessing, paymentcore.StateSucceeded, h.now()); err != nil {
+		if err := transitionPayment(ctx, tx, payload.PaymentID, paymentcore.PaymentStatusProcessing, paymentcore.PaymentStatusSucceeded, h.now()); err != nil {
 			return err
 		}
 		reply = "settlement.completed"
 	case "ledger.release":
 		if err := h.ledgerService.Release(ctx, tx, ledger.ReleaseRequest{PaymentID: payload.PaymentID, At: h.now()}); err != nil {
-			if errors.Is(err, ledger.ErrInvalidPaymentState) {
+			if errors.Is(err, ledger.ErrInvalidPaymentStatus) {
 				return consumer.Permanent(err)
 			}
 			return fmt.Errorf("release ledger funds: %w", err)
 		}
 		reply = "ledger.released"
 	case "payment.settle":
-		if err := transitionPayment(ctx, tx, payload.PaymentID, paymentcore.StateProcessing, paymentcore.StateSucceeded, h.now()); err != nil {
+		if err := transitionPayment(ctx, tx, payload.PaymentID, paymentcore.PaymentStatusProcessing, paymentcore.PaymentStatusSucceeded, h.now()); err != nil {
 			return err
 		}
 		return h.enqueueReply(ctx, tx, event, payload, "payment.succeeded")
 	case "payment.fail", "payment.return":
-		state, eventName, message := paymentcore.StateFailed, "failed", payload.Reason
+		status, fundsStatus, eventName, message := paymentcore.PaymentStatusFailed, paymentcore.FundsStatusAvailable, "failed", payload.Reason
 		if event.Type == "payment.return" {
-			state, eventName = paymentcore.StateReturned, "returned"
+			fundsStatus, eventName = paymentcore.FundsStatusReturned, "returned"
 			if message == "" {
 				message = "provider returned payout funds"
 			}
 		}
 		now := h.now()
-		update := `UPDATE payments SET state=$1, updated_at=$2 WHERE id=$3 AND state NOT IN ('succeeded','failed','returned')`
-		if _, err := tx.ExecContext(ctx, update, state, now, payload.PaymentID); err != nil {
+		update := `UPDATE payments SET payment_status=$1, funds_status=$2, updated_at=$3 WHERE id=$4 AND payment_status NOT IN ('succeeded','failed')`
+		if _, err := tx.ExecContext(ctx, update, status, fundsStatus, now, payload.PaymentID); err != nil {
 			return fmt.Errorf("record payment outcome: %w", err)
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO payment_audit_events(payment_id,event,message,occurred_at) VALUES($1,$2,$3,$4)`, payload.PaymentID, eventName, message, now); err != nil {
 			return fmt.Errorf("audit payment outcome: %w", err)
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO payment_timeline_entries(payment_id,state,note,occurred_at) VALUES($1,$2,$3,$4)`, payload.PaymentID, state, message, now); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO payment_timeline_entries(payment_id,payment_status,note,occurred_at) VALUES($1,$2,$3,$4)`, payload.PaymentID, status, message, now); err != nil {
 			return fmt.Errorf("timeline payment outcome: %w", err)
 		}
 		reply := "payment.failed"
 		if event.Type == "payment.return" {
-			reply = "payment.returned"
+			reply = "payment.funds_returned"
 		}
 		return h.enqueueReply(ctx, tx, event, payload, reply)
 	default:
@@ -187,25 +187,29 @@ func loadDestination(ctx context.Context, tx *sql.Tx, paymentID string) (*settle
 	return &d, nil
 }
 
-func transitionPayment(ctx context.Context, tx *sql.Tx, id string, from, to paymentcore.PaymentState, now time.Time) error {
+func transitionPayment(ctx context.Context, tx *sql.Tx, id string, from, to paymentcore.PaymentStatus, now time.Time) error {
 	var amount int64
 	var currency string
-	var state paymentcore.PaymentState
-	if err := tx.QueryRowContext(ctx, `SELECT state, amount_minor, currency FROM payments WHERE id=$1 FOR UPDATE`, id).Scan(&state, &amount, &currency); err != nil {
+	var status paymentcore.PaymentStatus
+	if err := tx.QueryRowContext(ctx, `SELECT payment_status, amount_minor, currency FROM payments WHERE id=$1 FOR UPDATE`, id).Scan(&status, &amount, &currency); err != nil {
 		return fmt.Errorf("lock payment: %w", err)
 	}
-	if state == to {
+	if status == to {
 		return nil
 	}
-	if state != from {
-		return consumer.Permanent(fmt.Errorf("payment %s cannot transition from %s", id, state))
+	if status != from {
+		return consumer.Permanent(fmt.Errorf("payment %s cannot transition from %s", id, status))
 	}
 	debit, credit := paymentcore.CashOperatingAccount, paymentcore.SettlementAccount
-	if to == paymentcore.StateSucceeded {
+	if to == paymentcore.PaymentStatusSucceeded {
 		debit, credit = credit, debit
 	}
 	journal := "jrn_" + eventSafeID(id, string(to))
-	if _, err := tx.ExecContext(ctx, `UPDATE payments SET state=$1, updated_at=$2 WHERE id=$3`, to, now, id); err != nil {
+	fundsStatus := paymentcore.FundsStatusReserved
+	if to == paymentcore.PaymentStatusSucceeded {
+		fundsStatus = paymentcore.FundsStatusConsumed
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE payments SET payment_status=$1, funds_status=$2, updated_at=$3 WHERE id=$4`, to, fundsStatus, now, id); err != nil {
 		return fmt.Errorf("update payment: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO ledger_transactions(id,payment_id,event_type,occurred_at) VALUES($1,$2,$3,$4) ON CONFLICT(payment_id,event_type) DO NOTHING`, journal, id, "payment."+string(to), now); err != nil {
@@ -217,13 +221,13 @@ func transitionPayment(ctx context.Context, tx *sql.Tx, id string, from, to paym
 		}
 	}
 	message, note := "payment processing started", "payment processing"
-	if to == paymentcore.StateSucceeded {
+	if to == paymentcore.PaymentStatusSucceeded {
 		message, note = "payment succeeded", "payment succeeded"
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO payment_audit_events(payment_id,event,message,occurred_at) VALUES($1,$2,$3,$4)`, id, string(to), message, now); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO payment_timeline_entries(payment_id,state,note,occurred_at) VALUES($1,$2,$3,$4)`, id, to, note, now); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO payment_timeline_entries(payment_id,payment_status,note,occurred_at) VALUES($1,$2,$3,$4)`, id, to, note, now); err != nil {
 		return err
 	}
 	return nil
@@ -235,8 +239,17 @@ func (h *CommandHandler) enqueueReply(ctx context.Context, tx *sql.Tx, caused ev
 	if err != nil {
 		return err
 	}
-	body, _ := json.Marshal(map[string]string{"correlation_id": p.CorrelationID, "caused_by_event_id": caused.ID, "reason": p.Reason})
-	version := map[string]int{"policy.approved": eventbus.PolicyApprovedVersion, "policy.rejected": eventbus.PolicyRejectedVersion, "ledger.reserved": eventbus.LedgerReservedVersion, "ledger.released": eventbus.LedgerReleasedVersion, "settlement.completed": eventbus.SettlementCompletedVersion, "settlement.failed": eventbus.SettlementFailedVersion, "settlement.returned": eventbus.SettlementReturnedVersion, "settlement.on_hold": eventbus.SettlementOnHoldVersion, "payment.succeeded": eventbus.PaymentSucceededVersion, "payment.failed": eventbus.PaymentFailedVersion, "payment.returned": eventbus.PaymentReturnedVersion}[reply]
+	bodyFields := map[string]string{"correlation_id": p.CorrelationID, "caused_by_event_id": caused.ID, "reason": p.Reason}
+	switch reply {
+	case "payment.succeeded":
+		bodyFields["payment_status"], bodyFields["funds_status"] = "succeeded", "consumed"
+	case "payment.failed":
+		bodyFields["payment_status"], bodyFields["funds_status"] = "failed", "available"
+	case "payment.funds_returned":
+		bodyFields["payment_status"], bodyFields["funds_status"] = "failed", "returned"
+	}
+	body, _ := json.Marshal(bodyFields)
+	version := map[string]int{"policy.approved": eventbus.PolicyApprovedVersion, "policy.rejected": eventbus.PolicyRejectedVersion, "ledger.reserved": eventbus.LedgerReservedVersion, "ledger.released": eventbus.LedgerReleasedVersion, "settlement.completed": eventbus.SettlementCompletedVersion, "settlement.failed": eventbus.SettlementFailedVersion, "settlement.returned": eventbus.SettlementReturnedVersion, "settlement.on_hold": eventbus.SettlementOnHoldVersion, "payment.succeeded": eventbus.PaymentSucceededVersion, "payment.failed": eventbus.PaymentFailedVersion, "payment.funds_returned": eventbus.PaymentFundsReturnedVersion}[reply]
 	_, err = tx.ExecContext(ctx, `INSERT INTO outbox_events(id,topic,event_type,event_version,aggregate_id,aggregate_type,payload,occurred_at) VALUES($1,$2,$3,$4,$5,'payment',$6,$7)`, id, paymentcore.PaymentEventsTopic, reply, version, p.PaymentID, body, h.now())
 	if err != nil {
 		return fmt.Errorf("enqueue %s: %w", reply, err)

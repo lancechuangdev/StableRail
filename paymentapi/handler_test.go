@@ -26,7 +26,7 @@ func (f *fakeStore) CreatePayment(_ context.Context, _, _ string, _ int64, tenan
 }
 
 func TestCreatePaymentDerivesAuthenticatedTenant(t *testing.T) {
-	store := &fakeStore{payment: &paymentcore.Payment{ID: "pay_1", State: paymentcore.StateCreated}}
+	store := &fakeStore{payment: &paymentcore.Payment{ID: "pay_1", PaymentStatus: paymentcore.PaymentStatusCreated}}
 	h, _ := NewHandler(store, fakeHealth{}, nil)
 	req := httptest.NewRequest(http.MethodPost, "/v1/payments", strings.NewReader(`{"external_reference":"order-1","currency":"USD","amount_minor":1250}`))
 	req = req.WithContext(context.WithValue(req.Context(), tenantContextKey{}, "tenant-authenticated"))
@@ -80,7 +80,7 @@ func (f *fakePayoutQuoteService) Create(_ context.Context, request blindpay.Payo
 }
 
 func TestCreatePayment(t *testing.T) {
-	store := &fakeStore{payment: &paymentcore.Payment{ID: "pay_1", State: paymentcore.StateCreated}}
+	store := &fakeStore{payment: &paymentcore.Payment{ID: "pay_1", PaymentStatus: paymentcore.PaymentStatusCreated}}
 	h, _ := NewHandler(store, fakeHealth{}, nil)
 	req := httptest.NewRequest(http.MethodPost, "/v1/payments", strings.NewReader(`{"external_reference":"order-1","currency":"usd","amount_minor":1250,"tenant_id":"cus-1"}`))
 	req.Header.Set("Idempotency-Key", "request-1")
