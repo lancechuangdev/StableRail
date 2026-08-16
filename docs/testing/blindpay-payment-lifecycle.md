@@ -14,7 +14,7 @@ Run all scenarios from the repository root:
 Run one scenario with:
 
 ```bash
-./scripts/test-e2e-blindpay.sh -run '^TestBLINDPAY006TerminalRefund$'
+./scripts/test-e2e-blindpay.sh -run '^TestBLINDPAY006TerminalReturn$'
 ```
 
 The runner starts isolated PostgreSQL and Kafka services, the BlindPay API
@@ -30,7 +30,7 @@ tenant notification code paths.
 | BLINDPAY-003 | Tenant isolation for BlindPay-backed payments |
 | BLINDPAY-004 | Policy rejection before BlindPay submission |
 | BLINDPAY-005 | Failed payout webhook and compensating ledger release |
-| BLINDPAY-006 | Completed payout followed by terminal provider refund |
+| BLINDPAY-006 | BlindPay `refunded` outcome mapped to a terminal StableRail return before success |
 | BLINDPAY-007 | On-hold payout entering and leaving manual review |
 | BLINDPAY-008 | Independent signed tenant lifecycle webhooks |
 | BLINDPAY-009 | Restart recovery of an early durable BlindPay completion webhook |

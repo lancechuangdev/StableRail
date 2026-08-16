@@ -28,9 +28,9 @@ func TestLOCAL001SuccessfulPaymentLifecycle(t *testing.T) {
 	if status != http.StatusCreated {
 		t.Fatalf("create payment status=%d", status)
 	}
-	settled := tenant.WaitForPaymentState(t, payment.ID, "settled")
-	if settled.TenantID != tenant.ID || settled.AmountMinor != 2500 || settled.Currency != "USD" {
-		t.Fatalf("unexpected settled payment: %+v", settled)
+	succeeded := tenant.WaitForPaymentState(t, payment.ID, "succeeded")
+	if succeeded.TenantID != tenant.ID || succeeded.AmountMinor != 2500 || succeeded.Currency != "USD" {
+		t.Fatalf("unexpected succeeded payment: %+v", succeeded)
 	}
 
 	env.WaitForSagaState(t, payment.ID, "completed")
@@ -86,7 +86,7 @@ func TestLOCAL001SuccessfulPaymentLifecycle(t *testing.T) {
 	if err := json.Unmarshal(body, &timeline); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"created", "processing", "settled"}
+	want := []string{"created", "processing", "succeeded"}
 	if len(timeline.Entries) != len(want) {
 		t.Fatalf("timeline=%v, want states %v", timeline.Entries, want)
 	}
@@ -170,30 +170,6 @@ func TestLOCAL005SettlementFailureReleasesFunds(t *testing.T) {
 	}
 }
 
-func TestLOCAL006TerminalRefund(t *testing.T) {
-	env := testenv.Open(t)
-	tenant := env.NewTenant(t)
-	receiver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }))
-	defer receiver.Close()
-	if response, body := tenant.Post(t, "/v1/webhook-endpoints", map[string]string{"url": receiver.URL}); response.StatusCode != http.StatusCreated {
-		t.Fatalf("register webhook status=%d body=%s", response.StatusCode, body)
-	}
-	payment, status := tenant.CreatePayment(t, "local-006-"+fmt.Sprint(time.Now().UnixNano()), "order-local-006", 6006)
-	if status != http.StatusCreated {
-		t.Fatalf("create status=%d", status)
-	}
-	tenant.WaitForPaymentState(t, payment.ID, "settled")
-	env.WaitForSagaState(t, payment.ID, "completed")
-	response, body := env.OperatorPost(t, "/v1/operator/mock-settlements/"+payment.ID, map[string]string{"status": "refunded", "reason": "local terminal refund"})
-	if response.StatusCode != http.StatusAccepted {
-		t.Fatalf("refund trigger status=%d body=%s", response.StatusCode, body)
-	}
-	tenant.WaitForPaymentState(t, payment.ID, "refunded")
-	env.WaitForSagaState(t, payment.ID, "refunded")
-	env.WaitForCount(t, `SELECT count(*) FROM ledger_transactions WHERE payment_id=$1 AND event_type='payment.refund_recorded'`, 1, payment.ID)
-	env.WaitForCount(t, `SELECT count(*) FROM webhook_deliveries WHERE payment_id=$1 AND event_type='payment.refunded' AND status='delivered'`, 1, payment.ID)
-}
-
 func TestLOCAL007ManualReviewResolution(t *testing.T) {
 	env := testenv.Open(t)
 	tenant := env.NewTenant(t)
@@ -206,7 +182,7 @@ func TestLOCAL007ManualReviewResolution(t *testing.T) {
 	if response.StatusCode != http.StatusAccepted {
 		t.Fatalf("manual review status=%d body=%s", response.StatusCode, body)
 	}
-	tenant.WaitForPaymentState(t, payment.ID, "settled")
+	tenant.WaitForPaymentState(t, payment.ID, "succeeded")
 	env.WaitForSagaState(t, payment.ID, "completed")
 	env.WaitForCount(t, `SELECT count(*) FROM saga_manual_review_actions a JOIN payment_sagas s ON s.id=a.saga_id WHERE s.payment_id=$1`, 1, payment.ID)
 }
@@ -246,7 +222,7 @@ func TestLOCAL008IndependentSignedWebhooks(t *testing.T) {
 	if status != http.StatusCreated {
 		t.Fatalf("create status=%d", status)
 	}
-	tenant.WaitForPaymentState(t, payment.ID, "settled")
+	tenant.WaitForPaymentState(t, payment.ID, "succeeded")
 	seen := [2]int{}
 	deadline := time.After(60 * time.Second)
 	for seen[0] < 3 || seen[1] < 3 {
@@ -301,8 +277,8 @@ func TestLOCAL009RestartCompletesDurableWorkOnce(t *testing.T) {
 		}
 	}
 	env.WaitReady(t)
-	tenant.WaitForPaymentState(t, payment.ID, "settled")
+	tenant.WaitForPaymentState(t, payment.ID, "succeeded")
 	env.WaitForSagaState(t, payment.ID, "completed")
 	env.WaitForCount(t, `SELECT count(*) FROM settlement_submissions WHERE payment_id=$1`, 1, payment.ID)
-	env.WaitForCount(t, `SELECT count(*) FROM ledger_transactions WHERE payment_id=$1 AND event_type='payment.settled'`, 1, payment.ID)
+	env.WaitForCount(t, `SELECT count(*) FROM ledger_transactions WHERE payment_id=$1 AND event_type='payment.succeeded'`, 1, payment.ID)
 }

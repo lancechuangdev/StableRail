@@ -35,8 +35,8 @@ func TestCreateAndSettlePaymentLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetPayment returned error: %v", err)
 	}
-	if payment.State != StateSettled {
-		t.Fatalf("expected state %q, got %q", StateSettled, payment.State)
+	if payment.State != StateSucceeded {
+		t.Fatalf("expected state %q, got %q", StateSucceeded, payment.State)
 	}
 	if len(payment.LedgerEntries) != 4 {
 		t.Fatalf("expected four ledger lines, got %d", len(payment.LedgerEntries))

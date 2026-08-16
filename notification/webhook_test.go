@@ -15,7 +15,7 @@ import (
 )
 
 func TestSignatureCoversTimestampAndExactBody(t *testing.T) {
-	body := []byte(`{"type":"payment.settled"}`)
+	body := []byte(`{"type":"payment.succeeded"}`)
 	mac := hmac.New(sha256.New, []byte("secret"))
 	mac.Write([]byte("1700000000."))
 	mac.Write(body)
@@ -35,7 +35,7 @@ func TestNewDispatcherRejectsInvalidRetryWindow(t *testing.T) {
 	}
 }
 
-func TestEventHandlerCreatesRefundDelivery(t *testing.T) {
+func TestEventHandlerCreatesReturnDelivery(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatal(err)
@@ -47,9 +47,9 @@ func TestEventHandlerCreatesRefundDelivery(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)
-	event := eventbus.Event{ID: "evt_refunded", Type: "payment.refunded", Version: 1, AggregateID: "pay_1", AggregateType: "payment", Payload: []byte(`{"reason":"provider payout refunded"}`), OccurredAt: now}
+	event := eventbus.Event{ID: "evt_returned", Type: "payment.returned", Version: 1, AggregateID: "pay_1", AggregateType: "payment", Payload: []byte(`{"reason":"provider returned payout funds"}`), OccurredAt: now}
 	mock.ExpectQuery("SELECT tenant_id FROM payments").WithArgs("pay_1").WillReturnRows(sqlmock.NewRows([]string{"tenant_id"}).AddRow("cus_1"))
-	mock.ExpectExec("INSERT INTO webhook_deliveries").WithArgs("evt_refunded", "pay_1", "payment.refunded", sqlmock.AnyArg(), now, "cus_1").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO webhook_deliveries").WithArgs("evt_returned", "pay_1", "payment.returned", sqlmock.AnyArg(), now, "cus_1").WillReturnResult(sqlmock.NewResult(0, 1))
 
 	if err := EventHandler()(context.Background(), tx, event); err != nil {
 		t.Fatal(err)

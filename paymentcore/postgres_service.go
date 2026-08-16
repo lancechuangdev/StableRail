@@ -199,7 +199,7 @@ func (s *PostgresService) Process(ctx context.Context, paymentID string) error {
 }
 
 func (s *PostgresService) Settle(ctx context.Context, paymentID string) error {
-	return s.transition(ctx, paymentID, StateProcessing, StateSettled, "settled", "payment settled successfully", "payment settled")
+	return s.transition(ctx, paymentID, StateProcessing, StateSucceeded, "succeeded", "payment succeeded", "payment succeeded")
 }
 
 // GetPayment returns the durable payment and its history.
@@ -315,7 +315,7 @@ func transitionAccounts(state PaymentState) (string, string, error) {
 	switch state {
 	case StateProcessing:
 		return CashOperatingAccount, SettlementAccount, nil
-	case StateSettled:
+	case StateSucceeded:
 		return SettlementAccount, CashOperatingAccount, nil
 	default:
 		return "", "", fmt.Errorf("no ledger posting defined for state %s", state)
@@ -381,8 +381,8 @@ func paymentEventVersion(eventType string) int {
 		return eventbus.PaymentCreatedVersion
 	case "payment.processing":
 		return eventbus.PaymentProcessingVersion
-	case "payment.settled":
-		return eventbus.PaymentSettledVersion
+	case "payment.succeeded":
+		return eventbus.PaymentSucceededVersion
 	default:
 		panic("unknown payment event type: " + eventType)
 	}

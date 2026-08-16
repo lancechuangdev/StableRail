@@ -118,7 +118,7 @@ func find(ctx context.Context, tx *sql.Tx) ([]Finding, error) {
 			SELECT status,provider_reference FROM settlement_submissions
 			WHERE payment_id=p.id AND provider<>'blindpay' ORDER BY created_at DESC LIMIT 1
 		) s ON true
-		WHERE s.status IS NOT NULL AND ((p.state='settled' AND s.status<>'succeeded') OR (s.status='succeeded' AND p.state<>'settled'))`)
+		WHERE s.status IS NOT NULL AND ((p.state='succeeded' AND s.status<>'succeeded') OR (s.status='succeeded' AND p.state<>'succeeded'))`)
 	if err != nil {
 		return nil, fmt.Errorf("compare provider settlements: %w", err)
 	}
@@ -138,8 +138,8 @@ func find(ctx context.Context, tx *sql.Tx) ([]Finding, error) {
 	}
 	rows, err = tx.QueryContext(ctx, `SELECT p.id,p.state,b.provider_status,COALESCE(b.provider_payout_id,'')
 		FROM payments p JOIN blindpay_payouts b ON b.payment_id=p.id
-		WHERE (b.provider_status='completed' AND p.state<>'settled')
-		   OR (b.provider_status='refunded' AND p.state<>'refunded')
+		WHERE (b.provider_status='completed' AND p.state<>'succeeded')
+		   OR (b.provider_status='refunded' AND p.state<>'returned')
 		   OR (b.provider_status='failed' AND p.state<>'failed')`)
 	if err != nil {
 		return nil, fmt.Errorf("compare BlindPay payout states: %w", err)

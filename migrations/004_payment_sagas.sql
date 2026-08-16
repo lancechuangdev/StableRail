@@ -4,8 +4,8 @@ CREATE TABLE payment_sagas (
     correlation_id TEXT NOT NULL UNIQUE,
     state          TEXT NOT NULL CHECK (state IN (
         'awaiting_policy', 'awaiting_ledger', 'awaiting_settlement', 'on_hold', 'manual_review',
-        'releasing_ledger', 'refunding', 'recording_refund', 'settling_payment', 'completed',
-        'ledger_released', 'refunded', 'failed'
+        'releasing_ledger', 'returning', 'settling_payment', 'completed',
+        'ledger_released', 'returned', 'failed'
     )),
     deadline_at    TIMESTAMPTZ,
     failure_reason TEXT,
@@ -20,7 +20,7 @@ CREATE INDEX payment_sagas_deadline_idx
 CREATE TABLE saga_manual_review_actions (
     id          BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     saga_id     TEXT NOT NULL REFERENCES payment_sagas(id),
-    action      TEXT NOT NULL CHECK (action IN ('retry','complete','fail','refund')),
+    action      TEXT NOT NULL CHECK (action IN ('retry','complete','fail','return')),
     operator    TEXT NOT NULL,
     note        TEXT NOT NULL,
     occurred_at TIMESTAMPTZ NOT NULL

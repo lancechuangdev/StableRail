@@ -43,8 +43,8 @@ func NewOperatorHandler(token string, resolver ManualReviewResolver) (http.Handl
 			return
 		}
 		input.Action, input.Operator, input.Note = strings.TrimSpace(input.Action), strings.TrimSpace(input.Operator), strings.TrimSpace(input.Note)
-		if input.Operator == "" || input.Note == "" || (input.Action != "retry" && input.Action != "complete" && input.Action != "fail" && input.Action != "refund") {
-			problem(w, http.StatusBadRequest, "action must be retry, complete, fail, or refund; operator and note are required")
+		if input.Operator == "" || input.Note == "" || (input.Action != "retry" && input.Action != "complete" && input.Action != "fail" && input.Action != "return") {
+			problem(w, http.StatusBadRequest, "action must be retry, complete, fail, or return; operator and note are required")
 			return
 		}
 		if err := resolver.ResolveManualReview(r.Context(), r.PathValue("id"), input.Action, input.Operator, input.Note); err != nil {

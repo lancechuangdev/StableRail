@@ -28,14 +28,12 @@ func TestWorkflowTransitions(t *testing.T) {
 		{StateAwaitingSettlement, "settlement.on_hold", StateOnHold, ""},
 		{StateOnHold, "settlement.completed", StateSettlingPayment, "payment.settle"},
 		{StateOnHold, "settlement.failed", StateReleasingLedger, "ledger.release"},
-		{StateOnHold, "settlement.refunded", StateRefunding, "ledger.release"},
-		{StateSettlingPayment, "payment.settled", StateCompleted, ""},
+		{StateOnHold, "settlement.returned", StateReturning, "ledger.release"},
+		{StateSettlingPayment, "payment.succeeded", StateCompleted, ""},
 		{StateAwaitingSettlement, "settlement.failed", StateReleasingLedger, "ledger.release"},
-		{StateAwaitingSettlement, "settlement.refunded", StateRefunding, "ledger.release"},
-		{StateCompleted, "settlement.refunded", StateRecordingRefund, "ledger.record_refund"},
+		{StateAwaitingSettlement, "settlement.returned", StateReturning, "ledger.release"},
 		{StateReleasingLedger, "ledger.released", StateLedgerReleased, "payment.fail"},
-		{StateRefunding, "ledger.released", StateRefunded, "payment.refund"},
-		{StateRecordingRefund, "ledger.refund_recorded", StateRefunded, "payment.refund"},
+		{StateReturning, "ledger.released", StateReturned, "payment.return"},
 	}
 	for _, tt := range tests {
 		next, command, _, _, err := c.transition(tt.state, tt.event, "")
@@ -133,7 +131,7 @@ func TestExpireOnceCompensatesSettlementTimeout(t *testing.T) {
 	}
 }
 
-func TestExpireOnceRetriesRefundWhoseLedgerReleaseTimedOut(t *testing.T) {
+func TestExpireOnceRetriesReturnWhoseLedgerReleaseTimedOut(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatal(err)
@@ -144,9 +142,9 @@ func TestExpireOnceRetriesRefundWhoseLedgerReleaseTimedOut(t *testing.T) {
 	mock.ExpectBegin()
 	mock.ExpectQuery("SELECT id, payment_id, correlation_id, state").WithArgs(now, 10).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "payment_id", "correlation_id", "state"}).
-			AddRow("saga-1", "pay-1", "corr-1", StateRefunding))
+			AddRow("saga-1", "pay-1", "corr-1", StateReturning))
 	mock.ExpectExec("UPDATE payment_sagas").
-		WithArgs(StateRefunding, now.Add(time.Minute), "refunding timeout", now, "saga-1").
+		WithArgs(StateReturning, now.Add(time.Minute), "returning timeout", now, "saga-1").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO outbox_events").
 		WithArgs("evt_1", CommandTopic, "ledger.release", eventbus.LedgerReleaseVersion, "pay-1", sqlmock.AnyArg(), now).
@@ -161,35 +159,7 @@ func TestExpireOnceRetriesRefundWhoseLedgerReleaseTimedOut(t *testing.T) {
 	}
 }
 
-func TestExpireOnceRetriesPostSettlementRefundAccounting(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	c := testCoordinator(t, db)
-	now := c.now()
-	mock.ExpectBegin()
-	mock.ExpectQuery("SELECT id, payment_id, correlation_id, state").WithArgs(now, 10).
-		WillReturnRows(sqlmock.NewRows([]string{"id", "payment_id", "correlation_id", "state"}).
-			AddRow("saga-1", "pay-1", "corr-1", StateRecordingRefund))
-	mock.ExpectExec("UPDATE payment_sagas").
-		WithArgs(StateRecordingRefund, now.Add(time.Minute), "recording_refund timeout", now, "saga-1").
-		WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectExec("INSERT INTO outbox_events").
-		WithArgs("evt_1", CommandTopic, "ledger.record_refund", eventbus.LedgerRecordRefundVersion, "pay-1", sqlmock.AnyArg(), now).
-		WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectCommit()
-	count, err := c.ExpireOnce(context.Background())
-	if err != nil || count != 1 {
-		t.Fatalf("ExpireOnce = (%d, %v)", count, err)
-	}
-	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestResolveManualReviewRefundsPayment(t *testing.T) {
+func TestResolveManualReviewReturnsPayment(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatal(err)
@@ -200,14 +170,14 @@ func TestResolveManualReviewRefundsPayment(t *testing.T) {
 	mock.ExpectBegin()
 	mock.ExpectQuery("SELECT id,correlation_id,state FROM payment_sagas").WithArgs("pay-1").
 		WillReturnRows(sqlmock.NewRows([]string{"id", "correlation_id", "state"}).AddRow("saga-1", "corr-1", StateManualReview))
-	mock.ExpectExec("INSERT INTO saga_manual_review_actions").WithArgs("saga-1", "refund", "alice", "provider confirmed refund", now).
+	mock.ExpectExec("INSERT INTO saga_manual_review_actions").WithArgs("saga-1", "return", "alice", "provider confirmed return", now).
 		WillReturnResult(sqlmock.NewResult(1, 1))
-	mock.ExpectExec("UPDATE payment_sagas").WithArgs(StateRefunding, now.Add(time.Minute), "provider confirmed refund", now, "saga-1").
+	mock.ExpectExec("UPDATE payment_sagas").WithArgs(StateReturning, now.Add(time.Minute), "provider confirmed return", now, "saga-1").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO outbox_events").WithArgs("evt_1", CommandTopic, "ledger.release", eventbus.LedgerReleaseVersion, "pay-1", sqlmock.AnyArg(), now).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
-	if err := c.ResolveManualReview(context.Background(), "pay-1", "refund", "alice", "provider confirmed refund"); err != nil {
+	if err := c.ResolveManualReview(context.Background(), "pay-1", "return", "alice", "provider confirmed return"); err != nil {
 		t.Fatal(err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {

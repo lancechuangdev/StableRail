@@ -26,14 +26,14 @@ func TestOperatorHandlerResolvesManualReview(t *testing.T) {
 	}
 	mux := http.NewServeMux()
 	mux.Handle("POST /v1/operator/payments/{id}/manual-review", h)
-	req := httptest.NewRequest(http.MethodPost, "/v1/operator/payments/pay_1/manual-review", strings.NewReader(`{"action":"refund","operator":"alice","note":"provider confirmed refund"}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/operator/payments/pay_1/manual-review", strings.NewReader(`{"action":"return","operator":"alice","note":"provider confirmed return"}`))
 	req.Header.Set("Authorization", "Bearer secret")
 	res := httptest.NewRecorder()
 	mux.ServeHTTP(res, req)
 	if res.Code != http.StatusAccepted {
 		t.Fatalf("status=%d body=%s", res.Code, res.Body.String())
 	}
-	if resolver.paymentID != "pay_1" || resolver.action != "refund" || resolver.operator != "alice" || resolver.note != "provider confirmed refund" {
+	if resolver.paymentID != "pay_1" || resolver.action != "return" || resolver.operator != "alice" || resolver.note != "provider confirmed return" {
 		t.Fatalf("unexpected resolution: %+v", resolver)
 	}
 }

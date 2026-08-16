@@ -71,7 +71,7 @@ func TestPayoutWebhookServicePersistsCompletionAndEnqueuesSagaEvent(t *testing.T
 	}
 }
 
-func TestPayoutWebhookServiceEmitsRefundedOutcome(t *testing.T) {
+func TestPayoutWebhookServiceMapsRefundedToReturnedOutcome(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatal(err)
@@ -86,7 +86,7 @@ func TestPayoutWebhookServiceEmitsRefundedOutcome(t *testing.T) {
 	mock.ExpectQuery("SELECT payment_id,provider_status FROM blindpay_payouts").WillReturnRows(sqlmock.NewRows([]string{"payment_id", "provider_status"}).AddRow("pay_test", "processing"))
 	mock.ExpectExec("UPDATE blindpay_payouts SET provider_status").WithArgs("refunded", body, now, "pay_test").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectQuery("SELECT correlation_id FROM payment_sagas").WillReturnRows(sqlmock.NewRows([]string{"correlation_id"}).AddRow("corr_test"))
-	mock.ExpectExec("INSERT INTO outbox_events").WithArgs("evt_blindpay_msg_refund", paymentcore.PaymentEventsTopic, "settlement.refunded", 1, "pay_test", sqlmock.AnyArg(), now).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO outbox_events").WithArgs("evt_blindpay_msg_refund", paymentcore.PaymentEventsTopic, "settlement.returned", 1, "pay_test", sqlmock.AnyArg(), now).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 
 	if err := service.Process(context.Background(), "msg_refund", body); err != nil {
@@ -97,9 +97,9 @@ func TestPayoutWebhookServiceEmitsRefundedOutcome(t *testing.T) {
 	}
 }
 
-func TestPayoutStatusCanAdvanceCompletedToRefunded(t *testing.T) {
-	if !payoutStatusCanAdvance("completed", "refunded") {
-		t.Fatal("completed payout must be allowed to advance to refunded")
+func TestPayoutTerminalStatusesCannotAdvance(t *testing.T) {
+	if payoutStatusCanAdvance("completed", "refunded") {
+		t.Fatal("completed payout must not advance to refunded")
 	}
 	if payoutStatusCanAdvance("completed", "failed") {
 		t.Fatal("completed payout must not regress to failed")

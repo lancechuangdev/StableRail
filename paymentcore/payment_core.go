@@ -18,9 +18,9 @@ type PaymentState string
 const (
 	StateCreated    PaymentState = "created"
 	StateProcessing PaymentState = "processing"
-	StateSettled    PaymentState = "settled"
+	StateSucceeded  PaymentState = "succeeded"
 	StateFailed     PaymentState = "failed"
-	StateRefunded   PaymentState = "refunded"
+	StateReturned   PaymentState = "returned"
 )
 
 // Payment represents a payment intent and its ledger state.
@@ -193,14 +193,14 @@ func (s *Service) Settle(paymentID string) error {
 	}
 
 	now := time.Now().UTC()
-	payment.State = StateSettled
+	payment.State = StateSucceeded
 	payment.UpdatedAt = now
 	payment.LedgerEntries = append(payment.LedgerEntries,
-		newLedgerLine(payment, "settled", SettlementAccount, EntryDebit, now),
-		newLedgerLine(payment, "settled", CashOperatingAccount, EntryCredit, now),
+		newLedgerLine(payment, "succeeded", SettlementAccount, EntryDebit, now),
+		newLedgerLine(payment, "succeeded", CashOperatingAccount, EntryCredit, now),
 	)
-	payment.AuditLog = append(payment.AuditLog, AuditEvent{Event: "settled", Message: "payment settled successfully", At: now})
-	payment.Timeline = append(payment.Timeline, TimelineEntry{State: StateSettled, At: now, Note: "payment settled"})
+	payment.AuditLog = append(payment.AuditLog, AuditEvent{Event: "succeeded", Message: "payment succeeded", At: now})
+	payment.Timeline = append(payment.Timeline, TimelineEntry{State: StateSucceeded, At: now, Note: "payment succeeded"})
 	return nil
 }
 

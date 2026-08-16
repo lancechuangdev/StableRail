@@ -169,7 +169,7 @@ func payoutStatusCanAdvance(current, next string) bool {
 		return false
 	}
 	if current == "completed" {
-		return next == "refunded"
+		return false
 	}
 	return payoutStatusRank(next) > payoutStatusRank(current)
 }
@@ -263,7 +263,7 @@ func (s *PayoutWebhookService) enqueueSagaResult(ctx context.Context, tx *sql.Tx
 	if status == "completed" {
 		eventType, version, reason = "settlement.completed", eventbus.SettlementCompletedVersion, ""
 	} else if status == "refunded" {
-		eventType, version = "settlement.refunded", eventbus.SettlementRefundedVersion
+		eventType, version = "settlement.returned", eventbus.SettlementReturnedVersion
 	} else if status == "on_hold" {
 		eventType, version, reason = "settlement.on_hold", eventbus.SettlementOnHoldVersion, "settlement on hold"
 	}

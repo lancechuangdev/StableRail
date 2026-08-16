@@ -4,7 +4,7 @@ CREATE TABLE payments (
     currency            TEXT NOT NULL,
     amount_minor        BIGINT NOT NULL CHECK (amount_minor > 0),
     tenant_id          TEXT NOT NULL,
-    state               TEXT NOT NULL CHECK (state IN ('created', 'processing', 'settled', 'failed', 'refunded')),
+    state               TEXT NOT NULL CHECK (state IN ('created', 'processing', 'succeeded', 'failed', 'returned')),
     idempotency_key     TEXT NOT NULL UNIQUE,
     created_at          TIMESTAMPTZ NOT NULL,
     updated_at          TIMESTAMPTZ NOT NULL

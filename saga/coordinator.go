@@ -30,13 +30,12 @@ const (
 	StateOnHold             State = "on_hold"
 	StateManualReview       State = "manual_review"
 	StateReleasingLedger    State = "releasing_ledger"
-	StateRefunding          State = "refunding"
-	StateRecordingRefund    State = "recording_refund"
+	StateReturning          State = "returning"
 	StateSettlingPayment    State = "settling_payment"
 	StateCompleted          State = "completed"
 	StateLedgerReleased     State = "ledger_released"
 	StateFailed             State = "failed"
-	StateRefunded           State = "refunded"
+	StateReturned           State = "returned"
 )
 
 type Config struct {
@@ -186,22 +185,18 @@ func (c *Coordinator) transition(state State, eventType, reason string) (State, 
 		return StateSettlingPayment, "payment.settle", c.ledgerTimeout, "", nil
 	case state == StateOnHold && eventType == "settlement.failed":
 		return StateReleasingLedger, "ledger.release", c.ledgerTimeout, reasonOrDefault(reason, "settlement failed"), nil
-	case state == StateOnHold && eventType == "settlement.refunded":
-		return StateRefunding, "ledger.release", c.ledgerTimeout, reasonOrDefault(reason, "settlement refunded"), nil
-	case state == StateSettlingPayment && eventType == "payment.settled":
+	case state == StateOnHold && eventType == "settlement.returned":
+		return StateReturning, "ledger.release", c.ledgerTimeout, reasonOrDefault(reason, "settlement funds returned"), nil
+	case state == StateSettlingPayment && eventType == "payment.succeeded":
 		return StateCompleted, "", 0, "", nil
 	case state == StateAwaitingSettlement && eventType == "settlement.failed":
 		return StateReleasingLedger, "ledger.release", c.ledgerTimeout, reasonOrDefault(reason, "settlement failed"), nil
-	case state == StateAwaitingSettlement && eventType == "settlement.refunded":
-		return StateRefunding, "ledger.release", c.ledgerTimeout, reasonOrDefault(reason, "settlement refunded"), nil
-	case state == StateCompleted && eventType == "settlement.refunded":
-		return StateRecordingRefund, "ledger.record_refund", c.ledgerTimeout, reasonOrDefault(reason, "settlement refunded"), nil
+	case state == StateAwaitingSettlement && eventType == "settlement.returned":
+		return StateReturning, "ledger.release", c.ledgerTimeout, reasonOrDefault(reason, "settlement funds returned"), nil
 	case state == StateReleasingLedger && eventType == "ledger.released":
 		return StateLedgerReleased, "payment.fail", 0, reason, nil
-	case state == StateRefunding && eventType == "ledger.released":
-		return StateRefunded, "payment.refund", 0, reason, nil
-	case state == StateRecordingRefund && eventType == "ledger.refund_recorded":
-		return StateRefunded, "payment.refund", 0, reason, nil
+	case state == StateReturning && eventType == "ledger.released":
+		return StateReturned, "payment.return", 0, reason, nil
 	default:
 		return "", "", 0, "", fmt.Errorf("event %s is invalid while saga is %s", eventType, state)
 	}
@@ -254,12 +249,10 @@ func sagaCommandVersion(command string) int {
 		return eventbus.PaymentFailVersion
 	case "payment.settle":
 		return eventbus.PaymentSettleVersion
-	case "payment.refund":
-		return eventbus.PaymentRefundVersion
+	case "payment.return":
+		return eventbus.PaymentReturnVersion
 	case "ledger.release":
 		return eventbus.LedgerReleaseVersion
-	case "ledger.record_refund":
-		return eventbus.LedgerRecordRefundVersion
 	default:
 		panic("unknown saga command type: " + command)
 	}
@@ -301,10 +294,10 @@ func (c *Coordinator) ResolveManualReview(ctx context.Context, paymentID, action
 		next, command, timeout = StateSettlingPayment, "payment.settle", c.ledgerTimeout
 	case "fail":
 		next, command, timeout = StateReleasingLedger, "ledger.release", c.ledgerTimeout
-	case "refund":
-		next, command, timeout = StateRefunding, "ledger.release", c.ledgerTimeout
+	case "return":
+		next, command, timeout = StateReturning, "ledger.release", c.ledgerTimeout
 	default:
-		return errors.New("manual review action must be retry, complete, fail, or refund")
+		return errors.New("manual review action must be retry, complete, fail, or return")
 	}
 	now := c.now()
 	if _, err := tx.ExecContext(ctx, `INSERT INTO saga_manual_review_actions(saga_id,action,operator,note,occurred_at) VALUES($1,$2,$3,$4,$5)`, sagaID, action, operator, note, now); err != nil {
@@ -330,7 +323,7 @@ func (c *Coordinator) ExpireOnce(ctx context.Context) (int, error) {
 	now := c.now()
 	rows, err := tx.QueryContext(ctx, `SELECT id, payment_id, correlation_id, state
 		FROM payment_sagas WHERE deadline_at <= $1
-		  AND state IN ('awaiting_policy', 'awaiting_ledger', 'awaiting_settlement', 'on_hold', 'releasing_ledger', 'refunding', 'recording_refund', 'settling_payment')
+		  AND state IN ('awaiting_policy', 'awaiting_ledger', 'awaiting_settlement', 'on_hold', 'releasing_ledger', 'returning', 'settling_payment')
 		ORDER BY deadline_at FOR UPDATE SKIP LOCKED LIMIT $2`, now, c.timeoutBatchSize)
 	if err != nil {
 		return 0, fmt.Errorf("claim timed out payment sagas: %w", err)
@@ -365,11 +358,8 @@ func (c *Coordinator) ExpireOnce(ctx context.Context) (int, error) {
 		if s.state == StateReleasingLedger {
 			next, command = StateFailed, "payment.fail"
 		}
-		if s.state == StateRefunding {
-			next, command, timeout = StateRefunding, "ledger.release", c.ledgerTimeout
-		}
-		if s.state == StateRecordingRefund {
-			next, command, timeout = StateRecordingRefund, "ledger.record_refund", c.ledgerTimeout
+		if s.state == StateReturning {
+			next, command, timeout = StateReturning, "ledger.release", c.ledgerTimeout
 		}
 		if s.state == StateSettlingPayment {
 			next, command, timeout = StateSettlingPayment, "payment.settle", c.ledgerTimeout

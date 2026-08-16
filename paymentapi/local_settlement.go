@@ -25,7 +25,7 @@ func NewLocalSettlementControl(db *sql.DB) (*LocalSettlementControl, error) {
 }
 
 func (c *LocalSettlementControl) Emit(ctx context.Context, paymentID, status, reason string, delay time.Duration) error {
-	eventType := map[string]string{"completed": "settlement.completed", "failed": "settlement.failed", "refunded": "settlement.refunded"}[status]
+	eventType := map[string]string{"completed": "settlement.completed", "failed": "settlement.failed", "refunded": "settlement.returned"}[status]
 	if eventType == "" {
 		return errors.New("status must be completed, failed, or refunded")
 	}
