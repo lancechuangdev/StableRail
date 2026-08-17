@@ -30,7 +30,6 @@ const (
 	FundsStatusReserved  FundsStatus = "reserved"
 	FundsStatusConsumed  FundsStatus = "consumed"
 	FundsStatusReturned  FundsStatus = "returned"
-	FundsStatusUnknown   FundsStatus = "unknown"
 )
 
 // Payment represents a payment intent and its ledger state.

@@ -54,11 +54,6 @@ stateDiagram-v2
         reserved --> consumed: payout succeeded
         reserved --> available: payout failed before capture
         reserved --> returned: provider returned captured funds
-        reserved --> unknown: outcome is ambiguous
-        unknown --> reserved: submission recovered as pending
-        unknown --> consumed: completion confirmed
-        unknown --> available: failure confirmed
-        unknown --> returned: return confirmed
     }
 ```
 
@@ -68,12 +63,24 @@ Common combinations are:
 | --- | --- | --- |
 | `created` | `available` | Recorded but not funded |
 | `processing` | `reserved` | Funds committed while the payout runs |
-| `processing` | `unknown` | Submission outcome requires recovery or reconciliation |
 | `succeeded` | `consumed` | Recipient payout completed |
 | `failed` | `available` | Payout failed and funds are available |
 | `failed` | `returned` | Payout failed after capture and the provider returned the funds |
 
-BlindPay's external `refunded` payout status maps to `payment_status=failed` and `funds_status=returned`. Merchant-issued refunds require separate linked refund records and are not currently implemented.
+Before success, BlindPay's external `refunded` payout status maps to `payment_status=failed` and `funds_status=returned`. After success, it creates a separate `payment_returns` record and reversal journal while the original payment remains `payment_status=succeeded` and `funds_status=consumed`.
+
+An ambiguous provider submission remains `payment_status=processing` and `funds_status=reserved`. The uncertainty is recorded on `blindpay_payouts.provider_status=unknown` until idempotent recovery or a webhook establishes the outcome.
+
+### Post-success returns
+
+A bank or provider can return funds after a payout was already confirmed. StableRail records that as a separate financial operation:
+
+```text
+Payment: created -> processing -> succeeded
+Return:  created -> processing -> succeeded | failed
+```
+
+Returns support only `created`, `processing`, `succeeded`, and `failed`. When a provider webhook reports a return that has already completed externally, StableRail may create the return directly as `succeeded`. The return journal debits `cash:operating` for the asset received back and credits `settlement:payable` to restore the obligation. The original payment is not rewritten. StableRail emits `payment.return.succeeded` for tenant notification. Merchant-issued refunds require a separate linked refund workflow and are not currently implemented.
 
 ## Saga lifecycle
 
@@ -199,7 +206,7 @@ Tenant endpoints require `Authorization: Bearer <api-key>`. Operator endpoints a
 
 ## Settlement Providers
 
-The runtime includes a deterministic mock settlement provider for local development and a BlindPay managed-wallet integration with provider-bound quotes, durable payout submission, signed webhooks, compliance holds, reconciliation, and ambiguous-outcome recovery. BlindPay's provider status `refunded` maps to a failed StableRail payment with returned funds; it is not a merchant-initiated refund.
+The runtime includes a deterministic mock settlement provider for local development and a BlindPay managed-wallet integration with provider-bound quotes, durable payout submission, signed webhooks, compliance holds, reconciliation, and ambiguous-outcome recovery. BlindPay's provider status `refunded` maps either to a failed payment with returned funds or, if completion was already recorded, to a separate post-success return. It is not a merchant-initiated refund.
 
 Configure the BlindPay provider with:
 

@@ -10,6 +10,7 @@ import (
 
 	"github.com/DATA-DOG/go-sqlmock"
 
+	"stablerail/eventbus"
 	"stablerail/paymentcore"
 )
 
@@ -97,15 +98,51 @@ func TestPayoutWebhookServiceMapsRefundedToReturnedOutcome(t *testing.T) {
 	}
 }
 
-func TestPayoutTerminalStatusesCannotAdvance(t *testing.T) {
-	if payoutStatusCanAdvance("completed", "refunded") {
-		t.Fatal("completed payout must not advance to refunded")
+func TestCompletedPayoutCanAdvanceOnlyToRefunded(t *testing.T) {
+	if !payoutStatusCanAdvance("completed", "refunded") {
+		t.Fatal("completed payout must allow a later provider return")
 	}
 	if payoutStatusCanAdvance("completed", "failed") {
 		t.Fatal("completed payout must not regress to failed")
 	}
 	if payoutStatusCanAdvance("refunded", "completed") {
 		t.Fatal("refunded payout must be terminal")
+	}
+}
+
+func TestPayoutWebhookRecordsPostSuccessReturnWithoutChangingPayment(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	service, _ := NewPayoutWebhookService(db)
+	now := time.Date(2026, time.August, 16, 20, 0, 0, 0, time.UTC)
+	service.now = func() time.Time { return now }
+	body := []byte(`{"webhook_event":"payout.complete","id":"po_test","status":"refunded"}`)
+	mock.ExpectBegin()
+	mock.ExpectExec("INSERT INTO blindpay_webhook_events").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery("SELECT payment_id,provider_status FROM blindpay_payouts").WillReturnRows(sqlmock.NewRows([]string{"payment_id", "provider_status"}).AddRow("pay_test", "completed"))
+	mock.ExpectExec("UPDATE blindpay_payouts SET provider_status").WithArgs("refunded", body, now, "pay_test").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery("SELECT payment_status,funds_status,amount_minor,currency").WithArgs("pay_test").WillReturnRows(sqlmock.NewRows([]string{"payment_status", "funds_status", "amount_minor", "currency"}).AddRow("succeeded", "consumed", 2500, "USD"))
+	mock.ExpectExec("INSERT INTO ledger_transactions").WithArgs("jrn_ret_blindpay_msg_return", "pay_test", now).WillReturnResult(sqlmock.NewResult(0, 1))
+	for _, line := range []struct{ id, account, side string }{
+		{"jrn_ret_blindpay_msg_return:debit", "cash:operating", "debit"},
+		{"jrn_ret_blindpay_msg_return:credit", "settlement:payable", "credit"},
+	} {
+		mock.ExpectExec("INSERT INTO ledger_entries").WithArgs(line.id, "jrn_ret_blindpay_msg_return", line.account, line.side, int64(2500), "USD").WillReturnResult(sqlmock.NewResult(0, 1))
+	}
+	mock.ExpectExec("INSERT INTO payment_returns").WithArgs("ret_blindpay_msg_return", "pay_test", "blindpay", "msg_return", int64(2500), "USD", "provider returned funds after completed payout", "jrn_ret_blindpay_msg_return", now).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO payment_audit_events").WithArgs("pay_test", "provider returned funds after completed payout", now).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO payment_timeline_entries").WithArgs("pay_test", "provider returned funds after completed payout", now).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO outbox_events").WithArgs("evt_blindpay_msg_return", paymentcore.PaymentEventsTopic, eventbus.PaymentReturnSucceededVersion, "pay_test", sqlmock.AnyArg(), now).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	if err := service.Process(context.Background(), "msg_return", body); err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
 	}
 }
 

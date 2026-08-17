@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"stablerail/eventbus"
+	"stablerail/ledger"
 	"stablerail/paymentcore"
 )
 
@@ -140,6 +141,7 @@ func (s *PayoutWebhookService) Process(ctx context.Context, svixID string, raw j
 	if err != nil {
 		return fmt.Errorf("lock BlindPay payout webhook target: %w", err)
 	}
+	postSuccessReturn := current == "completed" && payload.Status == "refunded"
 	if !payoutStatusCanAdvance(current, payload.Status) {
 		if current == payload.Status && isTerminalPayoutStatus(payload.Status) {
 			if err := s.enqueueSagaResult(ctx, tx, svixID, paymentID, payload.Status, now); err != nil {
@@ -151,10 +153,16 @@ func (s *PayoutWebhookService) Process(ctx context.Context, svixID string, raw j
 	if _, err := tx.ExecContext(ctx, `UPDATE blindpay_payouts SET provider_status=$1,provider_payload=$2,updated_at=$3 WHERE payment_id=$4`, payload.Status, raw, now, paymentID); err != nil {
 		return fmt.Errorf("update BlindPay payout status: %w", err)
 	}
-	if payload.Status == "processing" || payload.Status == "on_hold" {
-		if _, err := tx.ExecContext(ctx, `UPDATE payments SET funds_status='reserved',updated_at=$1 WHERE id=$2 AND payment_status='processing' AND funds_status='unknown'`, now, paymentID); err != nil {
-			return fmt.Errorf("restore reserved payment funds status: %w", err)
+	if postSuccessReturn {
+		reason := "provider returned funds after completed payout"
+		returnID := "ret_blindpay_" + svixID
+		if err := ledger.NewPostgresService().RecordReturn(ctx, tx, ledger.ReturnRequest{ID: returnID, PaymentID: paymentID, Provider: "blindpay", ProviderEventID: svixID, Reason: reason, At: now}); err != nil {
+			return fmt.Errorf("record post-success BlindPay return: %w", err)
 		}
+		if err := s.enqueuePaymentReturn(ctx, tx, svixID, returnID, paymentID, reason, now); err != nil {
+			return err
+		}
+		return tx.Commit()
 	}
 	if payload.Status == "completed" || payload.Status == "failed" || payload.Status == "refunded" || payload.Status == "on_hold" {
 		if err := s.enqueueSagaResult(ctx, tx, svixID, paymentID, payload.Status, now); err != nil {
@@ -174,9 +182,21 @@ func payoutStatusCanAdvance(current, next string) bool {
 		return false
 	}
 	if current == "completed" {
-		return false
+		return next == "refunded"
 	}
 	return payoutStatusRank(next) > payoutStatusRank(current)
+}
+
+func (s *PayoutWebhookService) enqueuePaymentReturn(ctx context.Context, tx *sql.Tx, svixID, returnID, paymentID, reason string, now time.Time) error {
+	body, err := json.Marshal(map[string]string{"return_id": returnID, "payment_status": "succeeded", "funds_status": "consumed", "return_status": "succeeded", "reason": reason})
+	if err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO outbox_events(id,topic,event_type,event_version,aggregate_id,aggregate_type,payload,occurred_at) VALUES($1,$2,'payment.return.succeeded',$3,$4,'payment',$5,$6) ON CONFLICT(id) DO NOTHING`, "evt_blindpay_"+svixID, paymentcore.PaymentEventsTopic, eventbus.PaymentReturnSucceededVersion, paymentID, body, now)
+	if err != nil {
+		return fmt.Errorf("enqueue post-success payment return: %w", err)
+	}
+	return nil
 }
 
 func payoutStatusRank(status string) int {

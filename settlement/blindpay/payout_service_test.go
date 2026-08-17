@@ -59,7 +59,7 @@ func TestPayoutServiceCommitsAttemptBeforeManagedWalletSubmission(t *testing.T) 
 	}
 }
 
-func TestPayoutServiceMarksFundsUnknownAfterAmbiguousSubmission(t *testing.T) {
+func TestPayoutServiceKeepsFundsReservedAfterAmbiguousSubmission(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatal(err)
@@ -73,7 +73,6 @@ func TestPayoutServiceMarksFundsUnknownAfterAmbiguousSubmission(t *testing.T) {
 	mock.ExpectExec("INSERT INTO blindpay_payouts").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 	mock.ExpectExec("UPDATE blindpay_payouts SET provider_status").WithArgs("unknown", "connection reset", now, "pay_test").WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectExec("UPDATE payments SET funds_status").WithArgs("unknown", now, "pay_test").WillReturnResult(sqlmock.NewResult(0, 1))
 
 	if _, err := service.SubmitPayment(context.Background(), "pay_test", "idem_test"); !errors.Is(err, ErrPayoutSubmissionUnknown) {
 		t.Fatalf("error=%v, want ErrPayoutSubmissionUnknown", err)

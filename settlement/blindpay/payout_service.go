@@ -208,9 +208,6 @@ func (s *PayoutService) recordError(ctx context.Context, paymentID, status strin
 	if err != nil {
 		return err
 	}
-	if status == "unknown" {
-		return s.setPaymentFundsStatus(ctx, paymentID, "unknown")
-	}
 	return nil
 }
 
