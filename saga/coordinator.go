@@ -184,13 +184,16 @@ func (c *Coordinator) transition(state State, eventType, reason string) (State, 
 	case state == StateOnHold && eventType == "settlement.completed":
 		return StateSettlingPayment, "payment.settle", c.ledgerTimeout, "", nil
 	case state == StateOnHold && eventType == "settlement.failed":
-		return StateReleasingLedger, "ledger.release", c.ledgerTimeout, reasonOrDefault(reason, "settlement failed"), nil
+		return StateFailed, "payment.fail_reserved", 0, reasonOrDefault(reason, "settlement failed"), nil
 	case state == StateOnHold && eventType == "settlement.returned":
 		return StateReturning, "ledger.release", c.ledgerTimeout, reasonOrDefault(reason, "settlement funds returned"), nil
 	case state == StateSettlingPayment && eventType == "payment.succeeded":
 		return StateCompleted, "", 0, "", nil
 	case state == StateAwaitingSettlement && eventType == "settlement.failed":
-		return StateReleasingLedger, "ledger.release", c.ledgerTimeout, reasonOrDefault(reason, "settlement failed"), nil
+		if reason == "submission_failed" {
+			return StateFailed, "payment.fail", 0, reason, nil
+		}
+		return StateFailed, "payment.fail_reserved", 0, reasonOrDefault(reason, "settlement failed"), nil
 	case state == StateAwaitingSettlement && eventType == "settlement.returned":
 		return StateReturning, "ledger.release", c.ledgerTimeout, reasonOrDefault(reason, "settlement funds returned"), nil
 	case state == StateReleasingLedger && eventType == "ledger.released":
@@ -245,7 +248,7 @@ func sagaCommandVersion(command string) int {
 		return eventbus.LedgerReserveVersion
 	case "settlement.execute":
 		return eventbus.SettlementExecuteVersion
-	case "payment.fail":
+	case "payment.fail", "payment.fail_reserved":
 		return eventbus.PaymentFailVersion
 	case "payment.settle":
 		return eventbus.PaymentSettleVersion
@@ -293,7 +296,7 @@ func (c *Coordinator) ResolveManualReview(ctx context.Context, paymentID, action
 	case "complete":
 		next, command, timeout = StateSettlingPayment, "payment.settle", c.ledgerTimeout
 	case "fail":
-		next, command, timeout = StateReleasingLedger, "ledger.release", c.ledgerTimeout
+		next, command, timeout = StateFailed, "payment.fail_reserved", 0
 	case "return":
 		next, command, timeout = StateReturning, "ledger.release", c.ledgerTimeout
 	default:
@@ -350,7 +353,7 @@ func (c *Coordinator) ExpireOnce(ctx context.Context) (int, error) {
 	for _, s := range sagas {
 		next, command, timeout := StateFailed, "payment.fail", time.Duration(0)
 		if s.state == StateAwaitingSettlement {
-			next, command, timeout = StateReleasingLedger, "ledger.release", c.ledgerTimeout
+			next, command, timeout = StateFailed, "payment.fail_reserved", 0
 		}
 		if s.state == StateOnHold {
 			next, command, timeout = StateManualReview, "", 0

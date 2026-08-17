@@ -29,7 +29,7 @@ tenant notification code paths.
 | BLINDPAY-002 | Payment idempotency and conflict detection with a bound payout quote |
 | BLINDPAY-003 | Tenant isolation for BlindPay-backed payments |
 | BLINDPAY-004 | Policy rejection before BlindPay submission |
-| BLINDPAY-005 | Failed payout webhook and compensating ledger release |
+| BLINDPAY-005 | Failed payout webhook preserves the reservation until the funds disposition is confirmed |
 | BLINDPAY-006 | A post-success BlindPay `refunded` event creates a separate return and reversal journal without changing the payment outcome |
 | BLINDPAY-007 | On-hold payout entering and leaving manual review |
 | BLINDPAY-008 | Independent signed tenant lifecycle webhooks |

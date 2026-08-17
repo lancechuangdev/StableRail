@@ -27,10 +27,10 @@ func TestWorkflowTransitions(t *testing.T) {
 		{StateAwaitingSettlement, "settlement.completed", StateSettlingPayment, "payment.settle"},
 		{StateAwaitingSettlement, "settlement.on_hold", StateOnHold, ""},
 		{StateOnHold, "settlement.completed", StateSettlingPayment, "payment.settle"},
-		{StateOnHold, "settlement.failed", StateReleasingLedger, "ledger.release"},
+		{StateOnHold, "settlement.failed", StateFailed, "payment.fail_reserved"},
 		{StateOnHold, "settlement.returned", StateReturning, "ledger.release"},
 		{StateSettlingPayment, "payment.succeeded", StateCompleted, ""},
-		{StateAwaitingSettlement, "settlement.failed", StateReleasingLedger, "ledger.release"},
+		{StateAwaitingSettlement, "settlement.failed", StateFailed, "payment.fail_reserved"},
 		{StateAwaitingSettlement, "settlement.returned", StateReturning, "ledger.release"},
 		{StateReleasingLedger, "ledger.released", StateLedgerReleased, "payment.fail"},
 		{StateReturning, "ledger.released", StateReturned, "payment.return"},
@@ -103,7 +103,7 @@ func TestHandleRejectsMismatchedCorrelation(t *testing.T) {
 	}
 }
 
-func TestExpireOnceCompensatesSettlementTimeout(t *testing.T) {
+func TestExpireOncePreservesReservedFundsAfterSettlementTimeout(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatalf("create SQL mock: %v", err)
@@ -116,10 +116,10 @@ func TestExpireOnceCompensatesSettlementTimeout(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"id", "payment_id", "correlation_id", "state"}).
 			AddRow("saga-1", "pay-1", "corr-1", StateAwaitingSettlement))
 	mock.ExpectExec("UPDATE payment_sagas").
-		WithArgs(StateReleasingLedger, now.Add(time.Minute), "awaiting_settlement timeout", now, "saga-1").
+		WithArgs(StateFailed, nil, "awaiting_settlement timeout", now, "saga-1").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO outbox_events").
-		WithArgs("evt_1", CommandTopic, "ledger.release", eventbus.LedgerReleaseVersion, "pay-1", sqlmock.AnyArg(), now).
+		WithArgs("evt_1", CommandTopic, "payment.fail_reserved", eventbus.PaymentFailVersion, "pay-1", sqlmock.AnyArg(), now).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 	count, err := c.ExpireOnce(context.Background())

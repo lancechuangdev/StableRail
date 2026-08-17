@@ -136,9 +136,11 @@ func (h *CommandHandler) Handle(ctx context.Context, tx *sql.Tx, event eventbus.
 			return err
 		}
 		return h.enqueueReply(ctx, tx, event, payload, "payment.succeeded")
-	case "payment.fail", "payment.return":
+	case "payment.fail", "payment.fail_reserved", "payment.return":
 		status, fundsStatus, eventName, message := paymentcore.PaymentStatusFailed, paymentcore.FundsStatusAvailable, "failed", payload.Reason
-		if event.Type == "payment.return" {
+		if event.Type == "payment.fail_reserved" {
+			fundsStatus = paymentcore.FundsStatusReserved
+		} else if event.Type == "payment.return" {
 			fundsStatus, eventName = paymentcore.FundsStatusReturned, "returned"
 			if message == "" {
 				message = "provider returned payout funds"
@@ -244,7 +246,12 @@ func (h *CommandHandler) enqueueReply(ctx context.Context, tx *sql.Tx, caused ev
 	case "payment.succeeded":
 		bodyFields["payment_status"], bodyFields["funds_status"] = "succeeded", "consumed"
 	case "payment.failed":
-		bodyFields["payment_status"], bodyFields["funds_status"] = "failed", "available"
+		bodyFields["payment_status"] = "failed"
+		if caused.Type == "payment.fail_reserved" {
+			bodyFields["funds_status"] = "reserved"
+		} else {
+			bodyFields["funds_status"] = "available"
+		}
 	case "payment.funds_returned":
 		bodyFields["payment_status"], bodyFields["funds_status"] = "failed", "returned"
 	}

@@ -13,7 +13,7 @@ CREATE TABLE payments (
         (payment_status = 'created' AND funds_status = 'available') OR
         (payment_status = 'processing' AND funds_status = 'reserved') OR
         (payment_status = 'succeeded' AND funds_status = 'consumed') OR
-        (payment_status = 'failed' AND funds_status IN ('available', 'returned'))
+        (payment_status = 'failed' AND funds_status IN ('available', 'reserved', 'returned'))
     )
 );
 

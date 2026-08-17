@@ -65,6 +65,7 @@ Common combinations are:
 | `processing` | `reserved` | Funds committed while the payout runs |
 | `succeeded` | `consumed` | Recipient payout completed |
 | `failed` | `available` | Payout failed and funds are available |
+| `failed` | `reserved` | Payout failed but the funds disposition is unresolved |
 | `failed` | `returned` | Payout failed after capture and the provider returned the funds |
 
 Before success, BlindPay's external `refunded` payout status maps to `payment_status=failed` and `funds_status=returned`. After success, it creates a separate `payment_returns` record and reversal journal while the original payment remains `payment_status=succeeded` and `funds_status=consumed`.
