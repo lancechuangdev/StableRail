@@ -127,6 +127,22 @@ return that arrives after a reserved-funds failure was already recorded.
 
 Timeout handling is conservative: settlement timeouts fail the payment but preserve its reservation, compliance timeouts require manual review, and ambiguous submissions remain in processing until recovery or reconciliation establishes an outcome. A reservation becomes available only after a confirmed pre-capture failure, and becomes returned only after the provider confirms the funds came back.
 
+## Pay-ins
+
+Pay-ins model inbound fiat independently from outbound payments. Create a quote
+with `POST /v1/payin-quotes`, then consume it with `POST /v1/payins`. The quote
+selects exactly one managed or blockchain wallet destination and locks the bank
+payment method, amounts, fees, currencies, and expiry. Creating the pay-in
+returns provider instructions such as an ACH memo, bank details, Pix code, or
+CLABE; retrieve current state with `GET /v1/payins/{id}`.
+
+The generic `payin.Provider` boundary supports both the deterministic local mock
+and BlindPay's `/payin-quotes` plus `/payins/evm` APIs. Verified `payin.*`
+webhooks advance `processing | on_hold` to `succeeded | failed | refunded`.
+Successful inbound settlement debits `cash:operating` and credits
+`settlement:payable`; a later provider refund posts the inverse journal. Early
+webhooks are retained and reconciled after the local pay-in becomes visible.
+
 ## Quick start
 
 Requirements: Go, Docker, and Docker Compose.

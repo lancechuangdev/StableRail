@@ -11,7 +11,7 @@ import (
 	"strings"
 
 	"stablerail/paymentcore"
-	"stablerail/settlement/blindpay"
+	"stablerail/settlement"
 )
 
 type PaymentStore interface {
@@ -26,17 +26,13 @@ type DestinationPaymentStore interface {
 }
 type Health interface{ PingContext(context.Context) error }
 
-type BlindPayPayoutQuoteService interface {
-	Create(context.Context, blindpay.PayoutQuoteRequest) (*blindpay.PayoutQuote, error)
-}
-
 type Handler struct {
 	payments     PaymentStore
 	health       Health
-	payoutQuotes BlindPayPayoutQuoteService
+	payoutQuotes settlement.PayoutProvider
 }
 
-func NewHandler(payments PaymentStore, health Health, payoutQuotes BlindPayPayoutQuoteService) (http.Handler, error) {
+func NewHandler(payments PaymentStore, health Health, payoutQuotes settlement.PayoutProvider) (http.Handler, error) {
 	if payments == nil || health == nil {
 		return nil, errors.New("payment API and health dependencies are required")
 	}
@@ -44,6 +40,7 @@ func NewHandler(payments PaymentStore, health Health, payoutQuotes BlindPayPayou
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/payments", h.create)
 	if payoutQuotes != nil {
+		mux.HandleFunc("POST /v1/payout-quotes", h.createPayoutQuote)
 		mux.HandleFunc("POST /v1/blindpay/payout-quotes", h.createPayoutQuote)
 	}
 	mux.HandleFunc("GET /v1/payments/{id}", h.get)
@@ -215,7 +212,7 @@ func (h *Handler) createPayoutQuote(w http.ResponseWriter, r *http.Request) {
 		}
 		tenantID = authenticated
 	}
-	q, err := h.payoutQuotes.Create(r.Context(), blindpay.PayoutQuoteRequest{IdempotencyKey: key, TenantID: tenantID, BankAccountID: input.BankAccountID, ManagedWalletID: input.ManagedWalletID, DestinationCurrency: input.DestinationCurrency, CurrencyType: input.CurrencyType, CoverFees: input.CoverFees, RequestAmountMinor: input.RequestAmountMinor, PartnerFeeID: input.PartnerFeeID})
+	q, err := h.payoutQuotes.CreatePayoutQuote(r.Context(), settlement.PayoutQuoteRequest{IdempotencyKey: key, TenantID: tenantID, BankAccountID: input.BankAccountID, ManagedWalletID: input.ManagedWalletID, DestinationCurrency: input.DestinationCurrency, CurrencyType: input.CurrencyType, CoverFees: input.CoverFees, RequestAmountMinor: input.RequestAmountMinor, PartnerFeeID: input.PartnerFeeID})
 	if err != nil {
 		problem(w, http.StatusBadRequest, err.Error())
 		return

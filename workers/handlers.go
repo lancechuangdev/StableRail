@@ -25,10 +25,15 @@ type CommandHandler struct {
 	newID              func() (string, error)
 	policyEvaluator    policy.PolicyEvaluator
 	ledgerService      ledger.LedgerService
-	settlementProvider settlement.SettlementProvider
+	settlementProvider namedPayoutProvider
 }
 
-func NewCommandHandler(evaluator policy.PolicyEvaluator, ledgerService ledger.LedgerService, provider settlement.SettlementProvider) *CommandHandler {
+type namedPayoutProvider interface {
+	Name() string
+	settlement.PayoutProvider
+}
+
+func NewCommandHandler(evaluator policy.PolicyEvaluator, ledgerService ledger.LedgerService, provider namedPayoutProvider) *CommandHandler {
 	h := &CommandHandler{policyEvaluator: evaluator, ledgerService: ledgerService, settlementProvider: provider, now: func() time.Time { return time.Now().UTC() }, newID: func() (string, error) {
 		b := make([]byte, 16)
 		_, err := rand.Read(b)

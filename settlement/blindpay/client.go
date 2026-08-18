@@ -215,6 +215,75 @@ func (c *Client) GetPayout(ctx context.Context, id string) (Payout, error) {
 	return out, err
 }
 
+type PayinQuoteRequest struct {
+	IdempotencyKey     string `json:"-"`
+	WalletID           string `json:"wallet_id,omitempty"`
+	BlockchainWalletID string `json:"blockchain_wallet_id,omitempty"`
+	CurrencyType       string `json:"currency_type"`
+	CoverFees          bool   `json:"cover_fees"`
+	RequestAmount      int64  `json:"request_amount"`
+	PaymentMethod      string `json:"payment_method"`
+	Token              string `json:"token"`
+}
+type PayinQuote struct {
+	ID                           string `json:"id"`
+	ExpiresAt                    int64  `json:"expires_at"`
+	SenderAmount, ReceiverAmount int64
+	RawPayload                   json.RawMessage `json:"-"`
+}
+
+func (q *PayinQuote) UnmarshalJSON(data []byte) error {
+	type wire struct {
+		ID             string `json:"id"`
+		ExpiresAt      int64  `json:"expires_at"`
+		SenderAmount   int64  `json:"sender_amount"`
+		ReceiverAmount int64  `json:"receiver_amount"`
+	}
+	var w wire
+	if err := json.Unmarshal(data, &w); err != nil {
+		return err
+	}
+	q.ID, q.ExpiresAt, q.SenderAmount, q.ReceiverAmount = w.ID, w.ExpiresAt, w.SenderAmount, w.ReceiverAmount
+	return nil
+}
+func (c *Client) CreatePayinQuote(ctx context.Context, r PayinQuoteRequest) (PayinQuote, error) {
+	if (r.WalletID == "") == (r.BlockchainWalletID == "") || r.RequestAmount <= 0 {
+		return PayinQuote{}, errors.New("invalid BlindPay payin quote request")
+	}
+	var out PayinQuote
+	raw, err := c.do(ctx, http.MethodPost, "/payin-quotes", r.IdempotencyKey, r, &out)
+	out.RawPayload = raw
+	if err == nil && (!strings.HasPrefix(out.ID, "pq_") || out.ExpiresAt <= 0) {
+		err = errors.New("BlindPay returned an invalid payin quote")
+	}
+	return out, err
+}
+
+type PayinRequest struct {
+	IdempotencyKey string `json:"-"`
+	PayinQuoteID   string `json:"payin_quote_id"`
+}
+type Payin struct {
+	ID           string          `json:"id"`
+	Status       string          `json:"status"`
+	RawPayload   json.RawMessage `json:"-"`
+	Instructions json.RawMessage `json:"-"`
+}
+
+func (c *Client) CreatePayin(ctx context.Context, r PayinRequest) (Payin, error) {
+	if !strings.HasPrefix(r.PayinQuoteID, "pq_") {
+		return Payin{}, errors.New("invalid BlindPay payin request")
+	}
+	var out Payin
+	raw, err := c.do(ctx, http.MethodPost, "/payins/evm", r.IdempotencyKey, r, &out)
+	out.RawPayload = raw
+	out.Instructions = raw
+	if err == nil && (!strings.HasPrefix(out.ID, "pi_") || out.Status == "") {
+		err = errors.New("BlindPay returned an invalid payin")
+	}
+	return out, err
+}
+
 func (c *Client) do(ctx context.Context, method, path, idempotencyKey string, body, out any) (json.RawMessage, error) {
 	var reader io.Reader
 	if body != nil {

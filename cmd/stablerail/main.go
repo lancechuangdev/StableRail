@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"log/slog"
 	"net/http"
@@ -18,6 +19,7 @@ import (
 	"stablerail/notification"
 	"stablerail/observability"
 	"stablerail/outbox"
+	"stablerail/payin"
 	"stablerail/paymentapi"
 	"stablerail/paymentcore"
 	"stablerail/policy"
@@ -92,19 +94,7 @@ func run() error {
 		return err
 	}
 
-	var payoutQuotes paymentapi.BlindPayPayoutQuoteService
-	mockProvider := settlement.NewMockProvider(settlement.OperationResult{})
-	mockProvider.ResultsByAmount = map[int64]settlement.OperationResult{}
-	if config.MockSettlementFailAmount > 0 {
-		mockProvider.ResultsByAmount[config.MockSettlementFailAmount] = settlement.OperationResult{Status: settlement.StatusFailed, FailureCode: "local_failure", FailureMessage: "local settlement failed"}
-	}
-	if config.MockSettlementHoldAmount > 0 {
-		mockProvider.ResultsByAmount[config.MockSettlementHoldAmount] = settlement.OperationResult{Status: settlement.StatusOnHold}
-	}
-	if config.MockSettlementPendingAmount > 0 {
-		mockProvider.ResultsByAmount[config.MockSettlementPendingAmount] = settlement.OperationResult{Status: settlement.StatusPending}
-	}
-	var settlementProvider settlement.SettlementProvider = mockProvider
+	var provider settlement.SettlementProvider
 	var blindPayWebhookHandler http.Handler
 	webhookReconciler := func(ctx context.Context) error {
 		<-ctx.Done()
@@ -114,7 +104,21 @@ func run() error {
 		<-ctx.Done()
 		return ctx.Err()
 	}
-	if config.SettlementProvider == "blindpay" {
+	switch config.SettlementProvider {
+	case "mock":
+		mockProvider := settlement.NewMockProvider(settlement.PayoutResult{})
+		mockProvider.ResultsByAmount = map[int64]settlement.PayoutResult{}
+		if config.MockSettlementFailAmount > 0 {
+			mockProvider.ResultsByAmount[config.MockSettlementFailAmount] = settlement.PayoutResult{Status: settlement.StatusFailed, FailureCode: "local_failure", FailureMessage: "local settlement failed"}
+		}
+		if config.MockSettlementHoldAmount > 0 {
+			mockProvider.ResultsByAmount[config.MockSettlementHoldAmount] = settlement.PayoutResult{Status: settlement.StatusOnHold}
+		}
+		if config.MockSettlementPendingAmount > 0 {
+			mockProvider.ResultsByAmount[config.MockSettlementPendingAmount] = settlement.PayoutResult{Status: settlement.StatusPending}
+		}
+		provider = mockProvider
+	case "blindpay":
 		client, err := blindpay.NewClient(blindpay.Config{
 			APIKey:     config.BlindPay.APIKey,
 			InstanceID: config.BlindPay.InstanceID,
@@ -127,7 +131,7 @@ func run() error {
 		if err != nil {
 			return err
 		}
-		payoutQuotes, err = blindpay.NewQuoteService(client, references, config.BlindPay.Network, config.BlindPay.Token)
+		payoutQuotes, err := blindpay.NewQuoteService(client, references, config.BlindPay.Network, config.BlindPay.Token)
 		if err != nil {
 			return err
 		}
@@ -138,7 +142,7 @@ func run() error {
 		payoutRecovery = func(ctx context.Context) error {
 			return payouts.RunRecovery(ctx, config.ReconciliationInterval)
 		}
-		settlementProvider, err = blindpay.NewProvider(payouts)
+		provider, err = blindpay.NewProvider(payouts, payoutQuotes, client)
 		if err != nil {
 			return err
 		}
@@ -146,7 +150,7 @@ func run() error {
 		if err != nil {
 			return err
 		}
-		webhooks, err := blindpay.NewPayoutWebhookService(db)
+		webhooks, err := blindpay.NewWebhookService(db)
 		if err != nil {
 			return err
 		}
@@ -157,14 +161,16 @@ func run() error {
 		webhookReconciler = func(ctx context.Context) error {
 			return webhooks.RunReconciler(ctx, config.ReconciliationInterval)
 		}
+	default:
+		return fmt.Errorf("unsupported settlement provider %q", config.SettlementProvider)
 	}
 	commandLoop := &consumer.Loop{
 		Reader:    consumer.NewKafkaReader(config.KafkaBrokers, string(saga.CommandTopic), "stablerail-core-workers"),
-		Processor: inbox.BoundProcessor{Processor: inboxProcessor, Handler: workers.NewCommandHandler(policy.DeterministicEvaluator{RejectAmountMinor: config.MockPolicyRejectAmount}, ledger.NewPostgresService(), settlementProvider).Handle},
+		Processor: inbox.BoundProcessor{Processor: inboxProcessor, Handler: workers.NewCommandHandler(policy.DeterministicEvaluator{RejectAmountMinor: config.MockPolicyRejectAmount}, ledger.NewPostgresService(), provider).Handle},
 		Consumer:  "core-workers",
 	}
 
-	handler, err := paymentapi.NewHandler(paymentcore.NewPostgresService(db), db, payoutQuotes)
+	handler, err := paymentapi.NewHandler(paymentcore.NewPostgresService(db), db, provider)
 	if err != nil {
 		return err
 	}
@@ -173,6 +179,15 @@ func run() error {
 		return err
 	}
 	handler = apiKeys.Middleware(handler)
+	payins, err := payin.NewService(db, provider)
+	if err != nil {
+		return err
+	}
+	payinHandler, err := paymentapi.NewPayinHandler(payins)
+	if err != nil {
+		return err
+	}
+	payinHandler = apiKeys.Middleware(payinHandler)
 	webhookEndpoints, err := paymentapi.NewWebhookEndpointService(db)
 	if err != nil {
 		return err
@@ -222,6 +237,9 @@ func run() error {
 	root.Handle("POST /v1/webhook-endpoints", apiKeys.Middleware(webhookEndpointHandler))
 	root.Handle("GET /v1/webhook-endpoints", apiKeys.Middleware(webhookEndpointHandler))
 	root.Handle("DELETE /v1/webhook-endpoints/{id}", apiKeys.Middleware(webhookEndpointHandler))
+	root.Handle("POST /v1/payin-quotes", payinHandler)
+	root.Handle("POST /v1/payins", payinHandler)
+	root.Handle("GET /v1/payins/{id}", payinHandler)
 	root.Handle("/", metrics.Middleware(handler, logger))
 	server := &http.Server{
 		Addr:              config.HTTPAddress,

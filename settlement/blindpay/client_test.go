@@ -53,6 +53,33 @@ func TestCreatePayoutContract(t *testing.T) {
 	}
 }
 
+func TestCreatePayinQuoteAndPayinContracts(t *testing.T) {
+	calls := 0
+	c := testClient(t, func(r *http.Request) (*http.Response, error) {
+		calls++
+		switch r.URL.Path {
+		case "/instances/in_test/payin-quotes":
+			return response(http.StatusOK, `{"id":"pq_test","expires_at":1912958191000,"sender_amount":10000,"receiver_amount":9900}`), nil
+		case "/instances/in_test/payins/evm":
+			return response(http.StatusOK, `{"id":"pi_test","status":"processing","memo_code":"ABC123"}`), nil
+		default:
+			t.Fatalf("path=%s", r.URL.Path)
+			return nil, nil
+		}
+	})
+	q, err := c.CreatePayinQuote(context.Background(), PayinQuoteRequest{IdempotencyKey: "quote-1", WalletID: "bl_test", CurrencyType: "sender", RequestAmount: 10000, PaymentMethod: "ach", Token: "USDB"})
+	if err != nil || q.ID != "pq_test" {
+		t.Fatalf("quote=%+v err=%v", q, err)
+	}
+	p, err := c.CreatePayin(context.Background(), PayinRequest{IdempotencyKey: "payin-1", PayinQuoteID: q.ID})
+	if err != nil || p.ID != "pi_test" || !strings.Contains(string(p.Instructions), "memo_code") {
+		t.Fatalf("payin=%+v err=%v", p, err)
+	}
+	if calls != 2 {
+		t.Fatalf("calls=%d", calls)
+	}
+}
+
 func TestGetManagedWalletBalanceContract(t *testing.T) {
 	c := testClient(t, func(r *http.Request) (*http.Response, error) {
 		if r.URL.Path != "/instances/in_test/customers/re_test/wallets/bl_test/balance" {

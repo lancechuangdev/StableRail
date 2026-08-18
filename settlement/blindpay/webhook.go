@@ -70,12 +70,12 @@ func absDuration(d time.Duration) time.Duration {
 	return d
 }
 
-type PayoutWebhookService struct {
+type WebhookService struct {
 	db  *sql.DB
 	now func() time.Time
 }
 
-func NewWebhookHandler(verifier *WebhookVerifier, service *PayoutWebhookService) (http.Handler, error) {
+func NewWebhookHandler(verifier *WebhookVerifier, service *WebhookService) (http.Handler, error) {
 	if verifier == nil || service == nil {
 		return nil, errors.New("BlindPay webhook verifier and service are required")
 	}
@@ -98,11 +98,11 @@ func NewWebhookHandler(verifier *WebhookVerifier, service *PayoutWebhookService)
 	}), nil
 }
 
-func NewPayoutWebhookService(db *sql.DB) (*PayoutWebhookService, error) {
+func NewWebhookService(db *sql.DB) (*WebhookService, error) {
 	if db == nil {
 		return nil, errors.New("BlindPay webhook database is required")
 	}
-	return &PayoutWebhookService{db: db, now: func() time.Time { return time.Now().UTC() }}, nil
+	return &WebhookService{db: db, now: func() time.Time { return time.Now().UTC() }}, nil
 }
 
 type payoutWebhook struct {
@@ -112,7 +112,7 @@ type payoutWebhook struct {
 }
 
 // Process persists every verified delivery and applies payout status changes once.
-func (s *PayoutWebhookService) Process(ctx context.Context, svixID string, raw json.RawMessage) error {
+func (s *WebhookService) Process(ctx context.Context, svixID string, raw json.RawMessage) error {
 	var payload payoutWebhook
 	if err := json.Unmarshal(raw, &payload); err != nil || svixID == "" || payload.WebhookEvent == "" {
 		return errors.New("invalid BlindPay webhook payload")
@@ -126,6 +126,24 @@ func (s *PayoutWebhookService) Process(ctx context.Context, svixID string, raw j
 	_, err = tx.ExecContext(ctx, `INSERT INTO blindpay_webhook_events(svix_id,webhook_event,provider_payout_id,payload,received_at) VALUES($1,$2,NULLIF($3,''),$4,$5) ON CONFLICT(svix_id) DO NOTHING`, svixID, payload.WebhookEvent, payload.ID, raw, now)
 	if err != nil {
 		return fmt.Errorf("persist BlindPay webhook: %w", err)
+	}
+	if strings.HasPrefix(payload.WebhookEvent, "payin.") {
+		if !strings.HasPrefix(payload.ID, "pi_") {
+			return errors.New("invalid BlindPay payin webhook")
+		}
+		if !validProviderPayinStatus(payload.Status) {
+			return errors.New("invalid BlindPay payin status")
+		}
+		applied, err := s.applyPayinWebhook(ctx, tx, payload.ID, payload.Status, raw, now)
+		if err != nil {
+			return err
+		}
+		if applied {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO payin_webhook_applications(svix_id,payin_id,applied_at) SELECT $1,id,$2 FROM payins WHERE provider='blindpay' AND provider_payin_id=$3 ON CONFLICT(svix_id) DO NOTHING`, svixID, now, payload.ID); err != nil {
+				return err
+			}
+		}
+		return tx.Commit()
 	}
 	if !strings.HasPrefix(payload.WebhookEvent, "payout.") {
 		return tx.Commit()
@@ -172,6 +190,62 @@ func (s *PayoutWebhookService) Process(ctx context.Context, svixID string, raw j
 	return tx.Commit()
 }
 
+func validProviderPayinStatus(status string) bool {
+	switch status {
+	case "processing", "on_hold", "completed", "failed", "refunded":
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *WebhookService) applyPayinWebhook(ctx context.Context, tx *sql.Tx, providerID, providerStatus string, raw json.RawMessage, now time.Time) (bool, error) {
+	status := string(mapPayinStatus(providerStatus))
+	var id, current, currency string
+	var amount int64
+	err := tx.QueryRowContext(ctx, `SELECT p.id,p.status,q.receiver_amount_minor,q.destination_currency FROM payins p JOIN payin_quotes q ON q.id=p.quote_id WHERE p.provider='blindpay' AND p.provider_payin_id=$1 FOR UPDATE`, providerID).Scan(&id, &current, &amount, &currency)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("lock BlindPay payin: %w", err)
+	}
+	if current == status || current == "failed" || current == "refunded" || (current == "succeeded" && status != "refunded") {
+		return true, nil
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE payins SET status=$1,provider_payload=$2,instructions=$2,failure_reason=CASE WHEN $1 IN ('failed','refunded') THEN $3 ELSE NULL END,updated_at=$4 WHERE id=$5`, status, raw, providerStatus, now, id); err != nil {
+		return false, fmt.Errorf("update BlindPay payin status: %w", err)
+	}
+	eventID := "evt_blindpay_" + providerID + "_" + status
+	eventType := "payin." + status
+	body, _ := json.Marshal(map[string]any{"id": eventID, "type": eventType, "payin_id": id, "occurred_at": now, "data": map[string]any{"status": status, "provider_status": providerStatus}})
+	if _, err := tx.ExecContext(ctx, `INSERT INTO webhook_deliveries(id,endpoint_id,event_id,payment_id,payin_id,event_type,payload,next_attempt_at,created_at) SELECT 'whd_'||md5(e.id||$1),e.id,$1,NULL,$2,$3,$4,$5,$5 FROM webhook_endpoints e JOIN payins p ON p.id=$2 WHERE e.tenant_id=p.tenant_id AND e.active ON CONFLICT(endpoint_id,event_id) DO NOTHING`, eventID, id, eventType, body, now); err != nil {
+		return false, fmt.Errorf("enqueue payin webhook: %w", err)
+	}
+	if status != "succeeded" && !(current == "succeeded" && status == "refunded") {
+		return true, nil
+	}
+	eventType, debit, credit := "payin.succeeded", paymentcore.CashOperatingAccount, paymentcore.SettlementAccount
+	if status == "refunded" {
+		eventType, debit, credit = "payin.refunded", paymentcore.SettlementAccount, paymentcore.CashOperatingAccount
+	}
+	journalID := "jrn_" + id + "_" + strings.TrimPrefix(eventType, "payin.")
+	result, err := tx.ExecContext(ctx, `INSERT INTO ledger_transactions(id,payment_id,payin_id,event_type,occurred_at) VALUES($1,NULL,$2,$3,$4) ON CONFLICT(payin_id,event_type) DO NOTHING`, journalID, id, eventType, now)
+	if err != nil {
+		return false, fmt.Errorf("insert payin journal: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil || rows == 0 {
+		return false, err
+	}
+	for _, line := range []struct{ suffix, account, side string }{{"debit", debit, "debit"}, {"credit", credit, "credit"}} {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO ledger_entries(id,transaction_id,account_code,side,amount_minor,currency) VALUES($1,$2,$3,$4,$5,$6)`, journalID+":"+line.suffix, journalID, line.account, line.side, amount, currency); err != nil {
+			return false, fmt.Errorf("insert payin ledger entry: %w", err)
+		}
+	}
+	return true, nil
+}
+
 func validPayoutStatus(status string) bool { return payoutStatusRank(status) > 0 }
 func isTerminalPayoutStatus(status string) bool {
 	return status == "completed" || status == "failed" || status == "refunded"
@@ -187,7 +261,7 @@ func payoutStatusCanAdvance(current, next string) bool {
 	return payoutStatusRank(next) > payoutStatusRank(current)
 }
 
-func (s *PayoutWebhookService) enqueuePaymentReturn(ctx context.Context, tx *sql.Tx, svixID, returnID, paymentID, reason string, now time.Time) error {
+func (s *WebhookService) enqueuePaymentReturn(ctx context.Context, tx *sql.Tx, svixID, returnID, paymentID, reason string, now time.Time) error {
 	body, err := json.Marshal(map[string]string{"return_id": returnID, "payment_status": "succeeded", "funds_status": "consumed", "return_status": "succeeded", "reason": reason})
 	if err != nil {
 		return err
@@ -217,7 +291,7 @@ func payoutStatusRank(status string) int {
 // ReconcileOnce retries verified terminal deliveries whose derived saga event
 // has not yet been written. This repairs webhooks that arrived before their
 // payout or saga record was visible.
-func (s *PayoutWebhookService) ReconcileOnce(ctx context.Context) (int, error) {
+func (s *WebhookService) ReconcileOnce(ctx context.Context) (int, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT w.svix_id,w.payload
 		FROM blindpay_webhook_events w
 		WHERE w.webhook_event LIKE 'payout.%'
@@ -253,10 +327,35 @@ func (s *PayoutWebhookService) ReconcileOnce(ctx context.Context) (int, error) {
 		}
 		processed++
 	}
+	payinRows, err := s.db.QueryContext(ctx, `SELECT w.svix_id,w.payload FROM blindpay_webhook_events w WHERE w.webhook_event LIKE 'payin.%' AND NOT EXISTS (SELECT 1 FROM payin_webhook_applications a WHERE a.svix_id=w.svix_id) AND EXISTS (SELECT 1 FROM payins p WHERE p.provider='blindpay' AND p.provider_payin_id=w.provider_payout_id) ORDER BY w.received_at LIMIT 100`)
+	if err != nil {
+		return processed, fmt.Errorf("find unapplied payin webhooks: %w", err)
+	}
+	var payinDeliveries []delivery
+	for payinRows.Next() {
+		var d delivery
+		if err := payinRows.Scan(&d.id, &d.raw); err != nil {
+			payinRows.Close()
+			return processed, err
+		}
+		payinDeliveries = append(payinDeliveries, d)
+	}
+	if err := payinRows.Close(); err != nil {
+		return processed, err
+	}
+	if err := payinRows.Err(); err != nil {
+		return processed, err
+	}
+	for _, d := range payinDeliveries {
+		if err := s.Process(ctx, d.id, d.raw); err != nil {
+			return processed, err
+		}
+		processed++
+	}
 	return processed, nil
 }
 
-func (s *PayoutWebhookService) RunReconciler(ctx context.Context, interval time.Duration) error {
+func (s *WebhookService) RunReconciler(ctx context.Context, interval time.Duration) error {
 	if interval <= 0 {
 		interval = time.Minute
 	}
@@ -276,7 +375,7 @@ func (s *PayoutWebhookService) RunReconciler(ctx context.Context, interval time.
 	}
 }
 
-func (s *PayoutWebhookService) enqueueSagaResult(ctx context.Context, tx *sql.Tx, svixID, paymentID, status string, now time.Time) error {
+func (s *WebhookService) enqueueSagaResult(ctx context.Context, tx *sql.Tx, svixID, paymentID, status string, now time.Time) error {
 	var correlationID string
 	if err := tx.QueryRowContext(ctx, `SELECT correlation_id FROM payment_sagas WHERE payment_id=$1`, paymentID).Scan(&correlationID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {

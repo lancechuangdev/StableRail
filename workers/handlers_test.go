@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -19,8 +20,11 @@ import (
 type submissionFailureProvider struct{}
 
 func (submissionFailureProvider) Name() string { return "blindpay" }
-func (submissionFailureProvider) ExecutePayout(context.Context, settlement.PayoutRequest) (settlement.OperationResult, error) {
-	return settlement.OperationResult{}, &settlement.ProviderError{Message: "insufficient balance", Code: "submission_failed", Retryable: false}
+func (submissionFailureProvider) CreatePayoutQuote(context.Context, settlement.PayoutQuoteRequest) (settlement.PayoutQuoteResult, error) {
+	return settlement.PayoutQuoteResult{}, errors.New("not implemented")
+}
+func (submissionFailureProvider) ExecutePayout(context.Context, settlement.PayoutRequest) (settlement.PayoutResult, error) {
+	return settlement.PayoutResult{}, &settlement.ProviderError{Message: "insufficient balance", Code: "submission_failed", Retryable: false}
 }
 
 type unusedLedgerService struct{}
