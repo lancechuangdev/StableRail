@@ -48,12 +48,6 @@ ALTER TABLE ledger_transactions ADD COLUMN payin_id TEXT REFERENCES payins(id);
 ALTER TABLE ledger_transactions ADD CHECK (num_nonnulls(payment_id, payin_id) = 1);
 ALTER TABLE ledger_transactions ADD UNIQUE (payin_id, event_type);
 
-CREATE TABLE payin_webhook_applications (
-    svix_id    TEXT PRIMARY KEY REFERENCES blindpay_webhook_events(svix_id),
-    payin_id   TEXT NOT NULL REFERENCES payins(id),
-    applied_at TIMESTAMPTZ NOT NULL
-);
-
 ALTER TABLE webhook_deliveries ALTER COLUMN payment_id DROP NOT NULL;
 ALTER TABLE webhook_deliveries ADD COLUMN payin_id TEXT REFERENCES payins(id);
 ALTER TABLE webhook_deliveries ADD CHECK (num_nonnulls(payment_id, payin_id) = 1);

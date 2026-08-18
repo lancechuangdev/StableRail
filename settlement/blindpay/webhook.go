@@ -139,7 +139,7 @@ func (s *WebhookService) Process(ctx context.Context, svixID string, raw json.Ra
 			return err
 		}
 		if applied {
-			if _, err := tx.ExecContext(ctx, `INSERT INTO payin_webhook_applications(svix_id,payin_id,applied_at) SELECT $1,id,$2 FROM payins WHERE provider='blindpay' AND provider_payin_id=$3 ON CONFLICT(svix_id) DO NOTHING`, svixID, now, payload.ID); err != nil {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO provider_webhook_applications(provider,provider_event_id,operation_type,operation_id,applied_at) SELECT 'blindpay',$1,'payin',id,$2 FROM payins WHERE provider='blindpay' AND provider_payin_id=$3 ON CONFLICT(provider,provider_event_id) DO NOTHING`, svixID, now, payload.ID); err != nil {
 				return err
 			}
 		}
@@ -152,7 +152,7 @@ func (s *WebhookService) Process(ctx context.Context, svixID string, raw json.Ra
 		return errors.New("invalid BlindPay payout webhook")
 	}
 	var paymentID, current string
-	err = tx.QueryRowContext(ctx, `SELECT payment_id,provider_status FROM blindpay_payouts WHERE provider_payout_id=$1 FOR UPDATE`, payload.ID).Scan(&paymentID, &current)
+	err = tx.QueryRowContext(ctx, `SELECT payment_id,provider_status FROM payouts WHERE provider='blindpay' AND provider_payout_id=$1 FOR UPDATE`, payload.ID).Scan(&paymentID, &current)
 	if errors.Is(err, sql.ErrNoRows) {
 		return tx.Commit() // retain unmatched event for reconciliation.
 	}
@@ -168,7 +168,7 @@ func (s *WebhookService) Process(ctx context.Context, svixID string, raw json.Ra
 		}
 		return tx.Commit()
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE blindpay_payouts SET provider_status=$1,provider_payload=$2,updated_at=$3 WHERE payment_id=$4`, payload.Status, raw, now, paymentID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE payouts SET provider_status=$1,provider_payload=$2,updated_at=$3 WHERE payment_id=$4`, payload.Status, raw, now, paymentID); err != nil {
 		return fmt.Errorf("update BlindPay payout status: %w", err)
 	}
 	if postSuccessReturn {
@@ -327,7 +327,7 @@ func (s *WebhookService) ReconcileOnce(ctx context.Context) (int, error) {
 		}
 		processed++
 	}
-	payinRows, err := s.db.QueryContext(ctx, `SELECT w.svix_id,w.payload FROM blindpay_webhook_events w WHERE w.webhook_event LIKE 'payin.%' AND NOT EXISTS (SELECT 1 FROM payin_webhook_applications a WHERE a.svix_id=w.svix_id) AND EXISTS (SELECT 1 FROM payins p WHERE p.provider='blindpay' AND p.provider_payin_id=w.provider_payout_id) ORDER BY w.received_at LIMIT 100`)
+	payinRows, err := s.db.QueryContext(ctx, `SELECT w.svix_id,w.payload FROM blindpay_webhook_events w WHERE w.webhook_event LIKE 'payin.%' AND NOT EXISTS (SELECT 1 FROM provider_webhook_applications a WHERE a.provider='blindpay' AND a.provider_event_id=w.svix_id) AND EXISTS (SELECT 1 FROM payins p WHERE p.provider='blindpay' AND p.provider_payin_id=w.provider_payout_id) ORDER BY w.received_at LIMIT 100`)
 	if err != nil {
 		return processed, fmt.Errorf("find unapplied payin webhooks: %w", err)
 	}

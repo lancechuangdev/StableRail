@@ -90,7 +90,7 @@ func (s *PostgresService) CreateRefund(ctx context.Context, paymentID, tenantID,
 		var quoteTenant, quoteCurrency, quoteStatus string
 		var quoteAmount int64
 		var expiresAt time.Time
-		if err := tx.QueryRowContext(ctx, `SELECT tenant_id,source_currency,sender_amount_minor,status,expires_at FROM blindpay_quotes WHERE id=$1 FOR UPDATE`, payoutQuoteID).Scan(&quoteTenant, &quoteCurrency, &quoteAmount, &quoteStatus, &expiresAt); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT tenant_id,source_currency,sender_amount_minor,status,expires_at FROM payout_quotes WHERE id=$1 FOR UPDATE`, payoutQuoteID).Scan(&quoteTenant, &quoteCurrency, &quoteAmount, &quoteStatus, &expiresAt); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				return nil, errors.New("payout quote not found")
 			}
@@ -124,7 +124,7 @@ func (s *PostgresService) CreateRefund(ctx context.Context, paymentID, tenantID,
 		return nil, fmt.Errorf("link refund payment: %w", err)
 	}
 	if payoutQuoteID != "" {
-		result, err := tx.ExecContext(ctx, `UPDATE blindpay_quotes SET status='accepted',payment_id=$1,updated_at=$2 WHERE id=$3 AND status='open'`, refundPaymentID, now, payoutQuoteID)
+		result, err := tx.ExecContext(ctx, `UPDATE payout_quotes SET status='accepted',payment_id=$1,updated_at=$2 WHERE id=$3 AND status='open'`, refundPaymentID, now, payoutQuoteID)
 		if err != nil {
 			return nil, fmt.Errorf("accept refund payout quote: %w", err)
 		}
@@ -154,7 +154,7 @@ func (s *PostgresService) CreateRefund(ctx context.Context, paymentID, tenantID,
 
 func loadRefundByIdempotencyKey(ctx context.Context, tx *sql.Tx, tenantID, key string) (*refundLookup, error) {
 	r := &refundLookup{refund: Refund{IdempotencyKey: key}}
-	err := tx.QueryRowContext(ctx, `SELECT r.id,r.payment_id,r.refund_payment_id,r.reason,r.created_at,r.updated_at,p.amount_minor,COALESCE(q.id,'') FROM payment_refunds r JOIN payments p ON p.id=r.refund_payment_id LEFT JOIN blindpay_quotes q ON q.payment_id=r.refund_payment_id WHERE r.tenant_id=$1 AND r.idempotency_key=$2`, tenantID, key).
+	err := tx.QueryRowContext(ctx, `SELECT r.id,r.payment_id,r.refund_payment_id,r.reason,r.created_at,r.updated_at,p.amount_minor,COALESCE(q.id,'') FROM payment_refunds r JOIN payments p ON p.id=r.refund_payment_id LEFT JOIN payout_quotes q ON q.payment_id=r.refund_payment_id WHERE r.tenant_id=$1 AND r.idempotency_key=$2`, tenantID, key).
 		Scan(&r.refund.ID, &r.refund.PaymentID, &r.refund.RefundPaymentID, &r.refund.Reason, &r.refund.CreatedAt, &r.refund.UpdatedAt, &r.amountMinor, &r.payoutQuoteID)
 	return r, err
 }

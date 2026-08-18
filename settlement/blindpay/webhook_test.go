@@ -50,10 +50,10 @@ func TestPayoutWebhookServicePersistsCompletionAndEnqueuesSagaEvent(t *testing.T
 	mock.ExpectExec("INSERT INTO blindpay_webhook_events").
 		WithArgs("msg_test", "payout.complete", "po_test", body, now).
 		WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectQuery("SELECT payment_id,provider_status FROM blindpay_payouts").
+	mock.ExpectQuery("SELECT payment_id,provider_status FROM payouts").
 		WithArgs("po_test").
 		WillReturnRows(sqlmock.NewRows([]string{"payment_id", "provider_status"}).AddRow("pay_test", "processing"))
-	mock.ExpectExec("UPDATE blindpay_payouts SET provider_status").
+	mock.ExpectExec("UPDATE payouts SET provider_status").
 		WithArgs("completed", body, now, "pay_test").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectQuery("SELECT correlation_id FROM payment_sagas").
@@ -84,8 +84,8 @@ func TestPayoutWebhookServiceMapsRefundedToReturnedOutcome(t *testing.T) {
 	body := []byte(`{"webhook_event":"payout.complete","id":"po_test","status":"refunded"}`)
 	mock.ExpectBegin()
 	mock.ExpectExec("INSERT INTO blindpay_webhook_events").WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectQuery("SELECT payment_id,provider_status FROM blindpay_payouts").WillReturnRows(sqlmock.NewRows([]string{"payment_id", "provider_status"}).AddRow("pay_test", "processing"))
-	mock.ExpectExec("UPDATE blindpay_payouts SET provider_status").WithArgs("refunded", body, now, "pay_test").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery("SELECT payment_id,provider_status FROM payouts").WillReturnRows(sqlmock.NewRows([]string{"payment_id", "provider_status"}).AddRow("pay_test", "processing"))
+	mock.ExpectExec("UPDATE payouts SET provider_status").WithArgs("refunded", body, now, "pay_test").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectQuery("SELECT correlation_id FROM payment_sagas").WillReturnRows(sqlmock.NewRows([]string{"correlation_id"}).AddRow("corr_test"))
 	mock.ExpectExec("INSERT INTO outbox_events").WithArgs("evt_blindpay_msg_refund", paymentcore.PaymentEventsTopic, "settlement.returned", 1, "pay_test", sqlmock.AnyArg(), now).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
@@ -122,8 +122,8 @@ func TestPayoutWebhookRecordsPostSuccessReturnWithoutChangingPayment(t *testing.
 	body := []byte(`{"webhook_event":"payout.complete","id":"po_test","status":"refunded"}`)
 	mock.ExpectBegin()
 	mock.ExpectExec("INSERT INTO blindpay_webhook_events").WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectQuery("SELECT payment_id,provider_status FROM blindpay_payouts").WillReturnRows(sqlmock.NewRows([]string{"payment_id", "provider_status"}).AddRow("pay_test", "completed"))
-	mock.ExpectExec("UPDATE blindpay_payouts SET provider_status").WithArgs("refunded", body, now, "pay_test").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery("SELECT payment_id,provider_status FROM payouts").WillReturnRows(sqlmock.NewRows([]string{"payment_id", "provider_status"}).AddRow("pay_test", "completed"))
+	mock.ExpectExec("UPDATE payouts SET provider_status").WithArgs("refunded", body, now, "pay_test").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectQuery("SELECT payment_status,funds_status,amount_minor,currency").WithArgs("pay_test").WillReturnRows(sqlmock.NewRows([]string{"payment_status", "funds_status", "amount_minor", "currency"}).AddRow("succeeded", "consumed", 2500, "USD"))
 	mock.ExpectExec("INSERT INTO ledger_transactions").WithArgs("jrn_ret_blindpay_msg_return", "pay_test", now).WillReturnResult(sqlmock.NewResult(0, 1))
 	for _, line := range []struct{ id, account, side string }{
@@ -159,8 +159,8 @@ func TestReconcileOnceRepairsInitiallyUnmatchedTerminalWebhook(t *testing.T) {
 	mock.ExpectQuery("SELECT w.svix_id,w.payload").WillReturnRows(sqlmock.NewRows([]string{"svix_id", "payload"}).AddRow("msg_early", body))
 	mock.ExpectBegin()
 	mock.ExpectExec("INSERT INTO blindpay_webhook_events").WithArgs("msg_early", "payout.complete", "po_early", body, now).WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectQuery("SELECT payment_id,provider_status FROM blindpay_payouts").WithArgs("po_early").WillReturnRows(sqlmock.NewRows([]string{"payment_id", "provider_status"}).AddRow("pay_early", "processing"))
-	mock.ExpectExec("UPDATE blindpay_payouts SET provider_status").WithArgs("completed", body, now, "pay_early").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery("SELECT payment_id,provider_status FROM payouts").WithArgs("po_early").WillReturnRows(sqlmock.NewRows([]string{"payment_id", "provider_status"}).AddRow("pay_early", "processing"))
+	mock.ExpectExec("UPDATE payouts SET provider_status").WithArgs("completed", body, now, "pay_early").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectQuery("SELECT correlation_id FROM payment_sagas").WithArgs("pay_early").WillReturnRows(sqlmock.NewRows([]string{"correlation_id"}).AddRow("corr_early"))
 	mock.ExpectExec("INSERT INTO outbox_events").WithArgs("evt_blindpay_msg_early", paymentcore.PaymentEventsTopic, "settlement.completed", 1, "pay_early", sqlmock.AnyArg(), now).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
@@ -193,7 +193,7 @@ func TestPayinCompletionUpdatesStatusPostsLedgerAndNotifiesTenant(t *testing.T) 
 	mock.ExpectExec("INSERT INTO ledger_transactions").WithArgs("jrn_pin_1_succeeded", "pin_1", "payin.succeeded", now).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO ledger_entries").WithArgs("jrn_pin_1_succeeded:debit", "jrn_pin_1_succeeded", paymentcore.CashOperatingAccount, "debit", int64(9900), "USDC").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO ledger_entries").WithArgs("jrn_pin_1_succeeded:credit", "jrn_pin_1_succeeded", paymentcore.SettlementAccount, "credit", int64(9900), "USDC").WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectExec("INSERT INTO payin_webhook_applications").WithArgs("msg_payin", now, "pi_test").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO provider_webhook_applications").WithArgs("msg_payin", now, "pi_test").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 	if err := service.Process(context.Background(), "msg_payin", body); err != nil {
 		t.Fatal(err)

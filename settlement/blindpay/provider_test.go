@@ -19,10 +19,10 @@ func TestProviderMapsProcessingPayoutToPendingSettlement(t *testing.T) {
 	service, _ := NewPayoutService(db, &fakeManagedWalletPayoutClient{payout: Payout{ID: "po_test", Status: "processing"}})
 	provider := &Provider{payouts: service}
 	mock.ExpectBegin()
-	mock.ExpectQuery("SELECT q.id,q.provider_wallet_id,w.address FROM blindpay_quotes").WillReturnRows(sqlmock.NewRows([]string{"id", "provider_wallet_id", "address"}).AddRow("qu_test", "bl_test", "0xabc"))
-	mock.ExpectExec("INSERT INTO blindpay_payouts").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery("SELECT q.id,q.managed_wallet_id,w.address FROM payout_quotes").WillReturnRows(sqlmock.NewRows([]string{"id", "managed_wallet_id", "address"}).AddRow("qu_test", "bl_test", "0xabc"))
+	mock.ExpectExec("INSERT INTO payouts").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
-	mock.ExpectExec("UPDATE blindpay_payouts SET provider_payout_id").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("UPDATE payouts SET provider_payout_id").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("UPDATE payments SET funds_status").WillReturnResult(sqlmock.NewResult(0, 1))
 
 	result, err := provider.ExecutePayout(context.Background(), settlement.PayoutRequest{IdempotencyKey: "idem-1", PaymentID: "pay_test", AmountMinor: 1, Currency: "USDB"})
@@ -43,10 +43,10 @@ func TestProviderClassifiesPermanentAPIErrorAsSubmissionFailure(t *testing.T) {
 	service, _ := NewPayoutService(db, &fakeManagedWalletPayoutClient{err: &APIError{StatusCode: 422, Code: "insufficient_balance", Message: "insufficient balance", Kind: ErrorUserAction}})
 	provider := &Provider{payouts: service}
 	mock.ExpectBegin()
-	mock.ExpectQuery("SELECT q.id,q.provider_wallet_id,w.address FROM blindpay_quotes").WillReturnRows(sqlmock.NewRows([]string{"id", "provider_wallet_id", "address"}).AddRow("qu_test", "bl_test", "0xabc"))
-	mock.ExpectExec("INSERT INTO blindpay_payouts").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery("SELECT q.id,q.managed_wallet_id,w.address FROM payout_quotes").WillReturnRows(sqlmock.NewRows([]string{"id", "managed_wallet_id", "address"}).AddRow("qu_test", "bl_test", "0xabc"))
+	mock.ExpectExec("INSERT INTO payouts").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
-	mock.ExpectExec("UPDATE blindpay_payouts SET provider_status").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("UPDATE payouts SET provider_status").WillReturnResult(sqlmock.NewResult(0, 1))
 
 	_, err = provider.ExecutePayout(context.Background(), settlement.PayoutRequest{IdempotencyKey: "idem-1", PaymentID: "pay_test", AmountMinor: 1, Currency: "USDB"})
 	var providerErr *settlement.ProviderError

@@ -71,7 +71,7 @@ Common combinations are:
 
 Before success, BlindPay's external `refunded` payout status maps to `payment_status=failed` and `funds_status=returned`. After success, it creates a separate `payment_returns` record and reversal journal while the original payment remains `payment_status=succeeded` and `funds_status=consumed`.
 
-An ambiguous provider submission remains `payment_status=processing` and `funds_status=reserved`. The uncertainty is recorded on `blindpay_payouts.provider_status=unknown` until idempotent recovery or a webhook establishes the outcome.
+An ambiguous provider submission remains `payment_status=processing` and `funds_status=reserved`. The uncertainty is recorded on `payouts.provider_status=unknown` until idempotent recovery or a webhook establishes the outcome.
 
 ### Post-success returns
 
@@ -142,6 +142,23 @@ webhooks advance `processing | on_hold` to `succeeded | failed | refunded`.
 Successful inbound settlement debits `cash:operating` and credits
 `settlement:payable`; a later provider refund posts the inverse journal. Early
 webhooks are retained and reconciled after the local pay-in becomes visible.
+
+## Database migrations
+
+Migrations are ordered by dependency. Provider-neutral platform and workflow
+schema is created before the BlindPay-specific adapter schema.
+
+| Migration | Main purpose |
+| --- | --- |
+| [001_payment_core.sql](migrations/001_payment_core.sql) | Payments, ledger, returns, audit/timeline, destinations, and refunds |
+| [002_eventing.sql](migrations/002_eventing.sql) | Transactional outbox and consumer inbox |
+| [003_payment_workflow.sql](migrations/003_payment_workflow.sql) | Payment sagas, manual review actions, and settlement submission records |
+| [004_webhooks.sql](migrations/004_webhooks.sql) | Merchant webhook delivery and provider webhook ingestion/application tracking |
+| [005_reconciliation.sql](migrations/005_reconciliation.sql) | Reconciliation runs and discrepancies |
+| [006_tenant_access.sql](migrations/006_tenant_access.sql) | Tenant API-key authentication |
+| [007_payouts.sql](migrations/007_payouts.sql) | Provider-neutral payout quotes and payouts |
+| [008_payins.sql](migrations/008_payins.sql) | Provider-neutral pay-in quotes/pay-ins and their ledger/webhook integration |
+| [009_blindpay.sql](migrations/009_blindpay.sql) | BlindPay-owned customers, bank accounts, wallets, and raw webhook events |
 
 ## Quick start
 

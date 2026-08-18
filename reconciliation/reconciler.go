@@ -137,7 +137,7 @@ func find(ctx context.Context, tx *sql.Tx) ([]Finding, error) {
 		return nil, err
 	}
 	rows, err = tx.QueryContext(ctx, `SELECT p.id,p.payment_status,b.provider_status,COALESCE(b.provider_payout_id,'')
-		FROM payments p JOIN blindpay_payouts b ON b.payment_id=p.id
+		FROM payments p JOIN payouts b ON b.payment_id=p.id
 		WHERE (b.provider_status='completed' AND p.payment_status<>'succeeded')
 		   OR (b.provider_status='refunded' AND NOT (
 		       (p.payment_status='failed' AND p.funds_status='returned') OR

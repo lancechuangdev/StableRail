@@ -89,7 +89,7 @@ func (s *PostgresService) createPayment(
 		var quoteAmount int64
 		var quoteStatus string
 		var expiresAt time.Time
-		err := tx.QueryRowContext(ctx, `SELECT tenant_id,source_currency,sender_amount_minor,status,expires_at FROM blindpay_quotes WHERE id=$1 FOR UPDATE`, payoutQuoteID).Scan(&quoteTenant, &quoteCurrency, &quoteAmount, &quoteStatus, &expiresAt)
+		err := tx.QueryRowContext(ctx, `SELECT tenant_id,source_currency,sender_amount_minor,status,expires_at FROM payout_quotes WHERE id=$1 FOR UPDATE`, payoutQuoteID).Scan(&quoteTenant, &quoteCurrency, &quoteAmount, &quoteStatus, &expiresAt)
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, errors.New("payout quote not found")
 		}
@@ -113,7 +113,7 @@ func (s *PostgresService) createPayment(
 			return nil, errors.New("payout quote already accepted")
 		}
 		if quoteStatus != "open" || !expiresAt.After(now) {
-			if _, err := tx.ExecContext(ctx, `UPDATE blindpay_quotes SET status='expired',updated_at=$1 WHERE id=$2 AND status='open'`, now, payoutQuoteID); err != nil {
+			if _, err := tx.ExecContext(ctx, `UPDATE payout_quotes SET status='expired',updated_at=$1 WHERE id=$2 AND status='open'`, now, payoutQuoteID); err != nil {
 				return nil, fmt.Errorf("expire payout quote: %w", err)
 			}
 			if err := tx.Commit(); err != nil {
@@ -161,7 +161,7 @@ func (s *PostgresService) createPayment(
 		}
 	}
 	if payoutQuoteID != "" {
-		result, err := tx.ExecContext(ctx, `UPDATE blindpay_quotes SET status='accepted',payment_id=$1,updated_at=$2 WHERE id=$3 AND status='open'`, payment.ID, now, payoutQuoteID)
+		result, err := tx.ExecContext(ctx, `UPDATE payout_quotes SET status='accepted',payment_id=$1,updated_at=$2 WHERE id=$3 AND status='open'`, payment.ID, now, payoutQuoteID)
 		if err != nil {
 			return nil, fmt.Errorf("accept payout quote: %w", err)
 		}
@@ -224,7 +224,7 @@ func (s *PostgresService) GetPayment(ctx context.Context, paymentID string) (*Pa
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("get payment destination: %w", err)
 	}
-	if err := s.db.QueryRowContext(ctx, `SELECT id FROM blindpay_quotes WHERE payment_id=$1`, paymentID).Scan(&p.PayoutQuoteID); err != nil && !errors.Is(err, sql.ErrNoRows) {
+	if err := s.db.QueryRowContext(ctx, `SELECT id FROM payout_quotes WHERE payment_id=$1`, paymentID).Scan(&p.PayoutQuoteID); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("get payment payout quote: %w", err)
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT payment_status, occurred_at, note FROM payment_timeline_entries
@@ -439,7 +439,7 @@ func getPaymentByIdempotencyKey(ctx context.Context, tx *sql.Tx, key string) (*P
 	if err != nil {
 		return nil, fmt.Errorf("get idempotent payment: %w", err)
 	}
-	if err := tx.QueryRowContext(ctx, `SELECT id FROM blindpay_quotes WHERE payment_id=$1`, payment.ID).Scan(&payment.PayoutQuoteID); err != nil && !errors.Is(err, sql.ErrNoRows) {
+	if err := tx.QueryRowContext(ctx, `SELECT id FROM payout_quotes WHERE payment_id=$1`, payment.ID).Scan(&payment.PayoutQuoteID); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("get idempotent payment payout quote: %w", err)
 	}
 	var destination Destination

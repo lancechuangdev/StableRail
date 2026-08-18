@@ -35,14 +35,14 @@ func TestPayoutServiceCommitsAttemptBeforeManagedWalletSubmission(t *testing.T) 
 	service.now = func() time.Time { return now }
 
 	mock.ExpectBegin()
-	mock.ExpectQuery("SELECT q.id,q.provider_wallet_id,w.address FROM blindpay_quotes").
+	mock.ExpectQuery("SELECT q.id,q.managed_wallet_id,w.address FROM payout_quotes").
 		WithArgs("pay_test").
 		WillReturnRows(sqlmock.NewRows([]string{"id", "provider_wallet_id", "address"}).AddRow("qu_test", "bl_test", "0xabc"))
-	mock.ExpectExec("INSERT INTO blindpay_payouts").
+	mock.ExpectExec("INSERT INTO payouts").
 		WithArgs("pay_test", "qu_test", "idem_test", "bl_test", "0xabc", now).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
-	mock.ExpectExec("UPDATE blindpay_payouts SET provider_payout_id").
+	mock.ExpectExec("UPDATE payouts SET provider_payout_id").
 		WithArgs("po_test", "processing", []byte(`{"id":"po_test","status":"processing"}`), now, "pay_test").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("UPDATE payments SET funds_status").WithArgs("reserved", now, "pay_test").WillReturnResult(sqlmock.NewResult(0, 1))
@@ -69,10 +69,10 @@ func TestPayoutServiceKeepsFundsReservedAfterAmbiguousSubmission(t *testing.T) {
 	service, _ := NewPayoutService(db, &fakeManagedWalletPayoutClient{err: errors.New("connection reset")})
 	service.now = func() time.Time { return now }
 	mock.ExpectBegin()
-	mock.ExpectQuery("SELECT q.id,q.provider_wallet_id,w.address FROM blindpay_quotes").WillReturnRows(sqlmock.NewRows([]string{"id", "provider_wallet_id", "address"}).AddRow("qu_test", "bl_test", "0xabc"))
-	mock.ExpectExec("INSERT INTO blindpay_payouts").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery("SELECT q.id,q.managed_wallet_id,w.address FROM payout_quotes").WillReturnRows(sqlmock.NewRows([]string{"id", "managed_wallet_id", "address"}).AddRow("qu_test", "bl_test", "0xabc"))
+	mock.ExpectExec("INSERT INTO payouts").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
-	mock.ExpectExec("UPDATE blindpay_payouts SET provider_status").WithArgs("unknown", "connection reset", now, "pay_test").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("UPDATE payouts SET provider_status").WithArgs("unknown", "connection reset", now, "pay_test").WillReturnResult(sqlmock.NewResult(0, 1))
 
 	if _, err := service.SubmitPayment(context.Background(), "pay_test", "idem_test"); !errors.Is(err, ErrPayoutSubmissionUnknown) {
 		t.Fatalf("error=%v, want ErrPayoutSubmissionUnknown", err)
