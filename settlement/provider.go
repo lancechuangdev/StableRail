@@ -10,6 +10,7 @@ import (
 
 type ProviderError struct {
 	Message   string
+	Code      string
 	Retryable bool
 }
 

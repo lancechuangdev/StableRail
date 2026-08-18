@@ -31,7 +31,12 @@ func (p *Provider) Submit(ctx context.Context, request settlement.SettlementRequ
 		case errors.Is(err, ErrPayoutSubmissionUnknown):
 			return settlement.SettlementResult{}, &settlement.ProviderError{Message: err.Error(), Retryable: true}
 		case errors.As(err, &apiErr):
-			return settlement.SettlementResult{}, &settlement.ProviderError{Message: err.Error(), Retryable: apiErr.Kind == ErrorRetryable}
+			retryable := apiErr.Kind == ErrorRetryable
+			code := ""
+			if !retryable {
+				code = "submission_failed"
+			}
+			return settlement.SettlementResult{}, &settlement.ProviderError{Message: err.Error(), Code: code, Retryable: retryable}
 		default:
 			return settlement.SettlementResult{}, err
 		}

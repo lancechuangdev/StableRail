@@ -44,6 +44,10 @@ func TestWorkflowTransitions(t *testing.T) {
 	if _, _, _, _, err := c.transition(StateCompleted, "policy.approved", ""); err == nil {
 		t.Fatal("expected invalid transition error")
 	}
+	next, command, _, _, err := c.transition(StateAwaitingSettlement, "settlement.failed", "submission_failed")
+	if err != nil || next != StateFailed || command != "payment.fail" {
+		t.Fatalf("submission failure transition = (%s, %s, %v)", next, command, err)
+	}
 }
 
 func TestHandleStartsSagaAndEnqueuesPolicyCommand(t *testing.T) {

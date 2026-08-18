@@ -90,6 +90,10 @@ func (h *CommandHandler) Handle(ctx context.Context, tx *sql.Tx, event eventbus.
 		if err != nil {
 			var providerErr *settlement.ProviderError
 			if errors.As(err, &providerErr) && !providerErr.Retryable {
+				if providerErr.Code == "submission_failed" {
+					payload.Reason = providerErr.Code
+					return h.enqueueReply(ctx, tx, event, payload, "settlement.failed")
+				}
 				return consumer.Permanent(err)
 			}
 			return fmt.Errorf("submit settlement: %w", err)
