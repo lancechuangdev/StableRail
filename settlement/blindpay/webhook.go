@@ -203,7 +203,7 @@ func (s *WebhookService) applyPayinWebhook(ctx context.Context, tx *sql.Tx, prov
 	status := string(mapPayinStatus(providerStatus))
 	var id, current, currency string
 	var amount int64
-	err := tx.QueryRowContext(ctx, `SELECT p.id,p.status,q.receiver_amount_minor,q.destination_currency FROM payins p JOIN payin_quotes q ON q.id=p.quote_id WHERE p.provider='blindpay' AND p.provider_payin_id=$1 FOR UPDATE`, providerID).Scan(&id, &current, &amount, &currency)
+	err := tx.QueryRowContext(ctx, `SELECT id,status,destination_amount_minor,destination_currency FROM payins WHERE provider='blindpay' AND provider_payin_id=$1 FOR UPDATE`, providerID).Scan(&id, &current, &amount, &currency)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}

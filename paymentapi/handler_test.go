@@ -145,14 +145,14 @@ func TestCreatePaymentRejectsDifferentRequestForIdempotencyKey(t *testing.T) {
 func TestCreateBlindPayPayoutQuote(t *testing.T) {
 	quotes := &fakePayoutQuoteService{}
 	h, _ := NewHandler(&fakeStore{}, fakeHealth{}, quotes)
-	req := httptest.NewRequest(http.MethodPost, "/v1/blindpay/payout-quotes", strings.NewReader(`{"tenant_id":"tenant-1","bank_account_id":"ba_test","managed_wallet_id":"bl_test","destination_currency":"BRL","currency_type":"sender","cover_fees":true,"request_amount_minor":2500}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/payout-quotes", strings.NewReader(`{"tenant_id":"tenant-1","source_account_id":"acct_test","destination_instrument_id":"instrument_test","source_currency":"USDC","destination_currency":"BRL","currency_type":"sender","cover_fees":true,"request_amount_minor":2500}`))
 	req.Header.Set("Idempotency-Key", "quote-request-1")
 	res := httptest.NewRecorder()
 	h.ServeHTTP(res, req)
 	if res.Code != http.StatusCreated {
 		t.Fatalf("status = %d, body=%s", res.Code, res.Body.String())
 	}
-	if quotes.request.IdempotencyKey != "quote-request-1" || quotes.request.BankAccountID != "ba_test" {
+	if quotes.request.IdempotencyKey != "quote-request-1" || quotes.request.SourceAccountID != "acct_test" {
 		t.Fatalf("unexpected quote request: %+v", quotes.request)
 	}
 }

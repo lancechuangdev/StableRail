@@ -1,10 +1,25 @@
+CREATE TABLE provider_resources (
+    id                 TEXT PRIMARY KEY,
+    tenant_id          TEXT NOT NULL,
+    provider           TEXT NOT NULL,
+    resource_type      TEXT NOT NULL CHECK (resource_type IN ('account','payment_instrument')),
+    provider_reference TEXT NOT NULL,
+    metadata           JSONB NOT NULL DEFAULT '{}',
+    created_at         TIMESTAMPTZ NOT NULL,
+    updated_at         TIMESTAMPTZ NOT NULL,
+    UNIQUE (provider, resource_type, provider_reference)
+);
+
+CREATE INDEX provider_resources_tenant_idx
+    ON provider_resources (tenant_id, resource_type, created_at, id);
+
 CREATE TABLE payout_quotes (
     id                        TEXT PRIMARY KEY,
     provider                  TEXT NOT NULL,
     provider_quote_id         TEXT NOT NULL,
     tenant_id                 TEXT NOT NULL,
-    bank_account_id           TEXT NOT NULL,
-    managed_wallet_id         TEXT NOT NULL,
+    source_account_id         TEXT NOT NULL REFERENCES provider_resources(id),
+    destination_instrument_id TEXT NOT NULL REFERENCES provider_resources(id),
     source_currency           TEXT NOT NULL,
     destination_currency      TEXT NOT NULL,
     currency_type             TEXT NOT NULL CHECK (currency_type IN ('sender', 'receiver')),
@@ -30,7 +45,15 @@ CREATE INDEX payout_quotes_tenant_idx ON payout_quotes (tenant_id, status);
 
 CREATE TABLE payouts (
     payment_id            TEXT PRIMARY KEY REFERENCES payments(id),
-    quote_id              TEXT NOT NULL UNIQUE REFERENCES payout_quotes(id),
+    quote_id              TEXT UNIQUE REFERENCES payout_quotes(id),
+    tenant_id             TEXT NOT NULL,
+    source_account_id     TEXT NOT NULL REFERENCES provider_resources(id),
+    destination_instrument_id TEXT NOT NULL REFERENCES provider_resources(id),
+    payout_method         TEXT NOT NULL,
+    source_amount_minor   BIGINT NOT NULL CHECK (source_amount_minor > 0),
+    source_currency       TEXT NOT NULL,
+    destination_amount_minor BIGINT NOT NULL CHECK (destination_amount_minor > 0),
+    destination_currency  TEXT NOT NULL,
     provider              TEXT NOT NULL,
     provider_payout_id    TEXT,
     provider_status       TEXT NOT NULL CHECK (provider_status IN (
@@ -38,8 +61,6 @@ CREATE TABLE payouts (
         'on_hold', 'completed', 'failed', 'refunded'
     )),
     idempotency_key       TEXT NOT NULL,
-    sender_wallet_id      TEXT NOT NULL,
-    sender_wallet_address TEXT NOT NULL,
     provider_payload      JSONB,
     last_error            TEXT,
     created_at            TIMESTAMPTZ NOT NULL,
@@ -50,3 +71,4 @@ CREATE TABLE payouts (
 );
 
 CREATE INDEX payouts_status_idx ON payouts (provider_status, updated_at);
+CREATE INDEX payouts_tenant_idx ON payouts (tenant_id, created_at, payment_id);

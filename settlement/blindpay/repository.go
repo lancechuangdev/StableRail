@@ -103,7 +103,7 @@ func (r *Repository) UpsertBankAccount(ctx context.Context, ref BankAccountRefer
 	if err != nil {
 		return fmt.Errorf("upsert BlindPay bank account reference: %w", err)
 	}
-	return nil
+	return r.upsertProviderResource(ctx, ref.ProviderBankAccountID, ref.TenantID, "payment_instrument", ref.ProviderBankAccountID, map[string]any{"kind": "bank_account", "rail": ref.Rail})
 }
 
 func (r *Repository) UpsertManagedWallet(ctx context.Context, ref ManagedWalletReference) error {
@@ -114,6 +114,36 @@ func (r *Repository) UpsertManagedWallet(ctx context.Context, ref ManagedWalletR
 	_, err := r.db.ExecContext(ctx, `INSERT INTO blindpay_managed_wallets(provider_wallet_id,tenant_id,network,address,display_name,status,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$7) ON CONFLICT(provider_wallet_id) DO UPDATE SET network=EXCLUDED.network,address=EXCLUDED.address,display_name=EXCLUDED.display_name,status=EXCLUDED.status,updated_at=EXCLUDED.updated_at WHERE blindpay_managed_wallets.tenant_id=EXCLUDED.tenant_id`, ref.ProviderWalletID, ref.TenantID, ref.Network, ref.Address, ref.DisplayName, ref.Status, now)
 	if err != nil {
 		return fmt.Errorf("upsert BlindPay managed wallet reference: %w", err)
+	}
+	return r.upsertProviderResource(ctx, ref.ProviderWalletID, ref.TenantID, "account", ref.ProviderWalletID, map[string]any{"kind": "managed_wallet", "network": ref.Network, "address": ref.Address})
+}
+
+type ProviderResource struct {
+	ProviderReference string
+	Metadata          json.RawMessage
+}
+
+func (r *Repository) ResolveProviderResource(ctx context.Context, tenantID, id, resourceType string) (ProviderResource, error) {
+	var resource ProviderResource
+	err := r.db.QueryRowContext(ctx, `SELECT provider_reference,metadata FROM provider_resources WHERE id=$1 AND tenant_id=$2 AND provider='blindpay' AND resource_type=$3`, id, tenantID, resourceType).Scan(&resource.ProviderReference, &resource.Metadata)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ProviderResource{}, ErrReferenceNotFound
+	}
+	if err != nil {
+		return ProviderResource{}, fmt.Errorf("resolve BlindPay provider resource: %w", err)
+	}
+	return resource, nil
+}
+
+func (r *Repository) upsertProviderResource(ctx context.Context, id, tenantID, resourceType, providerReference string, metadata map[string]any) error {
+	raw, err := json.Marshal(metadata)
+	if err != nil {
+		return err
+	}
+	now := r.now()
+	_, err = r.db.ExecContext(ctx, `INSERT INTO provider_resources(id,tenant_id,provider,resource_type,provider_reference,metadata,created_at,updated_at) VALUES($1,$2,'blindpay',$3,$4,$5,$6,$6) ON CONFLICT(id) DO UPDATE SET provider_reference=EXCLUDED.provider_reference,metadata=EXCLUDED.metadata,updated_at=EXCLUDED.updated_at WHERE provider_resources.tenant_id=EXCLUDED.tenant_id AND provider_resources.provider='blindpay'`, id, tenantID, resourceType, providerReference, raw, now)
+	if err != nil {
+		return fmt.Errorf("upsert BlindPay provider resource: %w", err)
 	}
 	return nil
 }
@@ -141,7 +171,7 @@ func (r *Repository) GetApprovedPayoutProfile(ctx context.Context, tenantID, ban
 }
 
 func (r *Repository) SavePayoutQuote(ctx context.Context, q PayoutQuote, raw json.RawMessage) error {
-	_, err := r.db.ExecContext(ctx, `INSERT INTO payout_quotes(id,provider,provider_quote_id,tenant_id,bank_account_id,managed_wallet_id,source_currency,destination_currency,currency_type,cover_fees,sender_amount_minor,receiver_amount_minor,commercial_rate,provider_rate,flat_fee_minor,partner_fee_minor,billing_fee_minor,status,expires_at,provider_payload,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$21)`, q.ID, q.Provider, q.ProviderQuoteID, q.TenantID, q.ProviderBankAccountID, q.ProviderWalletID, q.SourceCurrency, q.DestinationCurrency, q.CurrencyType, q.CoverFees, q.SenderAmountMinor, q.ReceiverAmountMinor, q.CommercialRate, q.ProviderRate, q.FlatFeeMinor, q.PartnerFeeMinor, q.BillingFeeMinor, q.Status, q.ExpiresAt, raw, q.CreatedAt)
+	_, err := r.db.ExecContext(ctx, `INSERT INTO payout_quotes(id,provider,provider_quote_id,tenant_id,source_account_id,destination_instrument_id,source_currency,destination_currency,currency_type,cover_fees,sender_amount_minor,receiver_amount_minor,commercial_rate,provider_rate,flat_fee_minor,partner_fee_minor,billing_fee_minor,status,expires_at,provider_payload,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$21)`, q.ID, q.Provider, q.ProviderQuoteID, q.TenantID, q.SourceAccountID, q.DestinationInstrumentID, q.SourceCurrency, q.DestinationCurrency, q.CurrencyType, q.CoverFees, q.SenderAmountMinor, q.ReceiverAmountMinor, q.CommercialRate, q.ProviderRate, q.FlatFeeMinor, q.PartnerFeeMinor, q.BillingFeeMinor, q.Status, q.ExpiresAt, raw, q.CreatedAt)
 	if err != nil {
 		return fmt.Errorf("save BlindPay payout quote: %w", err)
 	}

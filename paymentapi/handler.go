@@ -41,7 +41,6 @@ func NewHandler(payments PaymentStore, health Health, payoutQuotes settlement.Pa
 	mux.HandleFunc("POST /v1/payments", h.create)
 	if payoutQuotes != nil {
 		mux.HandleFunc("POST /v1/payout-quotes", h.createPayoutQuote)
-		mux.HandleFunc("POST /v1/blindpay/payout-quotes", h.createPayoutQuote)
 	}
 	mux.HandleFunc("GET /v1/payments/{id}", h.get)
 	mux.HandleFunc("GET /v1/payments/{id}/timeline", h.timeline)
@@ -176,14 +175,14 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 }
 
 type createPayoutQuoteRequest struct {
-	TenantID            string `json:"tenant_id"`
-	BankAccountID       string `json:"bank_account_id"`
-	ManagedWalletID     string `json:"managed_wallet_id"`
-	DestinationCurrency string `json:"destination_currency"`
-	CurrencyType        string `json:"currency_type"`
-	CoverFees           bool   `json:"cover_fees"`
-	RequestAmountMinor  int64  `json:"request_amount_minor"`
-	PartnerFeeID        string `json:"partner_fee_id,omitempty"`
+	TenantID                string `json:"tenant_id"`
+	SourceAccountID         string `json:"source_account_id"`
+	DestinationInstrumentID string `json:"destination_instrument_id"`
+	SourceCurrency          string `json:"source_currency"`
+	DestinationCurrency     string `json:"destination_currency"`
+	CurrencyType            string `json:"currency_type"`
+	CoverFees               bool   `json:"cover_fees"`
+	RequestAmountMinor      int64  `json:"request_amount_minor"`
 }
 
 func (h *Handler) createPayoutQuote(w http.ResponseWriter, r *http.Request) {
@@ -212,7 +211,7 @@ func (h *Handler) createPayoutQuote(w http.ResponseWriter, r *http.Request) {
 		}
 		tenantID = authenticated
 	}
-	q, err := h.payoutQuotes.CreatePayoutQuote(r.Context(), settlement.PayoutQuoteRequest{IdempotencyKey: key, TenantID: tenantID, BankAccountID: input.BankAccountID, ManagedWalletID: input.ManagedWalletID, DestinationCurrency: input.DestinationCurrency, CurrencyType: input.CurrencyType, CoverFees: input.CoverFees, RequestAmountMinor: input.RequestAmountMinor, PartnerFeeID: input.PartnerFeeID})
+	q, err := h.payoutQuotes.CreatePayoutQuote(r.Context(), settlement.PayoutQuoteRequest{IdempotencyKey: key, TenantID: tenantID, SourceAccountID: input.SourceAccountID, DestinationInstrumentID: input.DestinationInstrumentID, SourceCurrency: input.SourceCurrency, DestinationCurrency: input.DestinationCurrency, CurrencyType: input.CurrencyType, CoverFees: input.CoverFees, RequestAmountMinor: input.RequestAmountMinor})
 	if err != nil {
 		problem(w, http.StatusBadRequest, err.Error())
 		return

@@ -165,8 +165,9 @@ func (s *PayoutService) prepare(ctx context.Context, paymentID, idempotencyKey s
 	}
 	defer tx.Rollback()
 
-	var quoteID, walletID, walletAddress string
-	err = tx.QueryRowContext(ctx, `SELECT q.id,q.managed_wallet_id,w.address FROM payout_quotes q JOIN blindpay_managed_wallets w ON w.provider_wallet_id=q.managed_wallet_id WHERE q.payment_id=$1 AND q.provider='blindpay' AND q.status='accepted' FOR UPDATE`, paymentID).Scan(&quoteID, &walletID, &walletAddress)
+	var quoteID, tenantID, sourceAccountID, destinationInstrumentID, payoutMethod, walletID, walletAddress, sourceCurrency, destinationCurrency string
+	var sourceAmountMinor, destinationAmountMinor int64
+	err = tx.QueryRowContext(ctx, `SELECT q.id,q.tenant_id,q.source_account_id,q.destination_instrument_id,COALESCE(d.metadata->>'rail',d.metadata->>'kind','unknown'),r.provider_reference,w.address,q.sender_amount_minor,q.source_currency,q.receiver_amount_minor,q.destination_currency FROM payout_quotes q JOIN provider_resources r ON r.id=q.source_account_id AND r.provider='blindpay' JOIN provider_resources d ON d.id=q.destination_instrument_id AND d.provider='blindpay' JOIN blindpay_managed_wallets w ON w.provider_wallet_id=r.provider_reference WHERE q.payment_id=$1 AND q.provider='blindpay' AND q.status='accepted' FOR UPDATE`, paymentID).Scan(&quoteID, &tenantID, &sourceAccountID, &destinationInstrumentID, &payoutMethod, &walletID, &walletAddress, &sourceAmountMinor, &sourceCurrency, &destinationAmountMinor, &destinationCurrency)
 	if errors.Is(err, sql.ErrNoRows) {
 		return payoutAttempt{}, errors.New("payment has no accepted BlindPay quote")
 	}
@@ -175,7 +176,7 @@ func (s *PayoutService) prepare(ctx context.Context, paymentID, idempotencyKey s
 	}
 
 	now := s.now()
-	result, err := tx.ExecContext(ctx, `INSERT INTO payouts(payment_id,quote_id,provider,provider_status,idempotency_key,sender_wallet_id,sender_wallet_address,created_at,updated_at) VALUES($1,$2,'blindpay','submission_pending',$3,$4,$5,$6,$6) ON CONFLICT(payment_id) DO NOTHING`, paymentID, quoteID, idempotencyKey, walletID, walletAddress, now)
+	result, err := tx.ExecContext(ctx, `INSERT INTO payouts(payment_id,quote_id,tenant_id,source_account_id,destination_instrument_id,payout_method,source_amount_minor,source_currency,destination_amount_minor,destination_currency,provider,provider_status,idempotency_key,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'blindpay','submission_pending',$11,$12,$12) ON CONFLICT(payment_id) DO NOTHING`, paymentID, quoteID, tenantID, sourceAccountID, destinationInstrumentID, payoutMethod, sourceAmountMinor, sourceCurrency, destinationAmountMinor, destinationCurrency, idempotencyKey, now)
 	if err != nil {
 		return payoutAttempt{}, fmt.Errorf("create BlindPay payout submission: %w", err)
 	}
@@ -186,7 +187,7 @@ func (s *PayoutService) prepare(ctx context.Context, paymentID, idempotencyKey s
 	attempt := payoutAttempt{PayoutSubmission: PayoutSubmission{PaymentID: paymentID, QuoteID: quoteID, IdempotencyKey: idempotencyKey, SenderWalletID: walletID, SenderWalletAddress: walletAddress, ProviderStatus: "submission_pending", CreatedAt: now, UpdatedAt: now}, new: rows == 1}
 	if !attempt.new {
 		var submittedAt sql.NullTime
-		err = tx.QueryRowContext(ctx, `SELECT quote_id,COALESCE(provider_payout_id,''),provider_status,idempotency_key,sender_wallet_id,sender_wallet_address,created_at,updated_at,submitted_at FROM payouts WHERE payment_id=$1 FOR UPDATE`, paymentID).Scan(&attempt.QuoteID, &attempt.ProviderPayoutID, &attempt.ProviderStatus, &attempt.IdempotencyKey, &attempt.SenderWalletID, &attempt.SenderWalletAddress, &attempt.CreatedAt, &attempt.UpdatedAt, &submittedAt)
+		err = tx.QueryRowContext(ctx, `SELECT quote_id,COALESCE(provider_payout_id,''),provider_status,idempotency_key,created_at,updated_at,submitted_at FROM payouts WHERE payment_id=$1 FOR UPDATE`, paymentID).Scan(&attempt.QuoteID, &attempt.ProviderPayoutID, &attempt.ProviderStatus, &attempt.IdempotencyKey, &attempt.CreatedAt, &attempt.UpdatedAt, &submittedAt)
 		if err != nil {
 			return payoutAttempt{}, fmt.Errorf("get existing BlindPay payout submission: %w", err)
 		}

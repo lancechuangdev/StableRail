@@ -35,11 +35,11 @@ func TestPayoutServiceCommitsAttemptBeforeManagedWalletSubmission(t *testing.T) 
 	service.now = func() time.Time { return now }
 
 	mock.ExpectBegin()
-	mock.ExpectQuery("SELECT q.id,q.managed_wallet_id,w.address FROM payout_quotes").
+	mock.ExpectQuery("SELECT q.id,q.tenant_id,q.source_account_id").
 		WithArgs("pay_test").
-		WillReturnRows(sqlmock.NewRows([]string{"id", "provider_wallet_id", "address"}).AddRow("qu_test", "bl_test", "0xabc"))
+		WillReturnRows(payoutQuoteRouteRows())
 	mock.ExpectExec("INSERT INTO payouts").
-		WithArgs("pay_test", "qu_test", "idem_test", "bl_test", "0xabc", now).
+		WithArgs("pay_test", "qu_test", "tenant_test", "acct_test", "instrument_test", "ach", int64(100), "USDB", int64(90), "USD", "idem_test", now).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 	mock.ExpectExec("UPDATE payouts SET provider_payout_id").
@@ -69,7 +69,7 @@ func TestPayoutServiceKeepsFundsReservedAfterAmbiguousSubmission(t *testing.T) {
 	service, _ := NewPayoutService(db, &fakeManagedWalletPayoutClient{err: errors.New("connection reset")})
 	service.now = func() time.Time { return now }
 	mock.ExpectBegin()
-	mock.ExpectQuery("SELECT q.id,q.managed_wallet_id,w.address FROM payout_quotes").WillReturnRows(sqlmock.NewRows([]string{"id", "managed_wallet_id", "address"}).AddRow("qu_test", "bl_test", "0xabc"))
+	mock.ExpectQuery("SELECT q.id,q.tenant_id,q.source_account_id").WillReturnRows(payoutQuoteRouteRows())
 	mock.ExpectExec("INSERT INTO payouts").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 	mock.ExpectExec("UPDATE payouts SET provider_status").WithArgs("unknown", "connection reset", now, "pay_test").WillReturnResult(sqlmock.NewResult(0, 1))
@@ -80,4 +80,8 @@ func TestPayoutServiceKeepsFundsReservedAfterAmbiguousSubmission(t *testing.T) {
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func payoutQuoteRouteRows() *sqlmock.Rows {
+	return sqlmock.NewRows([]string{"id", "tenant_id", "source_account_id", "destination_instrument_id", "payout_method", "provider_reference", "address", "source_amount_minor", "source_currency", "destination_amount_minor", "destination_currency"}).AddRow("qu_test", "tenant_test", "acct_test", "instrument_test", "ach", "bl_test", "0xabc", int64(100), "USDB", int64(90), "USD")
 }

@@ -25,12 +25,20 @@ func NewProvider(payouts *PayoutService, quotes *QuoteService, client *Client) (
 func (*Provider) Name() string { return "blindpay" }
 
 func (p *Provider) CreatePayoutQuote(ctx context.Context, request settlement.PayoutQuoteRequest) (settlement.PayoutQuoteResult, error) {
+	source, err := p.quotes.repo.ResolveProviderResource(ctx, request.TenantID, request.SourceAccountID, "account")
+	if err != nil {
+		return settlement.PayoutQuoteResult{}, err
+	}
+	destination, err := p.quotes.repo.ResolveProviderResource(ctx, request.TenantID, request.DestinationInstrumentID, "payment_instrument")
+	if err != nil {
+		return settlement.PayoutQuoteResult{}, err
+	}
 	quote, err := p.quotes.Create(ctx, PayoutQuoteRequest{
 		IdempotencyKey: request.IdempotencyKey, TenantID: request.TenantID,
-		BankAccountID: request.BankAccountID, ManagedWalletID: request.ManagedWalletID,
+		BankAccountID: destination.ProviderReference, ManagedWalletID: source.ProviderReference,
+		SourceAccountID: request.SourceAccountID, DestinationInstrumentID: request.DestinationInstrumentID,
 		DestinationCurrency: request.DestinationCurrency, CurrencyType: request.CurrencyType,
 		CoverFees: request.CoverFees, RequestAmountMinor: request.RequestAmountMinor,
-		PartnerFeeID: request.PartnerFeeID,
 	})
 	if err != nil {
 		return settlement.PayoutQuoteResult{}, err

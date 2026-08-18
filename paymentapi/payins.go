@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"strings"
 
-	"stablerail/payin"
+	"stablerail/paymentcore/payin"
 )
 
 func NewPayinHandler(service *payin.Service) (http.Handler, error) {
@@ -23,19 +23,19 @@ func NewPayinHandler(service *payin.Service) (http.Handler, error) {
 		}
 		key := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
 		var in struct {
-			PaymentMethod      string `json:"payment_method"`
-			CurrencyType       string `json:"currency_type"`
-			ManagedWalletID    string `json:"managed_wallet_id"`
-			BlockchainWalletID string `json:"blockchain_wallet_id"`
-			Token              string `json:"token"`
-			SourceCurrency     string `json:"source_currency"`
-			AmountMinor        int64  `json:"amount_minor"`
-			CoverFees          bool   `json:"cover_fees"`
+			FundingMethod        string `json:"funding_method"`
+			CurrencyType         string `json:"currency_type"`
+			SourceInstrumentID   string `json:"source_instrument_id,omitempty"`
+			DestinationAccountID string `json:"destination_account_id"`
+			SourceCurrency       string `json:"source_currency"`
+			DestinationCurrency  string `json:"destination_currency"`
+			AmountMinor          int64  `json:"amount_minor"`
+			CoverFees            bool   `json:"cover_fees"`
 		}
 		if decodePayin(w, r, &in) != nil {
 			return
 		}
-		q, err := service.CreateQuote(r.Context(), payin.QuoteRequest{IdempotencyKey: key, TenantID: tenant, PaymentMethod: in.PaymentMethod, CurrencyType: in.CurrencyType, ManagedWalletID: in.ManagedWalletID, BlockchainWalletID: in.BlockchainWalletID, Token: in.Token, SourceCurrency: in.SourceCurrency, AmountMinor: in.AmountMinor, CoverFees: in.CoverFees})
+		q, err := service.CreateQuote(r.Context(), payin.QuoteRequest{IdempotencyKey: key, TenantID: tenant, FundingMethod: in.FundingMethod, CurrencyType: in.CurrencyType, SourceInstrumentID: in.SourceInstrumentID, DestinationAccountID: in.DestinationAccountID, SourceCurrency: in.SourceCurrency, DestinationCurrency: in.DestinationCurrency, AmountMinor: in.AmountMinor, CoverFees: in.CoverFees})
 		if err != nil {
 			problem(w, 400, err.Error())
 			return

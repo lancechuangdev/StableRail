@@ -12,6 +12,7 @@ import (
 type PayoutQuoteRequest struct {
 	IdempotencyKey                           string
 	TenantID, BankAccountID, ManagedWalletID string
+	SourceAccountID, DestinationInstrumentID string
 	DestinationCurrency                      string
 	CurrencyType                             string
 	CoverFees                                bool
@@ -20,26 +21,26 @@ type PayoutQuoteRequest struct {
 }
 
 type PayoutQuote struct {
-	ID                    string    `json:"id"`
-	Provider              string    `json:"provider"`
-	ProviderQuoteID       string    `json:"provider_quote_id"`
-	TenantID              string    `json:"tenant_id"`
-	ProviderBankAccountID string    `json:"bank_account_id"`
-	ProviderWalletID      string    `json:"managed_wallet_id"`
-	SourceCurrency        string    `json:"source_currency"`
-	DestinationCurrency   string    `json:"destination_currency"`
-	CurrencyType          string    `json:"currency_type"`
-	CoverFees             bool      `json:"cover_fees"`
-	SenderAmountMinor     int64     `json:"sender_amount_minor"`
-	ReceiverAmountMinor   int64     `json:"receiver_amount_minor"`
-	CommercialRate        string    `json:"commercial_rate"`
-	ProviderRate          string    `json:"provider_rate"`
-	FlatFeeMinor          int64     `json:"flat_fee_minor"`
-	PartnerFeeMinor       int64     `json:"partner_fee_minor"`
-	BillingFeeMinor       *int64    `json:"billing_fee_minor,omitempty"`
-	Status                string    `json:"status"`
-	ExpiresAt             time.Time `json:"expires_at"`
-	CreatedAt             time.Time `json:"created_at"`
+	ID                      string    `json:"id"`
+	Provider                string    `json:"provider"`
+	ProviderQuoteID         string    `json:"provider_quote_id"`
+	TenantID                string    `json:"tenant_id"`
+	SourceAccountID         string    `json:"source_account_id"`
+	DestinationInstrumentID string    `json:"destination_instrument_id"`
+	SourceCurrency          string    `json:"source_currency"`
+	DestinationCurrency     string    `json:"destination_currency"`
+	CurrencyType            string    `json:"currency_type"`
+	CoverFees               bool      `json:"cover_fees"`
+	SenderAmountMinor       int64     `json:"sender_amount_minor"`
+	ReceiverAmountMinor     int64     `json:"receiver_amount_minor"`
+	CommercialRate          string    `json:"commercial_rate"`
+	ProviderRate            string    `json:"provider_rate"`
+	FlatFeeMinor            int64     `json:"flat_fee_minor"`
+	PartnerFeeMinor         int64     `json:"partner_fee_minor"`
+	BillingFeeMinor         *int64    `json:"billing_fee_minor,omitempty"`
+	Status                  string    `json:"status"`
+	ExpiresAt               time.Time `json:"expires_at"`
+	CreatedAt               time.Time `json:"created_at"`
 }
 
 type QuoteService struct {
@@ -96,7 +97,15 @@ func (s *QuoteService) Create(ctx context.Context, r PayoutQuoteRequest) (*Payou
 			return nil, err
 		}
 	}
-	q := &PayoutQuote{ID: providerQuote.ID, Provider: "blindpay", ProviderQuoteID: providerQuote.ID, TenantID: r.TenantID, ProviderBankAccountID: r.BankAccountID, ProviderWalletID: r.ManagedWalletID, SourceCurrency: s.token, DestinationCurrency: r.DestinationCurrency, CurrencyType: r.CurrencyType, CoverFees: r.CoverFees, SenderAmountMinor: providerQuote.SenderAmount, ReceiverAmountMinor: providerQuote.ReceiverAmount, CommercialRate: providerQuote.CommercialQuotation.String(), ProviderRate: providerQuote.BlindPayQuotation.String(), FlatFeeMinor: providerQuote.FlatFee, PartnerFeeMinor: providerQuote.PartnerFeeAmount, BillingFeeMinor: providerQuote.BillingFeeAmount, Status: "open", ExpiresAt: expiresAt, CreatedAt: s.now()}
+	sourceAccountID := r.SourceAccountID
+	if sourceAccountID == "" {
+		sourceAccountID = r.ManagedWalletID
+	}
+	destinationInstrumentID := r.DestinationInstrumentID
+	if destinationInstrumentID == "" {
+		destinationInstrumentID = r.BankAccountID
+	}
+	q := &PayoutQuote{ID: providerQuote.ID, Provider: "blindpay", ProviderQuoteID: providerQuote.ID, TenantID: r.TenantID, SourceAccountID: sourceAccountID, DestinationInstrumentID: destinationInstrumentID, SourceCurrency: s.token, DestinationCurrency: r.DestinationCurrency, CurrencyType: r.CurrencyType, CoverFees: r.CoverFees, SenderAmountMinor: providerQuote.SenderAmount, ReceiverAmountMinor: providerQuote.ReceiverAmount, CommercialRate: providerQuote.CommercialQuotation.String(), ProviderRate: providerQuote.BlindPayQuotation.String(), FlatFeeMinor: providerQuote.FlatFee, PartnerFeeMinor: providerQuote.PartnerFeeAmount, BillingFeeMinor: providerQuote.BillingFeeAmount, Status: "open", ExpiresAt: expiresAt, CreatedAt: s.now()}
 	if err := s.repo.SavePayoutQuote(ctx, *q, raw); err != nil {
 		return nil, err
 	}

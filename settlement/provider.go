@@ -69,10 +69,11 @@ func (r PayoutResult) Validate() error {
 }
 
 type PayoutQuoteRequest struct {
-	IdempotencyKey, TenantID, BankAccountID, ManagedWalletID string
-	DestinationCurrency, CurrencyType, PartnerFeeID          string
-	CoverFees                                                bool
-	RequestAmountMinor                                       int64
+	IdempotencyKey, TenantID                          string
+	SourceAccountID, DestinationInstrumentID          string
+	SourceCurrency, DestinationCurrency, CurrencyType string
+	CoverFees                                         bool
+	RequestAmountMinor                                int64
 }
 type PayoutQuoteResult struct {
 	ID, Provider, Status, SourceCurrency, DestinationCurrency string
@@ -80,9 +81,9 @@ type PayoutQuoteResult struct {
 	ExpiresAt                                                 time.Time
 }
 type PayinQuoteRequest struct {
-	IdempotencyKey, TenantID, PaymentMethod, CurrencyType string
-	ManagedWalletID, BlockchainWalletID                   string
-	Token, SourceCurrency                                 string
+	IdempotencyKey, TenantID, FundingMethod, CurrencyType string
+	SourceInstrumentID, DestinationAccountID              string
+	SourceCurrency, DestinationCurrency                   string
 	AmountMinor                                           int64
 	CoverFees                                             bool
 }
@@ -110,11 +111,8 @@ type PayinResult struct {
 }
 
 func (r PayinQuoteRequest) Validate() error {
-	if r.IdempotencyKey == "" || r.TenantID == "" || r.PaymentMethod == "" || r.SourceCurrency == "" || r.AmountMinor <= 0 || r.Token == "" || (r.CurrencyType != "sender" && r.CurrencyType != "receiver") {
-		return errors.New("payin quote identity, payment method, token, positive amount, and valid currency type are required")
-	}
-	if (r.ManagedWalletID == "") == (r.BlockchainWalletID == "") {
-		return errors.New("exactly one payin destination wallet is required")
+	if r.IdempotencyKey == "" || r.TenantID == "" || r.FundingMethod == "" || r.SourceCurrency == "" || r.DestinationCurrency == "" || r.DestinationAccountID == "" || r.AmountMinor <= 0 || (r.CurrencyType != "sender" && r.CurrencyType != "receiver") {
+		return errors.New("payin quote identity, funding method, currencies, destination account, positive amount, and valid currency type are required")
 	}
 	return nil
 }
@@ -191,7 +189,7 @@ func (p *MockProvider) CreatePayoutQuote(_ context.Context, r PayoutQuoteRequest
 	if r.IdempotencyKey == "" || r.RequestAmountMinor <= 0 {
 		return PayoutQuoteResult{}, errors.New("invalid payout quote request")
 	}
-	return PayoutQuoteResult{ID: "qu_" + r.IdempotencyKey, Provider: p.Name(), Status: "open", SourceCurrency: "USD", DestinationCurrency: r.DestinationCurrency, SenderAmountMinor: r.RequestAmountMinor, ReceiverAmountMinor: r.RequestAmountMinor, ExpiresAt: p.now().Add(5 * time.Minute)}, nil
+	return PayoutQuoteResult{ID: "qu_" + r.IdempotencyKey, Provider: p.Name(), Status: "open", SourceCurrency: r.SourceCurrency, DestinationCurrency: r.DestinationCurrency, SenderAmountMinor: r.RequestAmountMinor, ReceiverAmountMinor: r.RequestAmountMinor, ExpiresAt: p.now().Add(5 * time.Minute)}, nil
 }
 
 func (p *MockProvider) CreatePayinQuote(_ context.Context, r PayinQuoteRequest) (PayinQuoteResult, error) {
@@ -199,7 +197,7 @@ func (p *MockProvider) CreatePayinQuote(_ context.Context, r PayinQuoteRequest) 
 		return PayinQuoteResult{}, err
 	}
 	payload, _ := json.Marshal(map[string]any{"mock": true})
-	return PayinQuoteResult{ProviderQuoteID: "pq_" + r.IdempotencyKey, SourceCurrency: r.SourceCurrency, DestinationCurrency: r.Token, SenderAmountMinor: r.AmountMinor, ReceiverAmountMinor: r.AmountMinor, ExpiresAt: p.now().Add(5 * time.Minute), Payload: payload}, nil
+	return PayinQuoteResult{ProviderQuoteID: "pq_" + r.IdempotencyKey, SourceCurrency: r.SourceCurrency, DestinationCurrency: r.DestinationCurrency, SenderAmountMinor: r.AmountMinor, ReceiverAmountMinor: r.AmountMinor, ExpiresAt: p.now().Add(5 * time.Minute), Payload: payload}, nil
 }
 
 func (p *MockProvider) ExecutePayin(_ context.Context, r PayinRequest) (PayinResult, error) {

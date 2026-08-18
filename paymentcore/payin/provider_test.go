@@ -8,7 +8,7 @@ import (
 
 func TestMockProviderCreatesQuoteAndCompletesPayin(t *testing.T) {
 	p := settlement.NewMockProvider(settlement.PayoutResult{})
-	q, err := p.CreatePayinQuote(context.Background(), QuoteRequest{IdempotencyKey: "quote-1", TenantID: "tenant-1", PaymentMethod: "ach", CurrencyType: "sender", ManagedWalletID: "bl_1", Token: "USDB", SourceCurrency: "USD", AmountMinor: 1000})
+	q, err := p.CreatePayinQuote(context.Background(), QuoteRequest{IdempotencyKey: "quote-1", TenantID: "tenant-1", FundingMethod: "ach", CurrencyType: "sender", DestinationAccountID: "acct_1", DestinationCurrency: "USDB", SourceCurrency: "USD", AmountMinor: 1000})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -24,8 +24,8 @@ func TestMockProviderCreatesQuoteAndCompletesPayin(t *testing.T) {
 	}
 }
 
-func TestQuoteRequiresExactlyOneDestination(t *testing.T) {
-	r := QuoteRequest{IdempotencyKey: "q", TenantID: "t", PaymentMethod: "ach", CurrencyType: "sender", Token: "USDC", AmountMinor: 1, ManagedWalletID: "bl_1", BlockchainWalletID: "bw_1"}
+func TestQuoteRequiresDestinationAccount(t *testing.T) {
+	r := QuoteRequest{IdempotencyKey: "q", TenantID: "t", FundingMethod: "ach", CurrencyType: "sender", DestinationCurrency: "USDC", SourceCurrency: "USD", AmountMinor: 1}
 	if err := r.Validate(); err == nil {
 		t.Fatal("expected destination validation error")
 	}

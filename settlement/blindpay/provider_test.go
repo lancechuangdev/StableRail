@@ -19,7 +19,7 @@ func TestProviderMapsProcessingPayoutToPendingSettlement(t *testing.T) {
 	service, _ := NewPayoutService(db, &fakeManagedWalletPayoutClient{payout: Payout{ID: "po_test", Status: "processing"}})
 	provider := &Provider{payouts: service}
 	mock.ExpectBegin()
-	mock.ExpectQuery("SELECT q.id,q.managed_wallet_id,w.address FROM payout_quotes").WillReturnRows(sqlmock.NewRows([]string{"id", "managed_wallet_id", "address"}).AddRow("qu_test", "bl_test", "0xabc"))
+	mock.ExpectQuery("SELECT q.id,q.tenant_id,q.source_account_id").WillReturnRows(payoutQuoteRouteRows())
 	mock.ExpectExec("INSERT INTO payouts").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 	mock.ExpectExec("UPDATE payouts SET provider_payout_id").WillReturnResult(sqlmock.NewResult(0, 1))
@@ -43,7 +43,7 @@ func TestProviderClassifiesPermanentAPIErrorAsSubmissionFailure(t *testing.T) {
 	service, _ := NewPayoutService(db, &fakeManagedWalletPayoutClient{err: &APIError{StatusCode: 422, Code: "insufficient_balance", Message: "insufficient balance", Kind: ErrorUserAction}})
 	provider := &Provider{payouts: service}
 	mock.ExpectBegin()
-	mock.ExpectQuery("SELECT q.id,q.managed_wallet_id,w.address FROM payout_quotes").WillReturnRows(sqlmock.NewRows([]string{"id", "managed_wallet_id", "address"}).AddRow("qu_test", "bl_test", "0xabc"))
+	mock.ExpectQuery("SELECT q.id,q.tenant_id,q.source_account_id").WillReturnRows(payoutQuoteRouteRows())
 	mock.ExpectExec("INSERT INTO payouts").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 	mock.ExpectExec("UPDATE payouts SET provider_status").WillReturnResult(sqlmock.NewResult(0, 1))

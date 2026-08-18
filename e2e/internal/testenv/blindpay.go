@@ -38,12 +38,15 @@ func (e *Environment) SeedBlindPayProfile(t *testing.T, tenant *Tenant) BlindPay
 	if _, err := e.DB.Exec(`INSERT INTO blindpay_managed_wallets(provider_wallet_id,tenant_id,network,address,display_name,status,created_at,updated_at) VALUES($1,$2,'base_sepolia',$3,'E2E wallet','active',$4,$4)`, profile.WalletID, tenant.ID, "0x"+suffix, now); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := e.DB.Exec(`INSERT INTO provider_resources(id,tenant_id,provider,resource_type,provider_reference,metadata,created_at,updated_at) VALUES($1,$2,'blindpay','payment_instrument',$1,'{"kind":"bank_account"}',$3,$3),($4,$2,'blindpay','account',$4,'{"kind":"managed_wallet"}',$3,$3)`, profile.BankAccountID, tenant.ID, now, profile.WalletID); err != nil {
+		t.Fatal(err)
+	}
 	return profile
 }
 
 func (tenant *Tenant) CreatePayoutQuote(t *testing.T, profile BlindPayProfile, key string, amount int64) PayoutQuote {
 	t.Helper()
-	body := map[string]any{"bank_account_id": profile.BankAccountID, "managed_wallet_id": profile.WalletID, "destination_currency": "USD", "currency_type": "sender", "cover_fees": false, "request_amount_minor": amount}
+	body := map[string]any{"source_account_id": profile.WalletID, "destination_instrument_id": profile.BankAccountID, "source_currency": "USDB", "destination_currency": "USD", "currency_type": "sender", "cover_fees": false, "request_amount_minor": amount}
 	response := tenant.Env.request(t, http.MethodPost, "/v1/blindpay/payout-quotes", tenant.APIKey, key, body)
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusCreated {

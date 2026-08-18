@@ -20,7 +20,9 @@ func TestRepositoryUpsertsSafeReferences(t *testing.T) {
 	repo.now = func() time.Time { return now }
 	mock.ExpectExec("INSERT INTO blindpay_customers").WithArgs("cus_local", "re_remote", "approved", now).WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec("INSERT INTO blindpay_bank_accounts").WithArgs("ba_remote", "cus_local", "ach", "Payroll", "1234", "approved", now).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec("INSERT INTO provider_resources").WithArgs("ba_remote", "cus_local", "payment_instrument", "ba_remote", sqlmock.AnyArg(), now).WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec("INSERT INTO blindpay_managed_wallets").WithArgs("bl_remote", "cus_local", "sepolia", "0xabc", "Settlement", "active", now).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec("INSERT INTO provider_resources").WithArgs("bl_remote", "cus_local", "account", "bl_remote", sqlmock.AnyArg(), now).WillReturnResult(sqlmock.NewResult(1, 1))
 	ctx := context.Background()
 	if err := repo.UpsertCustomer(ctx, CustomerReference{"cus_local", "re_remote", "approved"}); err != nil {
 		t.Fatal(err)
