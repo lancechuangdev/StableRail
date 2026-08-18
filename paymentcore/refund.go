@@ -6,28 +6,49 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-
-	"stablerail/eventbus"
+	"time"
 )
 
-// CreateRefund creates a linked refund and atomically enqueues its provider command.
-// Partial refunds are allowed up to the original payment amount.
-func (s *PostgresService) CreateRefund(ctx context.Context, paymentID, tenantID, idempotencyKey string, amountMinor int64, reason string) (*Refund, error) {
+// Refund is a merchant-issued financial operation linked to a payment. It does
+// not rewrite the original payment's delivery outcome.
+type Refund struct {
+	ID              string    `json:"id"`
+	PaymentID       string    `json:"payment_id"`
+	RefundPaymentID string    `json:"refund_payment_id"`
+	Reason          string    `json:"reason"`
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
+	IdempotencyKey  string    `json:"-"`
+}
+
+type refundLookup struct {
+	refund        Refund
+	amountMinor   int64
+	payoutQuoteID string
+}
+
+// CreateRefund creates a new payment linked to the original payment. The new
+// payment enters the ordinary payment saga and is settled as a normal payout.
+func (s *PostgresService) CreateRefund(ctx context.Context, paymentID, tenantID, idempotencyKey string, amountMinor int64, reason, payoutQuoteID string) (*Refund, error) {
+	// Validate the request
 	if paymentID == "" || tenantID == "" || idempotencyKey == "" || amountMinor <= 0 || reason == "" {
 		return nil, errors.New("invalid refund payload")
 	}
+
+	// Start one database transaction
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("begin refund transaction: %w", err)
 	}
 	defer tx.Rollback()
 
-	var paymentTenant, currency string
+	// Lock and load the original payment
+	var paymentTenant, externalReference, currency string
 	var paymentAmount int64
 	var paymentStatus PaymentStatus
 	var fundsStatus FundsStatus
-	err = tx.QueryRowContext(ctx, `SELECT tenant_id,currency,amount_minor,payment_status,funds_status FROM payments WHERE id=$1 FOR UPDATE`, paymentID).
-		Scan(&paymentTenant, &currency, &paymentAmount, &paymentStatus, &fundsStatus)
+	err = tx.QueryRowContext(ctx, `SELECT tenant_id,external_reference,currency,amount_minor,payment_status,funds_status FROM payments WHERE id=$1 FOR UPDATE`, paymentID).
+		Scan(&paymentTenant, &externalReference, &currency, &paymentAmount, &paymentStatus, &fundsStatus)
 	if errors.Is(err, sql.ErrNoRows) || (err == nil && paymentTenant != tenantID) {
 		return nil, fmt.Errorf("%w: %s", ErrPaymentNotFound, paymentID)
 	}
@@ -35,58 +56,105 @@ func (s *PostgresService) CreateRefund(ctx context.Context, paymentID, tenantID,
 		return nil, fmt.Errorf("lock refund payment: %w", err)
 	}
 
+	// Handle idempotent retries
 	existing, err := loadRefundByIdempotencyKey(ctx, tx, tenantID, idempotencyKey)
 	if err == nil {
-		if existing.PaymentID != paymentID || existing.AmountMinor != amountMinor || existing.Reason != reason {
+		if existing.refund.PaymentID != paymentID || existing.amountMinor != amountMinor || existing.refund.Reason != reason || existing.payoutQuoteID != payoutQuoteID {
 			return nil, ErrIdempotencyConflict
 		}
 		if err := tx.Commit(); err != nil {
 			return nil, fmt.Errorf("commit idempotent refund lookup: %w", err)
 		}
-		return existing, nil
+		return &existing.refund, nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return nil, err
 	}
+
+	// Verify that the original payment is refundable
 	if paymentStatus != PaymentStatusSucceeded || fundsStatus != FundsStatusConsumed {
 		return nil, fmt.Errorf("%w: payment must be succeeded with consumed funds", ErrPaymentNotRefundable)
 	}
+
+	// Calculate the remaining refundable amount
 	var refunded int64
-	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(SUM(amount_minor),0) FROM payment_refunds WHERE payment_id=$1 AND status IN ('created','processing','succeeded')`, paymentID).Scan(&refunded); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(SUM(r.amount_minor),0) FROM payment_refunds r JOIN payments p ON p.id=r.refund_payment_id WHERE r.payment_id=$1 AND p.payment_status <> 'failed'`, paymentID).Scan(&refunded); err != nil {
 		return nil, fmt.Errorf("sum prior refunds: %w", err)
 	}
 	if amountMinor > paymentAmount-refunded {
 		return nil, ErrRefundAmountExceeded
 	}
 
+	// Validate the payout quote if provided
+	if payoutQuoteID != "" {
+		var quoteTenant, quoteCurrency, quoteStatus string
+		var quoteAmount int64
+		var expiresAt time.Time
+		if err := tx.QueryRowContext(ctx, `SELECT tenant_id,source_currency,sender_amount_minor,status,expires_at FROM blindpay_quotes WHERE id=$1 FOR UPDATE`, payoutQuoteID).Scan(&quoteTenant, &quoteCurrency, &quoteAmount, &quoteStatus, &expiresAt); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return nil, errors.New("payout quote not found")
+			}
+			return nil, fmt.Errorf("lock refund payout quote: %w", err)
+		}
+		if quoteStatus != "open" || !expiresAt.After(s.now()) {
+			return nil, errors.New("payout quote expired or already accepted")
+		}
+		if quoteTenant != tenantID || quoteCurrency != currency || quoteAmount != amountMinor {
+			return nil, errors.New("refund tenant, amount, or currency does not match payout quote")
+		}
+	}
+
+	// Create the refund payment
 	refundID, err := s.newID("ref_")
 	if err != nil {
 		return nil, fmt.Errorf("generate refund ID: %w", err)
 	}
-	eventID, err := s.newID("evt_")
+	refundPaymentID, err := s.newID("pay_")
 	if err != nil {
-		return nil, fmt.Errorf("generate refund event ID: %w", err)
+		return nil, fmt.Errorf("generate refund payment ID: %w", err)
 	}
 	now := s.now()
-	if _, err := tx.ExecContext(ctx, `INSERT INTO payment_refunds(id,payment_id,tenant_id,idempotency_key,amount_minor,currency,status,reason,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,'created',$7,$8,$8)`, refundID, paymentID, tenantID, idempotencyKey, amountMinor, currency, reason, now); err != nil {
-		return nil, fmt.Errorf("insert refund: %w", err)
+	refundReference := externalReference + ":refund:" + refundID
+	if _, err := tx.ExecContext(ctx, `INSERT INTO payments(id,external_reference,currency,amount_minor,tenant_id,payment_status,funds_status,idempotency_key,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$9)`, refundPaymentID, refundReference, currency, amountMinor, tenantID, PaymentStatusCreated, FundsStatusAvailable, idempotencyKey, now); err != nil {
+		return nil, fmt.Errorf("insert refund payment: %w", err)
 	}
-	payload, err := json.Marshal(map[string]any{"refund_id": refundID, "payment_id": paymentID, "amount_minor": amountMinor, "currency": currency, "reason": reason})
+
+	// Link the refund payment to the original payment
+	if _, err := tx.ExecContext(ctx, `INSERT INTO payment_refunds(id,payment_id,refund_payment_id,tenant_id,idempotency_key,amount_minor,currency,reason,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$9)`, refundID, paymentID, refundPaymentID, tenantID, idempotencyKey, amountMinor, currency, reason, now); err != nil {
+		return nil, fmt.Errorf("link refund payment: %w", err)
+	}
+	if payoutQuoteID != "" {
+		result, err := tx.ExecContext(ctx, `UPDATE blindpay_quotes SET status='accepted',payment_id=$1,updated_at=$2 WHERE id=$3 AND status='open'`, refundPaymentID, now, payoutQuoteID)
+		if err != nil {
+			return nil, fmt.Errorf("accept refund payout quote: %w", err)
+		}
+		if rows, err := result.RowsAffected(); err != nil || rows != 1 {
+			return nil, errors.New("payout quote already accepted")
+		}
+	}
+
+	// Record the refund payment’s history
+	if err := insertHistory(ctx, tx, refundPaymentID, "created", "merchant refund payment created: "+reason, PaymentStatusCreated, "refund payment created", now); err != nil {
+		return nil, err
+	}
+	payload, err := json.Marshal(map[string]any{"external_reference": refundReference, "currency": currency, "amount_minor": amountMinor, "tenant_id": tenantID, "payment_status": PaymentStatusCreated, "funds_status": FundsStatusAvailable, "refund_id": refundID, "original_payment_id": paymentID})
 	if err != nil {
-		return nil, fmt.Errorf("encode refund event: %w", err)
+		return nil, fmt.Errorf("encode refund payment event: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO outbox_events(id,topic,event_type,event_version,aggregate_id,aggregate_type,payload,occurred_at) VALUES($1,'payment-commands','refund.execute',$2,$3,'payment',$4,$5)`, eventID, eventbus.RefundExecuteVersion, paymentID, payload, now); err != nil {
-		return nil, fmt.Errorf("enqueue refund event: %w", err)
+
+	// Publish the normal payment.created event
+	if err := s.enqueue(ctx, tx, refundPaymentID, "payment.created", payload, now); err != nil {
+		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("commit refund: %w", err)
+		return nil, fmt.Errorf("commit refund payment: %w", err)
 	}
-	return &Refund{ID: refundID, PaymentID: paymentID, AmountMinor: amountMinor, Currency: currency, Status: "created", Reason: reason, CreatedAt: now, UpdatedAt: now, IdempotencyKey: idempotencyKey}, nil
+	return &Refund{ID: refundID, PaymentID: paymentID, RefundPaymentID: refundPaymentID, Reason: reason, CreatedAt: now, UpdatedAt: now, IdempotencyKey: idempotencyKey}, nil
 }
 
-func loadRefundByIdempotencyKey(ctx context.Context, tx *sql.Tx, tenantID, key string) (*Refund, error) {
-	r := &Refund{IdempotencyKey: key}
-	err := tx.QueryRowContext(ctx, `SELECT id,payment_id,amount_minor,currency,status,reason,created_at,updated_at FROM payment_refunds WHERE tenant_id=$1 AND idempotency_key=$2`, tenantID, key).
-		Scan(&r.ID, &r.PaymentID, &r.AmountMinor, &r.Currency, &r.Status, &r.Reason, &r.CreatedAt, &r.UpdatedAt)
+func loadRefundByIdempotencyKey(ctx context.Context, tx *sql.Tx, tenantID, key string) (*refundLookup, error) {
+	r := &refundLookup{refund: Refund{IdempotencyKey: key}}
+	err := tx.QueryRowContext(ctx, `SELECT r.id,r.payment_id,r.refund_payment_id,r.reason,r.created_at,r.updated_at,p.amount_minor,COALESCE(q.id,'') FROM payment_refunds r JOIN payments p ON p.id=r.refund_payment_id LEFT JOIN blindpay_quotes q ON q.payment_id=r.refund_payment_id WHERE r.tenant_id=$1 AND r.idempotency_key=$2`, tenantID, key).
+		Scan(&r.refund.ID, &r.refund.PaymentID, &r.refund.RefundPaymentID, &r.refund.Reason, &r.refund.CreatedAt, &r.refund.UpdatedAt, &r.amountMinor, &r.payoutQuoteID)
 	return r, err
 }

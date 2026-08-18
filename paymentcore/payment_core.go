@@ -14,20 +14,6 @@ var (
 	ErrRefundAmountExceeded = errors.New("refund amount exceeds the remaining refundable amount")
 )
 
-// Refund is a merchant-issued financial operation linked to a payment. It does
-// not rewrite the original payment's delivery outcome.
-type Refund struct {
-	ID             string    `json:"id"`
-	PaymentID      string    `json:"payment_id"`
-	AmountMinor    int64     `json:"amount_minor"`
-	Currency       string    `json:"currency"`
-	Status         string    `json:"status"`
-	Reason         string    `json:"reason"`
-	CreatedAt      time.Time `json:"created_at"`
-	UpdatedAt      time.Time `json:"updated_at"`
-	IdempotencyKey string    `json:"-"`
-}
-
 // PaymentStatus represents the delivery lifecycle of a payment.
 type PaymentStatus string
 

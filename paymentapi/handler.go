@@ -17,16 +17,13 @@ import (
 type PaymentStore interface {
 	CreatePayment(context.Context, string, string, int64, string, string) (*paymentcore.Payment, error)
 	CreatePaymentWithPayoutQuote(context.Context, string, string, int64, string, string, string) (*paymentcore.Payment, error)
+	CreateRefund(context.Context, string, string, string, int64, string, string) (*paymentcore.Refund, error)
 	GetPayment(context.Context, string) (*paymentcore.Payment, error)
 	Timeline(context.Context, string) ([]paymentcore.TimelineEntry, error)
 }
 type DestinationPaymentStore interface {
 	CreatePaymentWithDestination(context.Context, string, string, int64, string, string, paymentcore.Destination) (*paymentcore.Payment, error)
 }
-type RefundStore interface {
-	CreateRefund(context.Context, string, string, string, int64, string) (*paymentcore.Refund, error)
-}
-
 type Health interface{ PingContext(context.Context) error }
 
 type BlindPayPayoutQuoteService interface {
@@ -58,16 +55,12 @@ func NewHandler(payments PaymentStore, health Health, payoutQuotes BlindPayPayou
 }
 
 type createRefundRequest struct {
-	AmountMinor int64  `json:"amount_minor"`
-	Reason      string `json:"reason"`
+	AmountMinor   int64  `json:"amount_minor"`
+	Reason        string `json:"reason"`
+	PayoutQuoteID string `json:"payout_quote_id,omitempty"`
 }
 
 func (h *Handler) createRefund(w http.ResponseWriter, r *http.Request) {
-	store, ok := h.payments.(RefundStore)
-	if !ok {
-		problem(w, http.StatusNotImplemented, "refunds are not supported")
-		return
-	}
 	key := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
 	if key == "" || len(key) > 255 {
 		problem(w, http.StatusBadRequest, "a valid Idempotency-Key header is required")
@@ -95,7 +88,7 @@ func (h *Handler) createRefund(w http.ResponseWriter, r *http.Request) {
 		problem(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
-	refund, err := store.CreateRefund(r.Context(), r.PathValue("id"), tenantID, key, input.AmountMinor, input.Reason)
+	refund, err := h.payments.CreateRefund(r.Context(), r.PathValue("id"), tenantID, key, input.AmountMinor, input.Reason, strings.TrimSpace(input.PayoutQuoteID))
 	if err != nil {
 		switch {
 		case errors.Is(err, paymentcore.ErrPaymentNotFound):

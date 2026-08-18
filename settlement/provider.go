@@ -69,15 +69,6 @@ func (r OperationResult) Validate() error {
 type SettlementProvider interface {
 	Name() string
 	ExecutePayout(context.Context, PayoutRequest) (OperationResult, error)
-	ExecuteRefund(context.Context, RefundRequest) (OperationResult, error)
-}
-
-type RefundRequest struct {
-	IdempotencyKey string
-	RefundID       string
-	PaymentID      string
-	AmountMinor    int64
-	Currency       string
 }
 
 // MockProvider is deterministic and idempotent. It is safe for concurrent use.
@@ -119,11 +110,4 @@ func (p *MockProvider) ExecutePayout(_ context.Context, request PayoutRequest) (
 	}
 	p.seen[request.IdempotencyKey] = result
 	return result, nil
-}
-
-func (p *MockProvider) ExecuteRefund(ctx context.Context, request RefundRequest) (OperationResult, error) {
-	if request.RefundID == "" {
-		return OperationResult{}, errors.New("refund ID is required")
-	}
-	return p.ExecutePayout(ctx, PayoutRequest{IdempotencyKey: request.IdempotencyKey, PaymentID: request.PaymentID, AmountMinor: request.AmountMinor, Currency: request.Currency})
 }

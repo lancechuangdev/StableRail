@@ -14,15 +14,24 @@ import (
 )
 
 type fakeStore struct {
-	payment  *paymentcore.Payment
-	err      error
-	key      string
-	tenantID string
+	payment   *paymentcore.Payment
+	err       error
+	key       string
+	tenantID  string
+	refund    *paymentcore.Refund
+	paymentID string
+	amount    int64
+	reason    string
 }
 
 func (f *fakeStore) CreatePayment(_ context.Context, _, _ string, _ int64, tenantID, key string) (*paymentcore.Payment, error) {
 	f.key, f.tenantID = key, tenantID
 	return f.payment, f.err
+}
+
+func (f *fakeStore) CreateRefund(_ context.Context, paymentID, tenantID, key string, amount int64, reason, _ string) (*paymentcore.Refund, error) {
+	f.paymentID, f.tenantID, f.key, f.amount, f.reason = paymentID, tenantID, key, amount, reason
+	return f.refund, f.err
 }
 
 func TestCreatePaymentDerivesAuthenticatedTenant(t *testing.T) {
@@ -66,21 +75,8 @@ type fakeHealth struct{ err error }
 
 func (f fakeHealth) PingContext(context.Context) error { return f.err }
 
-type fakeRefundStore struct {
-	fakeStore
-	refund    *paymentcore.Refund
-	paymentID string
-	amount    int64
-	reason    string
-}
-
-func (f *fakeRefundStore) CreateRefund(_ context.Context, paymentID, tenantID, key string, amount int64, reason string) (*paymentcore.Refund, error) {
-	f.paymentID, f.tenantID, f.key, f.amount, f.reason = paymentID, tenantID, key, amount, reason
-	return f.refund, f.err
-}
-
 func TestCreateRefundUsesAuthenticatedTenantAndIdempotency(t *testing.T) {
-	store := &fakeRefundStore{refund: &paymentcore.Refund{ID: "ref_1", PaymentID: "pay_1", Status: "created"}}
+	store := &fakeStore{refund: &paymentcore.Refund{ID: "ref_1", PaymentID: "pay_1", RefundPaymentID: "pay_refund_1"}}
 	h, _ := NewHandler(store, fakeHealth{}, nil)
 	req := httptest.NewRequest(http.MethodPost, "/v1/payments/pay_1/refunds", strings.NewReader(`{"amount_minor":500,"reason":"duplicate order"}`))
 	req = req.WithContext(context.WithValue(req.Context(), tenantContextKey{}, "tenant_1"))

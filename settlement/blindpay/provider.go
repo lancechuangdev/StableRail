@@ -59,9 +59,3 @@ func (p *Provider) ExecutePayout(ctx context.Context, request settlement.PayoutR
 	}
 	return result, nil
 }
-
-// Refund is unsupported because BlindPay does not expose a merchant-triggered
-// payout refund operation.
-func (*Provider) ExecuteRefund(context.Context, settlement.RefundRequest) (settlement.OperationResult, error) {
-	return settlement.OperationResult{}, &settlement.ProviderError{Message: "merchant refunds are not supported by BlindPay", Code: "unsupported", Retryable: false}
-}
