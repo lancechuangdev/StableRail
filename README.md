@@ -90,6 +90,7 @@ The persisted saga tracks internal workflow progress in more detail than the pub
 
 ```mermaid
 stateDiagram-v2
+    state "funds_returned (saga)" as returned
     [*] --> awaiting_policy: payment.created
     awaiting_policy --> awaiting_ledger: policy.approved / ledger.reserve
     awaiting_policy --> failed: policy.rejected / payment.fail
@@ -103,6 +104,7 @@ stateDiagram-v2
     awaiting_settlement --> failed: submission_failed / payment.fail
 
     awaiting_settlement --> returning: settlement.returned / ledger.release
+    failed --> returning: late settlement.returned / ledger.release
     returning --> returned: ledger.released / payment.return
 
     awaiting_settlement --> on_hold: settlement.on_hold
@@ -115,6 +117,11 @@ stateDiagram-v2
     manual_review --> failed: operator fail / payment.fail_reserved
     manual_review --> returning: operator return / ledger.release
 ```
+
+The saga's `funds_returned` label is persisted internally as `returned`. It is
+not a payment status: the resulting payment remains `payment_status=failed`
+while `funds_status=returned`. The transition from `failed` handles a provider
+return that arrives after a reserved-funds failure was already recorded.
 
 Timeout handling is conservative: settlement timeouts fail the payment but preserve its reservation, compliance timeouts require manual review, and ambiguous submissions remain in processing until recovery or reconciliation establishes an outcome. A reservation becomes available only after a confirmed pre-capture failure, and becomes returned only after the provider confirms the funds came back.
 

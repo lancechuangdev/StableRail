@@ -196,6 +196,8 @@ func (c *Coordinator) transition(state State, eventType, reason string) (State, 
 		return StateFailed, "payment.fail_reserved", 0, reasonOrDefault(reason, "settlement failed"), nil
 	case state == StateAwaitingSettlement && eventType == "settlement.returned":
 		return StateReturning, "ledger.release", c.ledgerTimeout, reasonOrDefault(reason, "settlement funds returned"), nil
+	case state == StateFailed && eventType == "settlement.returned":
+		return StateReturning, "ledger.release", c.ledgerTimeout, reasonOrDefault(reason, "settlement funds returned after payment failure"), nil
 	case state == StateReleasingLedger && eventType == "ledger.released":
 		return StateLedgerReleased, "payment.fail", 0, reason, nil
 	case state == StateReturning && eventType == "ledger.released":
