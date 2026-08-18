@@ -7,8 +7,19 @@ import (
 
 	"github.com/DATA-DOG/go-sqlmock"
 
-	"stablerail/settlement"
+	"stablerail/paymentcore/payout"
 )
+
+type fakeManagedWalletPayoutClient struct {
+	request PayoutRequest
+	payout  Payout
+	err     error
+}
+
+func (f *fakeManagedWalletPayoutClient) CreateEVMPayout(_ context.Context, request PayoutRequest) (Payout, error) {
+	f.request = request
+	return f.payout, f.err
+}
 
 func TestProviderMapsProcessingPayoutToPendingSettlement(t *testing.T) {
 	db, mock, err := sqlmock.New()
@@ -16,20 +27,15 @@ func TestProviderMapsProcessingPayoutToPendingSettlement(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	service, _ := NewPayoutService(db, &fakeManagedWalletPayoutClient{payout: Payout{ID: "po_test", Status: "processing"}})
-	provider := &Provider{payouts: service}
-	mock.ExpectBegin()
-	mock.ExpectQuery("SELECT q.id,q.tenant_id,q.source_account_id").WillReturnRows(payoutQuoteRouteRows())
-	mock.ExpectExec("INSERT INTO payouts").WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectCommit()
-	mock.ExpectExec("UPDATE payouts SET provider_payout_id").WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectExec("UPDATE payments SET funds_status").WillReturnResult(sqlmock.NewResult(0, 1))
+	client := &fakeManagedWalletPayoutClient{payout: Payout{ID: "po_test", Status: "processing"}}
+	provider := &Provider{payoutClient: client, repo: &Repository{db: db}}
+	mock.ExpectQuery("SELECT provider_reference,metadata FROM provider_resources").WithArgs("acct_test", "tenant_test", "account").WillReturnRows(sqlmock.NewRows([]string{"provider_reference", "metadata"}).AddRow("bl_test", []byte(`{"address":"0xabc"}`)))
 
-	result, err := provider.ExecutePayout(context.Background(), settlement.PayoutRequest{IdempotencyKey: "idem-1", PaymentID: "pay_test", AmountMinor: 1, Currency: "USDB"})
+	result, err := provider.ExecutePayout(context.Background(), payout.Request{IdempotencyKey: "idem-1", PaymentID: "pay_test", TenantID: "tenant_test", SourceAccountID: "acct_test", ProviderQuoteID: "qu_test", AmountMinor: 1, Currency: "USDB"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.ProviderReference != "po_test" || result.Status != settlement.StatusPending {
+	if result.ProviderReference != "po_test" || result.Status != payout.StatusPending {
 		t.Fatalf("result=%+v", result)
 	}
 }
@@ -40,16 +46,12 @@ func TestProviderClassifiesPermanentAPIErrorAsSubmissionFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	service, _ := NewPayoutService(db, &fakeManagedWalletPayoutClient{err: &APIError{StatusCode: 422, Code: "insufficient_balance", Message: "insufficient balance", Kind: ErrorUserAction}})
-	provider := &Provider{payouts: service}
-	mock.ExpectBegin()
-	mock.ExpectQuery("SELECT q.id,q.tenant_id,q.source_account_id").WillReturnRows(payoutQuoteRouteRows())
-	mock.ExpectExec("INSERT INTO payouts").WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectCommit()
-	mock.ExpectExec("UPDATE payouts SET provider_status").WillReturnResult(sqlmock.NewResult(0, 1))
+	client := &fakeManagedWalletPayoutClient{err: &APIError{StatusCode: 422, Code: "insufficient_balance", Message: "insufficient balance", Kind: ErrorUserAction}}
+	provider := &Provider{payoutClient: client, repo: &Repository{db: db}}
+	mock.ExpectQuery("SELECT provider_reference,metadata FROM provider_resources").WillReturnRows(sqlmock.NewRows([]string{"provider_reference", "metadata"}).AddRow("bl_test", []byte(`{"address":"0xabc"}`)))
 
-	_, err = provider.ExecutePayout(context.Background(), settlement.PayoutRequest{IdempotencyKey: "idem-1", PaymentID: "pay_test", AmountMinor: 1, Currency: "USDB"})
-	var providerErr *settlement.ProviderError
+	_, err = provider.ExecutePayout(context.Background(), payout.Request{IdempotencyKey: "idem-1", PaymentID: "pay_test", TenantID: "tenant_test", SourceAccountID: "acct_test", ProviderQuoteID: "qu_test", AmountMinor: 1, Currency: "USDB"})
+	var providerErr *payout.ProviderError
 	if !errors.As(err, &providerErr) || providerErr.Retryable || providerErr.Code != "submission_failed" {
 		t.Fatalf("error=%v, want non-retryable submission_failed", err)
 	}

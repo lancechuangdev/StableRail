@@ -18,12 +18,14 @@ CREATE TABLE payout_quotes (
     provider                  TEXT NOT NULL,
     provider_quote_id         TEXT NOT NULL,
     tenant_id                 TEXT NOT NULL,
+    idempotency_key           TEXT NOT NULL,
     source_account_id         TEXT NOT NULL REFERENCES provider_resources(id),
     destination_instrument_id TEXT NOT NULL REFERENCES provider_resources(id),
     source_currency           TEXT NOT NULL,
     destination_currency      TEXT NOT NULL,
     currency_type             TEXT NOT NULL CHECK (currency_type IN ('sender', 'receiver')),
     cover_fees                BOOLEAN NOT NULL,
+    request_amount_minor      BIGINT NOT NULL CHECK (request_amount_minor > 0),
     sender_amount_minor       BIGINT NOT NULL CHECK (sender_amount_minor > 0),
     receiver_amount_minor     BIGINT NOT NULL CHECK (receiver_amount_minor > 0),
     commercial_rate           TEXT NOT NULL,
@@ -37,7 +39,8 @@ CREATE TABLE payout_quotes (
     payment_id                TEXT UNIQUE REFERENCES payments(id),
     created_at                TIMESTAMPTZ NOT NULL,
     updated_at                TIMESTAMPTZ NOT NULL,
-    UNIQUE (provider, provider_quote_id)
+    UNIQUE (provider, provider_quote_id),
+    UNIQUE (tenant_id, idempotency_key)
 );
 
 CREATE INDEX payout_quotes_expiry_idx ON payout_quotes (status, expires_at);

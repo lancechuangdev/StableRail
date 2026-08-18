@@ -22,6 +22,7 @@ import (
 	"stablerail/paymentapi"
 	"stablerail/paymentcore"
 	"stablerail/paymentcore/payin"
+	"stablerail/paymentcore/payout"
 	"stablerail/policy"
 	"stablerail/postgresdb"
 	"stablerail/reconciliation"
@@ -30,6 +31,15 @@ import (
 	"stablerail/settlement/blindpay"
 	"stablerail/workers"
 )
+
+// directPayoutService keeps the deterministic mock lightweight. Production
+// providers are wrapped by payout.Service so their attempts are durable.
+type directPayoutService struct{ provider payout.ExecutionProvider }
+
+func (s directPayoutService) Name() string { return s.provider.Name() }
+func (s directPayoutService) CreatePayout(ctx context.Context, request payout.Request) (payout.Result, error) {
+	return s.provider.ExecutePayout(ctx, request)
+}
 
 func main() {
 	if err := run(); err != nil {
@@ -95,6 +105,13 @@ func run() error {
 	}
 
 	var provider settlement.SettlementProvider
+	var payoutCreator interface {
+		Name() string
+		CreatePayout(context.Context, payout.Request) (payout.Result, error)
+	}
+	var payoutQuoteCreator interface {
+		CreateQuote(context.Context, payout.QuoteRequest) (payout.QuoteResult, error)
+	}
 	var blindPayWebhookHandler http.Handler
 	webhookReconciler := func(ctx context.Context) error {
 		<-ctx.Done()
@@ -106,18 +123,24 @@ func run() error {
 	}
 	switch config.SettlementProvider {
 	case "mock":
-		mockProvider := settlement.NewMockProvider(settlement.PayoutResult{})
-		mockProvider.ResultsByAmount = map[int64]settlement.PayoutResult{}
+		mockProvider := settlement.NewMockProvider(payout.Result{})
+		mockProvider.ResultsByAmount = map[int64]payout.Result{}
 		if config.MockSettlementFailAmount > 0 {
-			mockProvider.ResultsByAmount[config.MockSettlementFailAmount] = settlement.PayoutResult{Status: settlement.StatusFailed, FailureCode: "local_failure", FailureMessage: "local settlement failed"}
+			mockProvider.ResultsByAmount[config.MockSettlementFailAmount] = payout.Result{Status: payout.StatusFailed, FailureCode: "local_failure", FailureMessage: "local settlement failed"}
 		}
 		if config.MockSettlementHoldAmount > 0 {
-			mockProvider.ResultsByAmount[config.MockSettlementHoldAmount] = settlement.PayoutResult{Status: settlement.StatusOnHold}
+			mockProvider.ResultsByAmount[config.MockSettlementHoldAmount] = payout.Result{Status: payout.StatusOnHold}
 		}
 		if config.MockSettlementPendingAmount > 0 {
-			mockProvider.ResultsByAmount[config.MockSettlementPendingAmount] = settlement.PayoutResult{Status: settlement.StatusPending}
+			mockProvider.ResultsByAmount[config.MockSettlementPendingAmount] = payout.Result{Status: payout.StatusPending}
 		}
 		provider = mockProvider
+		payoutCreator = directPayoutService{provider: mockProvider}
+		payoutQuotes, err := payout.NewService(db, mockProvider)
+		if err != nil {
+			return err
+		}
+		payoutQuoteCreator = payoutQuotes
 	case "blindpay":
 		client, err := blindpay.NewClient(blindpay.Config{
 			APIKey:     config.BlindPay.APIKey,
@@ -135,17 +158,19 @@ func run() error {
 		if err != nil {
 			return err
 		}
-		payouts, err := blindpay.NewPayoutService(db, client)
+		provider, err = blindpay.NewProvider(payoutQuotes, client, references)
+		if err != nil {
+			return err
+		}
+		payouts, err := payout.NewService(db, provider)
 		if err != nil {
 			return err
 		}
 		payoutRecovery = func(ctx context.Context) error {
 			return payouts.RunRecovery(ctx, config.ReconciliationInterval)
 		}
-		provider, err = blindpay.NewProvider(payouts, payoutQuotes, client)
-		if err != nil {
-			return err
-		}
+		payoutCreator = payouts
+		payoutQuoteCreator = payouts
 		verifier, err := blindpay.NewWebhookVerifier(config.BlindPay.WebhookSecret)
 		if err != nil {
 			return err
@@ -166,11 +191,11 @@ func run() error {
 	}
 	commandLoop := &consumer.Loop{
 		Reader:    consumer.NewKafkaReader(config.KafkaBrokers, string(saga.CommandTopic), "stablerail-core-workers"),
-		Processor: inbox.BoundProcessor{Processor: inboxProcessor, Handler: workers.NewCommandHandler(policy.DeterministicEvaluator{RejectAmountMinor: config.MockPolicyRejectAmount}, ledger.NewPostgresService(), provider).Handle},
+		Processor: inbox.BoundProcessor{Processor: inboxProcessor, Handler: workers.NewCommandHandler(policy.DeterministicEvaluator{RejectAmountMinor: config.MockPolicyRejectAmount}, ledger.NewPostgresService(), payoutCreator).Handle},
 		Consumer:  "core-workers",
 	}
 
-	handler, err := paymentapi.NewHandler(paymentcore.NewPostgresService(db), db, provider)
+	handler, err := paymentapi.NewHandler(paymentcore.NewPostgresService(db), db, payoutQuoteCreator)
 	if err != nil {
 		return err
 	}

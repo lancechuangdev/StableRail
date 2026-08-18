@@ -2,25 +2,73 @@
 package payin
 
 import (
+	"context"
 	"encoding/json"
-	"stablerail/settlement"
+	"errors"
+	"fmt"
 	"time"
 )
 
-type Status = settlement.PayinStatus
+type PayinStatus string
 
 const (
-	StatusProcessing = settlement.PayinStatusProcessing
-	StatusOnHold     = settlement.PayinStatusOnHold
-	StatusSucceeded  = settlement.PayinStatusSucceeded
-	StatusFailed     = settlement.PayinStatusFailed
-	StatusRefunded   = settlement.PayinStatusRefunded
+	StatusProcessing PayinStatus = "processing"
+	StatusOnHold     PayinStatus = "on_hold"
+	StatusSucceeded  PayinStatus = "succeeded"
+	StatusFailed     PayinStatus = "failed"
+	StatusRefunded   PayinStatus = "refunded"
 )
 
-type QuoteRequest = settlement.PayinQuoteRequest
-type QuoteResult = settlement.PayinQuoteResult
-type ExecuteRequest = settlement.PayinRequest
-type ExecuteResult = settlement.PayinResult
+type QuoteRequest struct {
+	IdempotencyKey, TenantID, FundingMethod, CurrencyType string
+	SourceInstrumentID, DestinationAccountID              string
+	SourceCurrency, DestinationCurrency                   string
+	AmountMinor                                           int64
+	CoverFees                                             bool
+}
+type QuoteResult struct {
+	ProviderQuoteID, SourceCurrency, DestinationCurrency string
+	SenderAmountMinor, ReceiverAmountMinor               int64
+	ExpiresAt                                            time.Time
+	Payload                                              json.RawMessage
+}
+type ExecuteRequest struct{ IdempotencyKey, QuoteID string }
+type ExecuteResult struct {
+	ProviderPayinID       string
+	Status                PayinStatus
+	Instructions, Payload json.RawMessage
+}
+type ExecutionProvider interface {
+	Name() string
+	ExecutePayin(context.Context, ExecuteRequest) (ExecuteResult, error)
+}
+type Provider interface {
+	ExecutionProvider
+	CreatePayinQuote(context.Context, QuoteRequest) (QuoteResult, error)
+}
+type ProviderError struct {
+	Message, Code string
+	Retryable     bool
+}
+
+func (e *ProviderError) Error() string { return e.Message }
+func (r QuoteRequest) Validate() error {
+	if r.IdempotencyKey == "" || r.TenantID == "" || r.FundingMethod == "" || r.SourceCurrency == "" || r.DestinationCurrency == "" || r.DestinationAccountID == "" || r.AmountMinor <= 0 || (r.CurrencyType != "sender" && r.CurrencyType != "receiver") {
+		return errors.New("payin quote identity, funding method, currencies, destination account, positive amount, and valid currency type are required")
+	}
+	return nil
+}
+func (r ExecuteResult) Validate() error {
+	if r.ProviderPayinID == "" {
+		return errors.New("provider payin ID is required")
+	}
+	switch r.Status {
+	case StatusProcessing, StatusOnHold, StatusSucceeded, StatusFailed, StatusRefunded:
+		return nil
+	default:
+		return fmt.Errorf("invalid payin status %q", r.Status)
+	}
+}
 
 type Quote struct {
 	ID                   string    `json:"id"`
@@ -51,7 +99,7 @@ type Payin struct {
 	SourceCurrency         string          `json:"source_currency"`
 	DestinationAmountMinor int64           `json:"destination_amount_minor"`
 	DestinationCurrency    string          `json:"destination_currency"`
-	Status                 Status          `json:"status"`
+	Status                 PayinStatus     `json:"status"`
 	Instructions           json.RawMessage `json:"instructions"`
 	CreatedAt              time.Time       `json:"created_at"`
 	UpdatedAt              time.Time       `json:"updated_at"`

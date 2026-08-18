@@ -11,7 +11,7 @@ import (
 	"strings"
 
 	"stablerail/paymentcore"
-	"stablerail/settlement"
+	"stablerail/paymentcore/payout"
 )
 
 type PaymentStore interface {
@@ -25,14 +25,17 @@ type DestinationPaymentStore interface {
 	CreatePaymentWithDestination(context.Context, string, string, int64, string, string, paymentcore.Destination) (*paymentcore.Payment, error)
 }
 type Health interface{ PingContext(context.Context) error }
+type PayoutQuoteService interface {
+	CreateQuote(context.Context, payout.QuoteRequest) (payout.QuoteResult, error)
+}
 
 type Handler struct {
 	payments     PaymentStore
 	health       Health
-	payoutQuotes settlement.PayoutProvider
+	payoutQuotes PayoutQuoteService
 }
 
-func NewHandler(payments PaymentStore, health Health, payoutQuotes settlement.PayoutProvider) (http.Handler, error) {
+func NewHandler(payments PaymentStore, health Health, payoutQuotes PayoutQuoteService) (http.Handler, error) {
 	if payments == nil || health == nil {
 		return nil, errors.New("payment API and health dependencies are required")
 	}
@@ -211,7 +214,7 @@ func (h *Handler) createPayoutQuote(w http.ResponseWriter, r *http.Request) {
 		}
 		tenantID = authenticated
 	}
-	q, err := h.payoutQuotes.CreatePayoutQuote(r.Context(), settlement.PayoutQuoteRequest{IdempotencyKey: key, TenantID: tenantID, SourceAccountID: input.SourceAccountID, DestinationInstrumentID: input.DestinationInstrumentID, SourceCurrency: input.SourceCurrency, DestinationCurrency: input.DestinationCurrency, CurrencyType: input.CurrencyType, CoverFees: input.CoverFees, RequestAmountMinor: input.RequestAmountMinor})
+	q, err := h.payoutQuotes.CreateQuote(r.Context(), payout.QuoteRequest{IdempotencyKey: key, TenantID: tenantID, SourceAccountID: input.SourceAccountID, DestinationInstrumentID: input.DestinationInstrumentID, SourceCurrency: input.SourceCurrency, DestinationCurrency: input.DestinationCurrency, CurrencyType: input.CurrencyType, CoverFees: input.CoverFees, RequestAmountMinor: input.RequestAmountMinor})
 	if err != nil {
 		problem(w, http.StatusBadRequest, err.Error())
 		return

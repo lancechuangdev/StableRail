@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"testing"
 	"time"
 
@@ -13,18 +12,15 @@ import (
 	"stablerail/eventbus"
 	"stablerail/ledger"
 	"stablerail/paymentcore"
+	"stablerail/paymentcore/payout"
 	"stablerail/policy"
-	"stablerail/settlement"
 )
 
-type submissionFailureProvider struct{}
+type submissionFailurePayoutService struct{}
 
-func (submissionFailureProvider) Name() string { return "blindpay" }
-func (submissionFailureProvider) CreatePayoutQuote(context.Context, settlement.PayoutQuoteRequest) (settlement.PayoutQuoteResult, error) {
-	return settlement.PayoutQuoteResult{}, errors.New("not implemented")
-}
-func (submissionFailureProvider) ExecutePayout(context.Context, settlement.PayoutRequest) (settlement.PayoutResult, error) {
-	return settlement.PayoutResult{}, &settlement.ProviderError{Message: "insufficient balance", Code: "submission_failed", Retryable: false}
+func (submissionFailurePayoutService) Name() string { return "blindpay" }
+func (submissionFailurePayoutService) CreatePayout(context.Context, payout.Request) (payout.Result, error) {
+	return payout.Result{}, &payout.ProviderError{Message: "insufficient balance", Code: "submission_failed", Retryable: false}
 }
 
 type unusedLedgerService struct{}
@@ -44,7 +40,7 @@ func TestSettlementSubmissionFailureEmitsFailedResult(t *testing.T) {
 	}
 	defer db.Close()
 	now := time.Date(2026, time.August, 17, 12, 0, 0, 0, time.UTC)
-	handler := NewCommandHandler(policy.DeterministicEvaluator{}, unusedLedgerService{}, submissionFailureProvider{})
+	handler := NewCommandHandler(policy.DeterministicEvaluator{}, unusedLedgerService{}, submissionFailurePayoutService{})
 	handler.now = func() time.Time { return now }
 	handler.newID = func() (string, error) { return "evt_result", nil }
 	payload, _ := json.Marshal(commandPayload{CorrelationID: "corr_1", PaymentID: "pay_1"})

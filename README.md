@@ -39,17 +39,28 @@ Every business update and outgoing event commits in one PostgreSQL transaction. 
 
 | Package | Responsibility |
 | --- | --- |
-| `paymentcore` | Outbound payment lifecycle, refunds, public payment/funds state, and PostgreSQL payment storage |
+| `paymentcore` | Parent payment aggregate, refunds, public payment/funds state, and PostgreSQL payment storage |
 | `paymentcore/payin` | Inbound pay-in quotes, pay-in lifecycle, and pay-in persistence |
+| `paymentcore/payout` | Outbound payout model and orchestration, including durable attempts, provider-result persistence, and ambiguous-submission recovery |
 | `settlement` | Provider-neutral payout/pay-in contracts and the deterministic mock provider |
-| `settlement/blindpay` | BlindPay client, resource mapping, quote/execution adapters, recovery, and webhooks |
+| `settlement/blindpay` | BlindPay client, resource mapping, quote/execution adapters, and webhooks |
 | `saga` and `workers` | Durable outbound orchestration across policy, ledger, and settlement |
 | `paymentapi` | HTTP transport, authentication, and tenant/operator endpoints |
 
-There is no separate top-level `payout` package because an outbound payment is
-StableRail's payout aggregate: `paymentcore` owns it, while `settlement` only
-defines how a provider executes it. Pay-ins are a distinct inbound aggregate
-and therefore live as the `paymentcore/payin` subpackage.
+`paymentcore` owns the parent payment and funds lifecycle. Its `payin` and
+`payout` subpackages each own their direction-specific statuses, quote and
+execution contracts, provider errors, and provider interfaces. `settlement`
+only composes `payin.Provider` and `payout.Provider` into the complete
+`SettlementProvider`; it does not redefine either domain's types.
+
+`payout.Service` owns the provider-neutral `payout_quotes` and `payouts`
+records. `CreateQuote` enforces tenant-scoped idempotency, calls the provider,
+and stores normalized commercial terms plus the raw provider payload.
+`CreatePayout` commits a `submission_pending` attempt before calling the
+provider, records the returned reference and status, and retries `unknown`
+outcomes with the original idempotency key. Provider adapters such as BlindPay
+do not write generic quote, payout, or payment state; they resolve provider
+resources, execute external API operations, and translate the results.
 
 ## Payment lifecycle
 

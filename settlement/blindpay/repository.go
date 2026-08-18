@@ -169,11 +169,3 @@ func (r *Repository) GetApprovedPayoutProfile(ctx context.Context, tenantID, ban
 	}
 	return p, nil
 }
-
-func (r *Repository) SavePayoutQuote(ctx context.Context, q PayoutQuote, raw json.RawMessage) error {
-	_, err := r.db.ExecContext(ctx, `INSERT INTO payout_quotes(id,provider,provider_quote_id,tenant_id,source_account_id,destination_instrument_id,source_currency,destination_currency,currency_type,cover_fees,sender_amount_minor,receiver_amount_minor,commercial_rate,provider_rate,flat_fee_minor,partner_fee_minor,billing_fee_minor,status,expires_at,provider_payload,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$21)`, q.ID, q.Provider, q.ProviderQuoteID, q.TenantID, q.SourceAccountID, q.DestinationInstrumentID, q.SourceCurrency, q.DestinationCurrency, q.CurrencyType, q.CoverFees, q.SenderAmountMinor, q.ReceiverAmountMinor, q.CommercialRate, q.ProviderRate, q.FlatFeeMinor, q.PartnerFeeMinor, q.BillingFeeMinor, q.Status, q.ExpiresAt, raw, q.CreatedAt)
-	if err != nil {
-		return fmt.Errorf("save BlindPay payout quote: %w", err)
-	}
-	return nil
-}

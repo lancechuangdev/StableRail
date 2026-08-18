@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"stablerail/settlement"
 	"time"
 )
 
@@ -17,17 +16,12 @@ var ErrIdempotencyConflict = errors.New("idempotency key is bound to another pay
 
 type Service struct {
 	db       *sql.DB
-	provider namedProvider
+	provider Provider
 	now      func() time.Time
 	newID    func(string) (string, error)
 }
 
-type namedProvider interface {
-	Name() string
-	settlement.PayinProvider
-}
-
-func NewService(db *sql.DB, provider namedProvider) (*Service, error) {
+func NewService(db *sql.DB, provider Provider) (*Service, error) {
 	if db == nil || provider == nil {
 		return nil, errors.New("payin database and provider are required")
 	}

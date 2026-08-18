@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"stablerail/paymentcore"
-	"stablerail/settlement"
+	"stablerail/paymentcore/payout"
 )
 
 type fakeStore struct {
@@ -89,20 +89,16 @@ func TestCreateRefundUsesAuthenticatedTenantAndIdempotency(t *testing.T) {
 }
 
 type fakePayoutQuoteService struct {
-	request settlement.PayoutQuoteRequest
+	request payout.QuoteRequest
 	err     error
 }
 
-func (f *fakePayoutQuoteService) CreatePayoutQuote(_ context.Context, request settlement.PayoutQuoteRequest) (settlement.PayoutQuoteResult, error) {
+func (f *fakePayoutQuoteService) CreateQuote(_ context.Context, request payout.QuoteRequest) (payout.QuoteResult, error) {
 	f.request = request
 	if f.err != nil {
-		return settlement.PayoutQuoteResult{}, f.err
+		return payout.QuoteResult{}, f.err
 	}
-	return settlement.PayoutQuoteResult{ID: "qu_test", Provider: "blindpay", Status: "open", ExpiresAt: time.Now().Add(time.Minute)}, nil
-}
-
-func (*fakePayoutQuoteService) ExecutePayout(context.Context, settlement.PayoutRequest) (settlement.PayoutResult, error) {
-	return settlement.PayoutResult{}, errors.New("not implemented")
+	return payout.QuoteResult{ID: "qu_test", Provider: "blindpay", Status: "open", ExpiresAt: time.Now().Add(time.Minute)}, nil
 }
 
 func TestCreatePayment(t *testing.T) {

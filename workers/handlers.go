@@ -15,26 +15,26 @@ import (
 	"stablerail/eventbus"
 	"stablerail/ledger"
 	"stablerail/paymentcore"
+	"stablerail/paymentcore/payout"
 	"stablerail/policy"
 	"stablerail/saga"
-	"stablerail/settlement"
 )
 
 type CommandHandler struct {
-	now                func() time.Time
-	newID              func() (string, error)
-	policyEvaluator    policy.PolicyEvaluator
-	ledgerService      ledger.LedgerService
-	settlementProvider namedPayoutProvider
+	now             func() time.Time
+	newID           func() (string, error)
+	policyEvaluator policy.PolicyEvaluator
+	ledgerService   ledger.LedgerService
+	payoutService   namedPayoutService
 }
 
-type namedPayoutProvider interface {
+type namedPayoutService interface {
 	Name() string
-	settlement.PayoutProvider
+	CreatePayout(context.Context, payout.Request) (payout.Result, error)
 }
 
-func NewCommandHandler(evaluator policy.PolicyEvaluator, ledgerService ledger.LedgerService, provider namedPayoutProvider) *CommandHandler {
-	h := &CommandHandler{policyEvaluator: evaluator, ledgerService: ledgerService, settlementProvider: provider, now: func() time.Time { return time.Now().UTC() }, newID: func() (string, error) {
+func NewCommandHandler(evaluator policy.PolicyEvaluator, ledgerService ledger.LedgerService, payouts namedPayoutService) *CommandHandler {
+	h := &CommandHandler{policyEvaluator: evaluator, ledgerService: ledgerService, payoutService: payouts, now: func() time.Time { return time.Now().UTC() }, newID: func() (string, error) {
 		b := make([]byte, 16)
 		_, err := rand.Read(b)
 		return "evt_" + hex.EncodeToString(b), err
@@ -49,7 +49,7 @@ type commandPayload struct {
 }
 
 func (h *CommandHandler) Handle(ctx context.Context, tx *sql.Tx, event eventbus.Event) error {
-	if h.policyEvaluator == nil || h.ledgerService == nil || h.settlementProvider == nil {
+	if h.policyEvaluator == nil || h.ledgerService == nil || h.payoutService == nil {
 		return errors.New("command handler dependencies are required")
 	}
 	var payload commandPayload
@@ -95,9 +95,9 @@ func (h *CommandHandler) Handle(ctx context.Context, tx *sql.Tx, event eventbus.
 		if err != nil {
 			return err
 		}
-		result, err := h.settlementProvider.ExecutePayout(ctx, settlement.PayoutRequest{IdempotencyKey: event.ID, PaymentID: payload.PaymentID, AmountMinor: amount, Currency: currency, Destination: destination})
+		result, err := h.payoutService.CreatePayout(ctx, payout.Request{IdempotencyKey: event.ID, PaymentID: payload.PaymentID, AmountMinor: amount, Currency: currency, Destination: destination})
 		if err != nil {
-			var providerErr *settlement.ProviderError
+			var providerErr *payout.ProviderError
 			if errors.As(err, &providerErr) && !providerErr.Retryable {
 				if providerErr.Code == "submission_failed" {
 					payload.Reason = providerErr.Code
@@ -112,17 +112,17 @@ func (h *CommandHandler) Handle(ctx context.Context, tx *sql.Tx, event eventbus.
 			(payment_id,command_event_id,provider,provider_reference,status,failure_code,failure_message,created_at,updated_at)
 			VALUES($1,$2,$3,$4,$5,NULLIF($6,''),NULLIF($7,''),$8,$8)
 			ON CONFLICT(command_event_id) DO UPDATE SET status=EXCLUDED.status,failure_code=EXCLUDED.failure_code,failure_message=EXCLUDED.failure_message,updated_at=EXCLUDED.updated_at`,
-			payload.PaymentID, event.ID, h.settlementProvider.Name(), result.ProviderReference, result.Status, result.FailureCode, result.FailureMessage, now)
+			payload.PaymentID, event.ID, h.payoutService.Name(), result.ProviderReference, result.Status, result.FailureCode, result.FailureMessage, now)
 		if err != nil {
 			return fmt.Errorf("persist settlement submission: %w", err)
 		}
-		if result.Status == settlement.StatusPending {
+		if result.Status == payout.StatusPending {
 			return nil
 		}
-		if result.Status == settlement.StatusOnHold {
+		if result.Status == payout.StatusOnHold {
 			return h.enqueueReply(ctx, tx, event, payload, "settlement.on_hold")
 		}
-		if result.Status == settlement.StatusFailed {
+		if result.Status == payout.StatusFailed {
 			payload.Reason = result.FailureMessage
 			if payload.Reason == "" {
 				payload.Reason = result.FailureCode
@@ -190,8 +190,8 @@ func loadPaymentAmount(ctx context.Context, tx *sql.Tx, paymentID string) (int64
 	return amount, currency, nil
 }
 
-func loadDestination(ctx context.Context, tx *sql.Tx, paymentID string) (*settlement.Destination, error) {
-	var d settlement.Destination
+func loadDestination(ctx context.Context, tx *sql.Tx, paymentID string) (*payout.Destination, error) {
+	var d payout.Destination
 	err := tx.QueryRowContext(ctx, `SELECT kind,COALESCE(chain,''),COALESCE(address,'') FROM payment_destinations WHERE payment_id=$1`, paymentID).Scan(&d.Type, &d.Chain, &d.Address)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
