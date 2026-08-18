@@ -156,18 +156,20 @@ func TestLOCAL004PolicyRejection(t *testing.T) {
 	env.WaitForCount(t, `SELECT count(*) FROM ledger_transactions WHERE payment_id=$1`, 0, payment.ID)
 }
 
-func TestLOCAL005SettlementFailureReleasesFunds(t *testing.T) {
+func TestLOCAL005SettlementFailureKeepsFundsReserved(t *testing.T) {
 	env := testenv.Open(t)
 	tenant := env.NewTenant(t)
 	payment, status := tenant.CreatePayment(t, "local-005-"+fmt.Sprint(time.Now().UnixNano()), "order-local-005", 5005)
 	if status != http.StatusCreated {
 		t.Fatalf("create status=%d", status)
 	}
-	tenant.WaitForPaymentStatus(t, payment.ID, "failed")
-	env.WaitForSagaState(t, payment.ID, "ledger_released")
-	for _, eventType := range []string{"payment.processing", "payment.released"} {
-		env.WaitForCount(t, `SELECT count(*) FROM ledger_transactions WHERE payment_id=$1 AND event_type=$2`, 1, payment.ID, eventType)
+	failed := tenant.WaitForPaymentStatus(t, payment.ID, "failed")
+	if failed.FundsStatus != "reserved" {
+		t.Fatalf("funds_status=%s, want reserved", failed.FundsStatus)
 	}
+	env.WaitForSagaState(t, payment.ID, "failed")
+	env.WaitForCount(t, `SELECT count(*) FROM ledger_transactions WHERE payment_id=$1 AND event_type='payment.processing'`, 1, payment.ID)
+	env.WaitForCount(t, `SELECT count(*) FROM ledger_transactions WHERE payment_id=$1 AND event_type='payment.released'`, 0, payment.ID)
 }
 
 func TestLOCAL007ManualReviewResolution(t *testing.T) {

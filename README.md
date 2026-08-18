@@ -52,7 +52,8 @@ stateDiagram-v2
         [*] --> available
         available --> reserved: ledger reservation
         reserved --> consumed: payout succeeded
-        reserved --> available: payout failed before capture
+        reserved --> available: pre-capture failure confirmed
+        reserved --> reserved: payout failed, disposition unresolved
         reserved --> returned: provider returned captured funds
     }
 ```
@@ -81,7 +82,7 @@ Payment: created -> processing -> succeeded
 Return:  created -> processing -> succeeded | failed
 ```
 
-Returns support only `created`, `processing`, `succeeded`, and `failed`. When a provider webhook reports a return that has already completed externally, StableRail may create the return directly as `succeeded`. The return journal debits `cash:operating` for the asset received back and credits `settlement:payable` to restore the obligation. The original payment is not rewritten. StableRail emits `payment.return.succeeded` for tenant notification. Merchant-issued refunds require a separate linked refund workflow and are not currently implemented.
+The return status domain contains only `created`, `processing`, `succeeded`, and `failed`. The current provider webhook path learns about a return after it has completed externally, so it creates the return directly as `succeeded`; initiated `created` and `processing` transitions are not implemented yet. The return journal debits `cash:operating` for the asset received back and credits `settlement:payable` to restore the obligation. The original payment is not rewritten. StableRail emits `payment.return.succeeded` for tenant notification. Merchant-issued refunds require a separate linked refund workflow and are not currently implemented.
 
 ## Saga lifecycle
 
@@ -98,24 +99,24 @@ stateDiagram-v2
     awaiting_settlement --> settling_payment: settlement.completed / payment.settle
     settling_payment --> completed: payment.succeeded
 
-    awaiting_settlement --> releasing_ledger: settlement.failed or timeout / ledger.release
-    releasing_ledger --> ledger_released: ledger.released / payment.fail
+    awaiting_settlement --> failed: settlement.failed or timeout / payment.fail_reserved
+    awaiting_settlement --> failed: submission_failed / payment.fail
 
     awaiting_settlement --> returning: settlement.returned / ledger.release
     returning --> returned: ledger.released / payment.return
 
     awaiting_settlement --> on_hold: settlement.on_hold
     on_hold --> settling_payment: settlement.completed / payment.settle
-    on_hold --> releasing_ledger: settlement.failed / ledger.release
+    on_hold --> failed: settlement.failed / payment.fail_reserved
     on_hold --> returning: settlement.returned / ledger.release
     on_hold --> manual_review: compliance timeout
     manual_review --> on_hold: operator retry
     manual_review --> settling_payment: operator complete / payment.settle
-    manual_review --> releasing_ledger: operator fail / ledger.release
+    manual_review --> failed: operator fail / payment.fail_reserved
     manual_review --> returning: operator return / ledger.release
 ```
 
-Timeout handling is conservative: settlement timeouts release the reservation before failure, compliance timeouts require manual review, and uncertain provider outcomes remain in processing until recovery or reconciliation produces a terminal result.
+Timeout handling is conservative: settlement timeouts fail the payment but preserve its reservation, compliance timeouts require manual review, and ambiguous submissions remain in processing until recovery or reconciliation establishes an outcome. A reservation becomes available only after a confirmed pre-capture failure, and becomes returned only after the provider confirms the funds came back.
 
 ## Quick start
 

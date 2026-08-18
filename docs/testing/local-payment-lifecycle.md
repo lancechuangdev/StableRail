@@ -54,7 +54,7 @@ docker compose --env-file /dev/null -p stablerail-local-e2e \
 | LOCAL-002 | Repeating an equivalent request returns the same payment; changing the request under the same key returns `409` | Automated |
 | LOCAL-003 | Tenant payment and timeline reads are isolated; a different tenant receives `404` | Automated |
 | LOCAL-004 | Policy rejection fails the payment without settlement | Automated |
-| LOCAL-005 | Settlement failure releases reserved ledger funds and fails the payment | Automated |
+| LOCAL-005 | Settlement failure fails the payment but preserves reserved funds until their disposition is confirmed | Automated |
 | LOCAL-007 | Manual review resolution resumes or terminates a held saga | Automated |
 | LOCAL-008 | Multiple tenant webhook endpoints receive independently signed events | Automated |
 | LOCAL-009 | Restarting workers completes durable pending work without duplicate business effects | Automated |
@@ -85,7 +85,7 @@ docker compose --env-file /dev/null -p stablerail-local-e2e \
 ## LOCAL-004 through LOCAL-009
 
 - `LOCAL-004` uses the configured mock policy rejection amount and verifies no ledger or settlement work occurs.
-- `LOCAL-005` uses the configured mock settlement failure amount and verifies the reservation and compensating release journals.
+- `LOCAL-005` uses the configured mock settlement failure amount and verifies that the reservation remains in place without a release journal.
 - `LOCAL-007` drives a mock settlement on hold through its short local compliance timeout, resolves manual review through the operator API, and verifies settlement resumes.
 - `LOCAL-008` registers two local HTTP receivers and verifies every receiver gets independently signed lifecycle events.
 - `LOCAL-009` leaves a mock settlement pending, schedules its provider completion, kills and restarts StableRail, and verifies durable work completes without duplicate submissions or journals.
@@ -97,4 +97,4 @@ docker compose --env-file /dev/null -p stablerail-local-e2e \
 - Tests use public HTTP APIs for commands and reads. Direct database access is
   limited to durable-state assertions that have no public endpoint yet.
 - Each test uses unique identifiers and must not depend on execution order.
-- Provider-specific behavior belongs in a future `e2e/blindpay` suite.
+- Provider-specific behavior belongs in the `e2e/blindpay` suite.
