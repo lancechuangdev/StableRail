@@ -82,7 +82,9 @@ Payment: created -> processing -> succeeded
 Return:  created -> processing -> succeeded | failed
 ```
 
-The return status domain contains only `created`, `processing`, `succeeded`, and `failed`. The current provider webhook path learns about a return after it has completed externally, so it creates the return directly as `succeeded`; initiated `created` and `processing` transitions are not implemented yet. The return journal debits `cash:operating` for the asset received back and credits `settlement:payable` to restore the obligation. The original payment is not rewritten. StableRail emits `payment.return.succeeded` for tenant notification. Merchant-issued refunds require a separate linked refund workflow and are not currently implemented.
+The return status domain contains only `created`, `processing`, `succeeded`, and `failed`. The current provider webhook path learns about a return after it has completed externally, so it creates the return directly as `succeeded`; initiated `created` and `processing` transitions are not implemented yet. The return journal debits `cash:operating` for the asset received back and credits `settlement:payable` to restore the obligation. The original payment is not rewritten. StableRail emits `payment.return.succeeded` for tenant notification.
+
+Merchant-issued refunds are separate linked operations. `POST /v1/payments/{id}/refunds` accepts an idempotency key, a positive amount, and a reason for a succeeded payment. Partial refunds are supported up to the original payment amount. The API creates the refund asynchronously, and a `refund.execute` command invokes the configured refund provider. A confirmed success creates the balanced reversal journal and emits `payment.refund.succeeded`; failure emits `payment.refund.failed` without changing the ledger. The original payment remains `succeeded/consumed`. The local mock provider supports this workflow; BlindPay does not expose a merchant-triggered payout-refund operation, so BlindPay mode records the refund as failed with an unsupported-provider reason.
 
 ## Saga lifecycle
 

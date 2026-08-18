@@ -23,6 +23,9 @@ type PaymentStore interface {
 type DestinationPaymentStore interface {
 	CreatePaymentWithDestination(context.Context, string, string, int64, string, string, paymentcore.Destination) (*paymentcore.Payment, error)
 }
+type RefundStore interface {
+	CreateRefund(context.Context, string, string, string, int64, string) (*paymentcore.Refund, error)
+}
 
 type Health interface{ PingContext(context.Context) error }
 
@@ -48,9 +51,63 @@ func NewHandler(payments PaymentStore, health Health, payoutQuotes BlindPayPayou
 	}
 	mux.HandleFunc("GET /v1/payments/{id}", h.get)
 	mux.HandleFunc("GET /v1/payments/{id}/timeline", h.timeline)
+	mux.HandleFunc("POST /v1/payments/{id}/refunds", h.createRefund)
 	mux.HandleFunc("GET /healthz", h.live)
 	mux.HandleFunc("GET /readyz", h.ready)
 	return mux, nil
+}
+
+type createRefundRequest struct {
+	AmountMinor int64  `json:"amount_minor"`
+	Reason      string `json:"reason"`
+}
+
+func (h *Handler) createRefund(w http.ResponseWriter, r *http.Request) {
+	store, ok := h.payments.(RefundStore)
+	if !ok {
+		problem(w, http.StatusNotImplemented, "refunds are not supported")
+		return
+	}
+	key := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	if key == "" || len(key) > 255 {
+		problem(w, http.StatusBadRequest, "a valid Idempotency-Key header is required")
+		return
+	}
+	var input createRefundRequest
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&input); err != nil {
+		problem(w, http.StatusBadRequest, "invalid JSON request body")
+		return
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		problem(w, http.StatusBadRequest, "request body must contain one JSON object")
+		return
+	}
+	input.Reason = strings.TrimSpace(input.Reason)
+	if input.AmountMinor <= 0 || input.Reason == "" {
+		problem(w, http.StatusBadRequest, "positive amount_minor and reason are required")
+		return
+	}
+	tenantID, ok := TenantIDFromContext(r.Context())
+	if !ok {
+		problem(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	refund, err := store.CreateRefund(r.Context(), r.PathValue("id"), tenantID, key, input.AmountMinor, input.Reason)
+	if err != nil {
+		switch {
+		case errors.Is(err, paymentcore.ErrPaymentNotFound):
+			problem(w, http.StatusNotFound, "payment not found")
+		case errors.Is(err, paymentcore.ErrIdempotencyConflict), errors.Is(err, paymentcore.ErrPaymentNotRefundable), errors.Is(err, paymentcore.ErrRefundAmountExceeded):
+			problem(w, http.StatusConflict, err.Error())
+		default:
+			problem(w, http.StatusInternalServerError, "could not create refund")
+		}
+		return
+	}
+	writeJSON(w, http.StatusAccepted, refund)
 }
 
 type createRequest struct {

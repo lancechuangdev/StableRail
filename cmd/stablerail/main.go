@@ -93,16 +93,16 @@ func run() error {
 	}
 
 	var payoutQuotes paymentapi.BlindPayPayoutQuoteService
-	mockProvider := settlement.NewMockProvider(settlement.SettlementResult{})
-	mockProvider.ResultsByAmount = map[int64]settlement.SettlementResult{}
+	mockProvider := settlement.NewMockProvider(settlement.OperationResult{})
+	mockProvider.ResultsByAmount = map[int64]settlement.OperationResult{}
 	if config.MockSettlementFailAmount > 0 {
-		mockProvider.ResultsByAmount[config.MockSettlementFailAmount] = settlement.SettlementResult{Status: settlement.StatusFailed, FailureCode: "local_failure", FailureMessage: "local settlement failed"}
+		mockProvider.ResultsByAmount[config.MockSettlementFailAmount] = settlement.OperationResult{Status: settlement.StatusFailed, FailureCode: "local_failure", FailureMessage: "local settlement failed"}
 	}
 	if config.MockSettlementHoldAmount > 0 {
-		mockProvider.ResultsByAmount[config.MockSettlementHoldAmount] = settlement.SettlementResult{Status: settlement.StatusOnHold}
+		mockProvider.ResultsByAmount[config.MockSettlementHoldAmount] = settlement.OperationResult{Status: settlement.StatusOnHold}
 	}
 	if config.MockSettlementPendingAmount > 0 {
-		mockProvider.ResultsByAmount[config.MockSettlementPendingAmount] = settlement.SettlementResult{Status: settlement.StatusPending}
+		mockProvider.ResultsByAmount[config.MockSettlementPendingAmount] = settlement.OperationResult{Status: settlement.StatusPending}
 	}
 	var settlementProvider settlement.SettlementProvider = mockProvider
 	var blindPayWebhookHandler http.Handler

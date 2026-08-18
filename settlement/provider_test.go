@@ -6,14 +6,14 @@ import (
 )
 
 func TestMockProviderIsIdempotent(t *testing.T) {
-	p := NewMockProvider(SettlementResult{})
-	r := SettlementRequest{IdempotencyKey: "command-1", PaymentID: "payment-1", AmountMinor: 1250, Currency: "USD"}
-	first, err := p.Submit(context.Background(), r)
+	p := NewMockProvider(OperationResult{})
+	r := PayoutRequest{IdempotencyKey: "command-1", PaymentID: "payment-1", AmountMinor: 1250, Currency: "USD"}
+	first, err := p.ExecutePayout(context.Background(), r)
 	if err != nil {
 		t.Fatal(err)
 	}
-	p.Result = SettlementResult{Status: StatusFailed, FailureCode: "declined"}
-	second, err := p.Submit(context.Background(), r)
+	p.Result = OperationResult{Status: StatusFailed, FailureCode: "declined"}
+	second, err := p.ExecutePayout(context.Background(), r)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -23,8 +23,8 @@ func TestMockProviderIsIdempotent(t *testing.T) {
 }
 
 func TestFailedResultRequiresCode(t *testing.T) {
-	p := NewMockProvider(SettlementResult{Status: StatusFailed})
-	_, err := p.Submit(context.Background(), SettlementRequest{IdempotencyKey: "x", PaymentID: "p", AmountMinor: 1, Currency: "USD"})
+	p := NewMockProvider(OperationResult{Status: StatusFailed})
+	_, err := p.ExecutePayout(context.Background(), PayoutRequest{IdempotencyKey: "x", PaymentID: "p", AmountMinor: 1, Currency: "USD"})
 	if err == nil {
 		t.Fatal("expected invalid result")
 	}

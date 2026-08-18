@@ -29,17 +29,21 @@ type CommandHandler struct {
 }
 
 func NewCommandHandler(evaluator policy.PolicyEvaluator, ledgerService ledger.LedgerService, provider settlement.SettlementProvider) *CommandHandler {
-	return &CommandHandler{policyEvaluator: evaluator, ledgerService: ledgerService, settlementProvider: provider, now: func() time.Time { return time.Now().UTC() }, newID: func() (string, error) {
+	h := &CommandHandler{policyEvaluator: evaluator, ledgerService: ledgerService, settlementProvider: provider, now: func() time.Time { return time.Now().UTC() }, newID: func() (string, error) {
 		b := make([]byte, 16)
 		_, err := rand.Read(b)
 		return "evt_" + hex.EncodeToString(b), err
 	}}
+	return h
 }
 
 type commandPayload struct {
 	CorrelationID string `json:"correlation_id"`
 	PaymentID     string `json:"payment_id"`
 	Reason        string `json:"reason"`
+	RefundID      string `json:"refund_id"`
+	AmountMinor   int64  `json:"amount_minor"`
+	Currency      string `json:"currency"`
 }
 
 func (h *CommandHandler) Handle(ctx context.Context, tx *sql.Tx, event eventbus.Event) error {
@@ -47,11 +51,17 @@ func (h *CommandHandler) Handle(ctx context.Context, tx *sql.Tx, event eventbus.
 		return errors.New("command handler dependencies are required")
 	}
 	var payload commandPayload
-	if err := json.Unmarshal(event.Payload, &payload); err != nil || payload.CorrelationID == "" {
+	if err := json.Unmarshal(event.Payload, &payload); err != nil {
 		return consumer.Permanent(errors.New("invalid command payload"))
 	}
 	if payload.PaymentID == "" {
 		payload.PaymentID = event.AggregateID
+	}
+	if event.Type == "refund.execute" {
+		return h.executeRefund(ctx, tx, event, payload)
+	}
+	if payload.CorrelationID == "" {
+		return consumer.Permanent(errors.New("invalid command payload"))
 	}
 	var reply string
 	switch event.Type {
@@ -86,7 +96,7 @@ func (h *CommandHandler) Handle(ctx context.Context, tx *sql.Tx, event eventbus.
 		if err != nil {
 			return err
 		}
-		result, err := h.settlementProvider.Submit(ctx, settlement.SettlementRequest{IdempotencyKey: event.ID, PaymentID: payload.PaymentID, AmountMinor: amount, Currency: currency, Destination: destination})
+		result, err := h.settlementProvider.ExecutePayout(ctx, settlement.PayoutRequest{IdempotencyKey: event.ID, PaymentID: payload.PaymentID, AmountMinor: amount, Currency: currency, Destination: destination})
 		if err != nil {
 			var providerErr *settlement.ProviderError
 			if errors.As(err, &providerErr) && !providerErr.Retryable {
@@ -170,6 +180,77 @@ func (h *CommandHandler) Handle(ctx context.Context, tx *sql.Tx, event eventbus.
 		return consumer.Permanent(fmt.Errorf("unsupported command %q", event.Type))
 	}
 	return h.enqueueReply(ctx, tx, event, payload, reply)
+}
+
+func (h *CommandHandler) executeRefund(ctx context.Context, tx *sql.Tx, event eventbus.Event, payload commandPayload) error {
+	if payload.RefundID == "" || payload.PaymentID == "" || payload.AmountMinor <= 0 || payload.Currency == "" {
+		return consumer.Permanent(errors.New("invalid refund command payload"))
+	}
+	result, err := h.settlementProvider.ExecuteRefund(ctx, settlement.RefundRequest{IdempotencyKey: event.ID, RefundID: payload.RefundID, PaymentID: payload.PaymentID, AmountMinor: payload.AmountMinor, Currency: payload.Currency})
+	if err != nil {
+		var providerErr *settlement.ProviderError
+		if errors.As(err, &providerErr) && !providerErr.Retryable {
+			result = settlement.OperationResult{Status: settlement.StatusFailed, FailureCode: providerErr.Code, FailureMessage: providerErr.Message}
+		} else {
+			return fmt.Errorf("execute refund: %w", err)
+		}
+	}
+	now := h.now()
+	if result.Status == settlement.StatusPending {
+		_, err := tx.ExecContext(ctx, `UPDATE payment_refunds SET status='processing',provider_reference=$1,updated_at=$2 WHERE id=$3 AND status='created'`, result.ProviderReference, now, payload.RefundID)
+		return err
+	}
+	if result.Status != settlement.StatusSucceeded {
+		reason := result.FailureMessage
+		if reason == "" {
+			reason = result.FailureCode
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE payment_refunds SET status='failed',provider_reference=NULLIF($1,''),failure_reason=$2,updated_at=$3 WHERE id=$4 AND status IN ('created','processing')`, result.ProviderReference, reason, now, payload.RefundID); err != nil {
+			return fmt.Errorf("fail refund: %w", err)
+		}
+		return h.enqueueRefundResult(ctx, tx, event, payload, "payment.refund.failed", reason, result.ProviderReference)
+	}
+	journalID := "jrn_" + payload.RefundID
+	insert, err := tx.ExecContext(ctx, `INSERT INTO ledger_transactions(id,payment_id,event_type,occurred_at) VALUES($1,$2,$3,$4) ON CONFLICT(payment_id,event_type) DO NOTHING`, journalID, payload.PaymentID, "payment.refund.succeeded:"+payload.RefundID, now)
+	if err != nil {
+		return fmt.Errorf("insert refund journal: %w", err)
+	}
+	rows, err := insert.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 1 {
+		for _, line := range []struct{ suffix, account, side string }{{"debit", paymentcore.CashOperatingAccount, "debit"}, {"credit", paymentcore.SettlementAccount, "credit"}} {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO ledger_entries(id,transaction_id,account_code,side,amount_minor,currency) VALUES($1,$2,$3,$4,$5,$6)`, journalID+":"+line.suffix, journalID, line.account, line.side, payload.AmountMinor, payload.Currency); err != nil {
+				return fmt.Errorf("insert refund ledger entry: %w", err)
+			}
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE payment_refunds SET status='succeeded',provider_reference=$1,ledger_transaction_id=$2,updated_at=$3 WHERE id=$4 AND status IN ('created','processing')`, result.ProviderReference, journalID, now, payload.RefundID); err != nil {
+		return fmt.Errorf("complete refund: %w", err)
+	}
+	note := "merchant refund succeeded: " + payload.Reason
+	if _, err := tx.ExecContext(ctx, `INSERT INTO payment_audit_events(payment_id,event,message,occurred_at) VALUES($1,'refund_succeeded',$2,$3)`, payload.PaymentID, note, now); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO payment_timeline_entries(payment_id,payment_status,note,occurred_at) VALUES($1,'succeeded',$2,$3)`, payload.PaymentID, note, now); err != nil {
+		return err
+	}
+	return h.enqueueRefundResult(ctx, tx, event, payload, "payment.refund.succeeded", "", result.ProviderReference)
+}
+
+func (h *CommandHandler) enqueueRefundResult(ctx context.Context, tx *sql.Tx, caused eventbus.Event, p commandPayload, eventType, failure, providerReference string) error {
+	id, err := h.newID()
+	if err != nil {
+		return err
+	}
+	status, version := "succeeded", eventbus.PaymentRefundSucceededVersion
+	if eventType == "payment.refund.failed" {
+		status, version = "failed", eventbus.PaymentRefundFailedVersion
+	}
+	body, _ := json.Marshal(map[string]any{"refund_id": p.RefundID, "amount_minor": p.AmountMinor, "currency": p.Currency, "status": status, "reason": p.Reason, "failure_reason": failure, "provider_reference": providerReference, "caused_by_event_id": caused.ID})
+	_, err = tx.ExecContext(ctx, `INSERT INTO outbox_events(id,topic,event_type,event_version,aggregate_id,aggregate_type,payload,occurred_at) VALUES($1,$2,$3,$4,$5,'payment',$6,$7)`, id, paymentcore.PaymentEventsTopic, eventType, version, p.PaymentID, body, h.now())
+	return err
 }
 
 func loadPaymentAmount(ctx context.Context, tx *sql.Tx, paymentID string) (int64, string, error) {

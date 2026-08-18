@@ -25,7 +25,7 @@ const (
 	StatusFailed    Status = "failed"
 )
 
-type SettlementRequest struct {
+type PayoutRequest struct {
 	IdempotencyKey string
 	PaymentID      string
 	AmountMinor    int64
@@ -35,21 +35,21 @@ type SettlementRequest struct {
 
 type Destination struct{ Type, Chain, Address string }
 
-type SettlementResult struct {
+type OperationResult struct {
 	ProviderReference string
 	Status            Status
 	FailureCode       string
 	FailureMessage    string
 }
 
-func (r SettlementRequest) Validate() error {
+func (r PayoutRequest) Validate() error {
 	if r.IdempotencyKey == "" || r.PaymentID == "" || r.Currency == "" || r.AmountMinor <= 0 {
 		return errors.New("settlement request identity, positive amount, and currency are required")
 	}
 	return nil
 }
 
-func (r SettlementResult) Validate() error {
+func (r OperationResult) Validate() error {
 	if r.ProviderReference == "" {
 		return errors.New("provider reference is required")
 	}
@@ -68,30 +68,39 @@ func (r SettlementResult) Validate() error {
 
 type SettlementProvider interface {
 	Name() string
-	Submit(context.Context, SettlementRequest) (SettlementResult, error)
+	ExecutePayout(context.Context, PayoutRequest) (OperationResult, error)
+	ExecuteRefund(context.Context, RefundRequest) (OperationResult, error)
+}
+
+type RefundRequest struct {
+	IdempotencyKey string
+	RefundID       string
+	PaymentID      string
+	AmountMinor    int64
+	Currency       string
 }
 
 // MockProvider is deterministic and idempotent. It is safe for concurrent use.
 // By default every new request succeeds; Result can be set to exercise other outcomes.
 type MockProvider struct {
 	mu              sync.Mutex
-	Result          SettlementResult
-	ResultsByAmount map[int64]SettlementResult
-	seen            map[string]SettlementResult
+	Result          OperationResult
+	ResultsByAmount map[int64]OperationResult
+	seen            map[string]OperationResult
 }
 
-func NewMockProvider(result SettlementResult) *MockProvider {
+func NewMockProvider(result OperationResult) *MockProvider {
 	if result.Status == "" {
-		result = SettlementResult{Status: StatusSucceeded}
+		result = OperationResult{Status: StatusSucceeded}
 	}
-	return &MockProvider{Result: result, seen: make(map[string]SettlementResult)}
+	return &MockProvider{Result: result, seen: make(map[string]OperationResult)}
 }
 
 func (*MockProvider) Name() string { return "mock" }
 
-func (p *MockProvider) Submit(_ context.Context, request SettlementRequest) (SettlementResult, error) {
+func (p *MockProvider) ExecutePayout(_ context.Context, request PayoutRequest) (OperationResult, error) {
 	if err := request.Validate(); err != nil {
-		return SettlementResult{}, err
+		return OperationResult{}, err
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -106,8 +115,15 @@ func (p *MockProvider) Submit(_ context.Context, request SettlementRequest) (Set
 		result.ProviderReference = "mock_" + request.IdempotencyKey
 	}
 	if err := result.Validate(); err != nil {
-		return SettlementResult{}, err
+		return OperationResult{}, err
 	}
 	p.seen[request.IdempotencyKey] = result
 	return result, nil
+}
+
+func (p *MockProvider) ExecuteRefund(ctx context.Context, request RefundRequest) (OperationResult, error) {
+	if request.RefundID == "" {
+		return OperationResult{}, errors.New("refund ID is required")
+	}
+	return p.ExecutePayout(ctx, PayoutRequest{IdempotencyKey: request.IdempotencyKey, PaymentID: request.PaymentID, AmountMinor: request.AmountMinor, Currency: request.Currency})
 }

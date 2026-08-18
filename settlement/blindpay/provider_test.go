@@ -28,7 +28,7 @@ func TestProviderMapsProcessingPayoutToPendingSettlement(t *testing.T) {
 	mock.ExpectExec("UPDATE blindpay_payouts SET provider_payout_id").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("UPDATE payments SET funds_status").WillReturnResult(sqlmock.NewResult(0, 1))
 
-	result, err := provider.Submit(context.Background(), settlement.SettlementRequest{IdempotencyKey: "idem-1", PaymentID: "pay_test", AmountMinor: 1, Currency: "USDB"})
+	result, err := provider.ExecutePayout(context.Background(), settlement.PayoutRequest{IdempotencyKey: "idem-1", PaymentID: "pay_test", AmountMinor: 1, Currency: "USDB"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +54,7 @@ func TestProviderClassifiesPermanentAPIErrorAsSubmissionFailure(t *testing.T) {
 	mock.ExpectCommit()
 	mock.ExpectExec("UPDATE blindpay_payouts SET provider_status").WillReturnResult(sqlmock.NewResult(0, 1))
 
-	_, err = provider.Submit(context.Background(), settlement.SettlementRequest{IdempotencyKey: "idem-1", PaymentID: "pay_test", AmountMinor: 1, Currency: "USDB"})
+	_, err = provider.ExecutePayout(context.Background(), settlement.PayoutRequest{IdempotencyKey: "idem-1", PaymentID: "pay_test", AmountMinor: 1, Currency: "USDB"})
 	var providerErr *settlement.ProviderError
 	if !errors.As(err, &providerErr) || providerErr.Retryable || providerErr.Code != "submission_failed" {
 		t.Fatalf("error=%v, want non-retryable submission_failed", err)

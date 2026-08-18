@@ -9,6 +9,9 @@ const (
 	PaymentFailedVersion          = 1
 	PaymentFundsReturnedVersion   = 1
 	PaymentReturnSucceededVersion = 1
+	PaymentRefundSucceededVersion = 1
+	PaymentRefundFailedVersion    = 1
+	RefundExecuteVersion          = 1
 	PolicyEvaluateVersion         = 1
 	LedgerReserveVersion          = 1
 	SettlementExecuteVersion      = 1
