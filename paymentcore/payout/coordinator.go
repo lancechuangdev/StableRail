@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"stablerail/eventbus"
-	"stablerail/paymentcore/workflow"
 )
 
 var (
@@ -234,7 +233,7 @@ func (c *SagaCoordinator) enqueue(ctx context.Context, tx *sql.Tx, sagaID, corre
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO outbox_events
 		(id, topic, event_type, event_version, aggregate_id, aggregate_type, payload, occurred_at)
-		VALUES ($1, $2, $3, $4, $5, 'payment', $6, $7)`, eventID, workflow.CommandTopic, command, sagaCommandVersion(command), paymentID, payload, now)
+		VALUES ($1, $2, $3, $4, $5, 'payment', $6, $7)`, eventID, eventbus.SettlementCommandsTopic, command, sagaCommandVersion(command), paymentID, payload, now)
 	if err != nil {
 		return fmt.Errorf("enqueue saga command %s: %w", command, err)
 	}

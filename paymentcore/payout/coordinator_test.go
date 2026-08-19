@@ -10,7 +10,6 @@ import (
 	"github.com/DATA-DOG/go-sqlmock"
 
 	"stablerail/eventbus"
-	"stablerail/paymentcore/workflow"
 )
 
 func TestWorkflowTransitions(t *testing.T) {
@@ -67,7 +66,7 @@ func TestHandleStartsSagaAndEnqueuesPolicyCommand(t *testing.T) {
 		WithArgs("saga_1", "pay-1", "corr_2", StateAwaitingPolicy, now.Add(time.Minute), now).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO outbox_events").
-		WithArgs("evt_3", workflow.CommandTopic, "policy.evaluate", eventbus.PolicyEvaluateVersion, "pay-1", sqlmock.AnyArg(), now).
+		WithArgs("evt_3", eventbus.SettlementCommandsTopic, "policy.evaluate", eventbus.PolicyEvaluateVersion, "pay-1", sqlmock.AnyArg(), now).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 
@@ -125,7 +124,7 @@ func TestExpireOncePreservesReservedFundsAfterSettlementTimeout(t *testing.T) {
 		WithArgs(StateFailed, nil, "awaiting_settlement timeout", now, "saga-1").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO outbox_events").
-		WithArgs("evt_1", workflow.CommandTopic, "payment.fail_reserved", eventbus.PaymentFailVersion, "pay-1", sqlmock.AnyArg(), now).
+		WithArgs("evt_1", eventbus.SettlementCommandsTopic, "payment.fail_reserved", eventbus.PaymentFailVersion, "pay-1", sqlmock.AnyArg(), now).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 	count, err := c.ExpireOnce(context.Background())
@@ -153,7 +152,7 @@ func TestExpireOnceRetriesReturnWhoseLedgerReleaseTimedOut(t *testing.T) {
 		WithArgs(StateReturning, now.Add(time.Minute), "returning timeout", now, "saga-1").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO outbox_events").
-		WithArgs("evt_1", workflow.CommandTopic, "ledger.release", eventbus.LedgerReleaseVersion, "pay-1", sqlmock.AnyArg(), now).
+		WithArgs("evt_1", eventbus.SettlementCommandsTopic, "ledger.release", eventbus.LedgerReleaseVersion, "pay-1", sqlmock.AnyArg(), now).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 	count, err := c.ExpireOnce(context.Background())
@@ -180,7 +179,7 @@ func TestResolveManualReviewReturnsPayment(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec("UPDATE settlement_sagas").WithArgs(StateReturning, now.Add(time.Minute), "provider confirmed return", now, "saga-1").
 		WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectExec("INSERT INTO outbox_events").WithArgs("evt_1", workflow.CommandTopic, "ledger.release", eventbus.LedgerReleaseVersion, "pay-1", sqlmock.AnyArg(), now).
+	mock.ExpectExec("INSERT INTO outbox_events").WithArgs("evt_1", eventbus.SettlementCommandsTopic, "ledger.release", eventbus.LedgerReleaseVersion, "pay-1", sqlmock.AnyArg(), now).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 	if err := c.ResolveManualReview(context.Background(), "pay-1", "return", "alice", "provider confirmed return"); err != nil {

@@ -20,7 +20,7 @@ type recordingProducer struct {
 }
 
 func (p *recordingProducer) Publish(_ context.Context, topic eventbus.Topic, event eventbus.Event) error {
-	if p.err != nil && topic != defaultDeadLetterTopic {
+	if p.err != nil && topic != eventbus.DeadLetterTopic {
 		return p.err
 	}
 	p.topics = append(p.topics, topic)
@@ -50,10 +50,10 @@ func TestRelayOncePublishesAndMarksClaimedEvents(t *testing.T) {
 			"id", "topic", "event_type", "event_version", "aggregate_id",
 			"aggregate_type", "payload", "occurred_at", "attempt_count", "created_at",
 		}).AddRow(
-			"evt-1", "payment-events", "payment.created", 1, "pay-1",
+			"evt-1", "payout-events", "payment.created", 1, "pay-1",
 			"payment", []byte(`{"amount_minor":2500}`), occurredAt, 0, createdAt,
 		).AddRow(
-			"evt-2", "payment-events", "payment.created", 1, "pay-2",
+			"evt-2", "payout-events", "payment.created", 1, "pay-2",
 			"payment", []byte(`{"amount_minor":5000}`), occurredAt, 0, createdAt,
 		))
 	mock.ExpectExec("UPDATE outbox_events").
@@ -74,7 +74,7 @@ func TestRelayOncePublishesAndMarksClaimedEvents(t *testing.T) {
 	if len(producer.events) != 2 || producer.events[0].ID != "evt-1" || producer.events[1].ID != "evt-2" {
 		t.Fatalf("unexpected published events: %+v", producer.events)
 	}
-	if producer.topics[0] != eventbus.Topic("payment-events") {
+	if producer.topics[0] != eventbus.PayoutEventsTopic {
 		t.Fatalf("unexpected topic: %q", producer.topics[0])
 	}
 	if !json.Valid(producer.events[0].Payload) {
@@ -103,7 +103,7 @@ func TestRelayOnceSchedulesRetryWhenPublishFails(t *testing.T) {
 			"id", "topic", "event_type", "event_version", "aggregate_id",
 			"aggregate_type", "payload", "occurred_at", "attempt_count", "created_at",
 		}).AddRow(
-			"evt-1", "payment-events", "payment.created", 1, "pay-1",
+			"evt-1", "payout-events", "payment.created", 1, "pay-1",
 			"payment", []byte(`{}`), now, 1, now.Add(-time.Minute),
 		))
 	mock.ExpectExec("UPDATE outbox_events").
@@ -181,7 +181,7 @@ func TestRelayOnceMarksEventFailedAtAttemptLimit(t *testing.T) {
 	mock.ExpectBegin()
 	mock.ExpectQuery("SELECT candidate.id").WithArgs(1, now).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "topic", "event_type", "event_version", "aggregate_id", "aggregate_type", "payload", "occurred_at", "attempt_count", "created_at"}).
-			AddRow("evt-1", "payment-events", "payment.created", 1, "pay-1", "payment", []byte(`{}`), now, 2, now.Add(-time.Minute)))
+			AddRow("evt-1", "payout-events", "payment.created", 1, "pay-1", "payment", []byte(`{}`), now, 2, now.Add(-time.Minute)))
 	mock.ExpectExec("UPDATE outbox_events").WithArgs(3, "rejected", now, "evt-1").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
@@ -189,14 +189,14 @@ func TestRelayOnceMarksEventFailedAtAttemptLimit(t *testing.T) {
 		t.Fatalf("RelayOnce = (%d, %v), want (0, nil)", count, err)
 	}
 	producer := relay.producer.(*recordingProducer)
-	if len(producer.events) != 1 || producer.topics[0] != defaultDeadLetterTopic {
+	if len(producer.events) != 1 || producer.topics[0] != eventbus.DeadLetterTopic {
 		t.Fatalf("unexpected dead-letter publications: topics=%v events=%v", producer.topics, producer.events)
 	}
 	var payload DeadLetterPayload
 	if err := json.Unmarshal(producer.events[0].Payload, &payload); err != nil {
 		t.Fatalf("decode dead-letter payload: %v", err)
 	}
-	if payload.OriginalEvent.ID != "evt-1" || payload.OriginalTopic != "payment-events" || payload.AttemptCount != 3 || payload.LastError != "rejected" {
+	if payload.OriginalEvent.ID != "evt-1" || payload.OriginalTopic != "payout-events" || payload.AttemptCount != 3 || payload.LastError != "rejected" {
 		t.Fatalf("unexpected dead-letter payload: %+v", payload)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {

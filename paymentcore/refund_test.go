@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
+
+	"stablerail/eventbus"
 )
 
 func TestCreateRefundCreatesLinkedPaymentAndPaymentCreatedEvent(t *testing.T) {
@@ -27,7 +29,7 @@ func TestCreateRefundCreatesLinkedPaymentAndPaymentCreatedEvent(t *testing.T) {
 	mock.ExpectExec("INSERT INTO payment_refunds").WithArgs("ref_test", "pay_1", "pay_test", "tenant_1", "refund-key", int64(1000), "USD", "duplicate order", now).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO payment_audit_events").WithArgs("pay_test", "created", "merchant refund payment created: duplicate order", now).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO payment_timeline_entries").WithArgs("pay_test", PaymentStatusCreated, "refund payment created", now).WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectExec("INSERT INTO outbox_events").WithArgs("evt_test", PaymentEventsTopic, "payment.created", 1, "pay_test", "payment", sqlmock.AnyArg(), now).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO outbox_events").WithArgs("evt_test", eventbus.PayoutEventsTopic, "payment.created", 1, "pay_test", "payment", sqlmock.AnyArg(), now).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 
 	refund, err := service.CreateRefund(context.Background(), "pay_1", "tenant_1", "refund-key", 1000, "duplicate order", "")

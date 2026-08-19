@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"stablerail/eventbus"
-	"stablerail/paymentcore/workflow"
 )
 
 type SagaCoordinator struct {
@@ -123,7 +122,7 @@ func (c *SagaCoordinator) enqueueCommand(ctx context.Context, tx *sql.Tx, sagaID
 	}
 	body, _ := json.Marshal(map[string]string{"saga_id": sagaID, "correlation_id": correlationID, "payment_id": payinID, "payin_id": operationID, "caused_by_event_id": causedBy, "reason": reason})
 	version := map[string]int{"payin.policy.evaluate": eventbus.PayinPolicyEvaluateVersion, "payin.execute": eventbus.PayinExecuteVersion, "payin.ledger.record": eventbus.PayinLedgerRecordVersion, "payin.fail": eventbus.PayinFailedVersion}[command]
-	_, err = tx.ExecContext(ctx, `INSERT INTO outbox_events(id,topic,event_type,event_version,aggregate_id,aggregate_type,payload,occurred_at) VALUES($1,$2,$3,$4,$5,'payment',$6,$7)`, commandID, workflow.CommandTopic, command, version, payinID, body, now)
+	_, err = tx.ExecContext(ctx, `INSERT INTO outbox_events(id,topic,event_type,event_version,aggregate_id,aggregate_type,payload,occurred_at) VALUES($1,$2,$3,$4,$5,'payment',$6,$7)`, commandID, eventbus.SettlementCommandsTopic, command, version, payinID, body, now)
 	return err
 }
 

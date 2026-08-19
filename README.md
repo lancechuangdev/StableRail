@@ -1,6 +1,6 @@
 # StableRail
 
-StableRail is a Go reference implementation of a durable, event-driven payment workflow. It accepts payment intents over HTTP, stores payment and double-entry ledger state in PostgreSQL, and coordinates policy, ledger, settlement, provider returns, and manual review through Kafka and a persisted saga.
+StableRail is a Go reference implementation of a provider-neutral payment orchestration platform. It exposes one HTTP payment model for inbound pay-ins and outbound payouts, keeps payment, double-entry ledger, outbox, and saga state in PostgreSQL, and uses Kafka to coordinate policy checks, accounting, provider execution, compensation, and manual review. Settlement-provider adapters implement the external pay-in and payout operations without changing the public payment API.
 
 ## Highlights
 
@@ -28,8 +28,8 @@ flowchart LR
     Consumers --> Saga[Saga and workers]
     Saga --> DB
     Saga <-->|Generic pay-in/payout contract| Provider[Settlement provider]
-    Provider --> BlindPay[BlindPay adapter]
-    BlindPay -->|Signed webhook| API
+    Provider --> External[External provider adapter]
+    External -->|Signed webhook| API
     DB --> Webhooks[Tenant webhooks]
 ```
 
@@ -39,18 +39,33 @@ Every business update and outgoing event commits in one PostgreSQL transaction. 
 
 | Package | Responsibility |
 | --- | --- |
-| `paymentcore` | Parent payment aggregate, refunds, public payment/funds state, and PostgreSQL payment storage |
-| `paymentcore/payin` | Inbound pay-in quotes, pay-in lifecycle, and pay-in persistence |
-| `paymentcore/payout` | Outbound payout model, saga coordinator, durable attempts, provider-result persistence, and ambiguous-submission recovery |
-| `paymentcore/workflow` | Command topic and timeout runner shared by the pay-in and payout coordinators |
+| `paymentapi` | HTTP transport, authentication, and tenant/operator endpoints |
+| `paymentcore` | Payment aggregate, refunds, public payment/funds state, and PostgreSQL payment storage |
+| `paymentcore/payin` | Inbound quote and operation model, saga coordinator, provider-result persistence, ledger completion, and recovery |
+| `paymentcore/payout` | Outbound quote and operation model, saga coordinator, durable submission attempts, provider-result persistence, and recovery |
+| `ledger` | Transactional double-entry reservations, releases, and provider-return journals |
+| `policy` | Payment policy evaluation contracts |
+| `reconciliation` | Comparison of payment, ledger, and provider records plus discrepancy resolution |
+| `eventbus` | Shared event envelopes, topic and version contracts, and Kafka producer/consumer adapters |
+| `outbox` | Transactional event publication, retry and dead-letter handling, and operator redrive |
 | `settlement` | Provider-neutral payout/pay-in contracts and the deterministic mock provider |
 | `settlement/blindpay` | BlindPay client, resource mapping, quote/execution adapters, and webhooks |
-| `workers` | Policy, ledger, and provider command execution for both settlement directions |
-| `paymentapi` | HTTP transport, authentication, and tenant/operator endpoints |
+| `workers` | Policy, ledger, and provider command execution plus runtime timeout polling for both settlement directions |
 
-`paymentcore` owns the parent payment and funds lifecycle. Its `payin` and `payout` subpackages each own their direction-specific statuses, quote and execution contracts, provider errors, provider interfaces, and saga coordinator. The small `paymentcore/workflow` package contains only infrastructure genuinely shared by both coordinators. `settlement` only composes `payin.Provider` and `payout.Provider` into the complete `SettlementProvider`; it does not redefine either domain's types.
+`paymentcore` owns the payment and funds lifecycle. Its `payin` and `payout` subpackages each own their direction-specific statuses, quote and execution contracts, provider errors, provider interfaces, and saga coordinator. Shared event envelopes, versions, and Kafka topic names live in `eventbus`; `workers` owns runtime polling and command execution. `settlement` only composes `payin.Provider` and `payout.Provider` into the complete `SettlementProvider`; it does not redefine either domain's types.
 
-`payout.Service` owns payout quote and provider-operation persistence in the shared `payment_quotes` and direction-specific `payouts` tables. `CreateQuote` enforces tenant-scoped idempotency, calls the provider, and stores normalized commercial terms plus the raw provider payload. `CreatePayout` commits a `submission_pending` attempt before calling the provider, records the returned reference and status, and retries `unknown` outcomes with the original idempotency key. Provider adapters such as BlindPay do not write generic quote, payout, or payment state; they resolve provider resources, execute external API operations, and translate the results.
+`payout.Service` owns payout quote and provider-operation persistence in the shared `payment_quotes` and direction-specific `payouts` tables. `CreateQuote` enforces tenant-scoped idempotency, calls the provider, and stores normalized commercial terms plus the raw provider payload. `CreatePayout` commits a `submission_pending` attempt before calling the provider, records the returned reference and status, and retries `unknown` outcomes with the original idempotency key. Provider execution adapters resolve provider resources, call external APIs, and translate results; verified provider webhook application then advances the generic payment, operation, saga, ledger, and merchant-webhook state transactionally.
+
+### Kafka topics
+
+All application topic names are defined in `eventbus/topics.go`. Domain packages own event meaning and payload construction; `eventbus` owns the shared routing names and Kafka transport.
+
+| Topic | Constant | Producers | Consumers | Purpose |
+| --- | --- | --- | --- | --- |
+| `payout-events` | `eventbus.PayoutEventsTopic` | Payment storage, payout workers, provider webhooks, and mock settlement control | Payout saga coordinator and tenant-webhook dispatcher | Payout lifecycle facts |
+| `payin-events` | `eventbus.PayinEventsTopic` | Pay-in storage, pay-in workers, and provider webhooks | Pay-in saga coordinator | Pay-in lifecycle facts |
+| `settlement-commands` | `eventbus.SettlementCommandsTopic` | Pay-in and payout saga coordinators | Policy, ledger, and provider command workers | Durable workflow commands for both settlement directions |
+| `stablerail-dead-letter` | `eventbus.DeadLetterTopic` | Outbox relay | Operator inspection and redrive tooling | Events that exhausted outbox publication retries or exceeded the retry age |
 
 ## Payment lifecycle
 
@@ -181,7 +196,11 @@ stateDiagram-v2
     awaiting_execution --> failed: payin.failed
     processing --> failed: payin.failed
     on_hold --> failed: payin.failed
-    completed --> refunded: payin.refunded
+    awaiting_execution --> refunded: payin.refunded
+    processing --> refunded: payin.refunded
+    on_hold --> refunded: payin.refunded
+    awaiting_ledger --> refunded: payin.refunded
+    completed --> refunded: payin.refunded / reverse ledger
 ```
 
 Pay-in policy and compliance waits fail on timeout. Provider execution and ledger commands are retried with their original idempotent operation identity. Each active pay-in state stores a deadline, and the timeout worker claims only `direction=payin` rows; the payout timeout worker similarly claims only `direction=payout` rows.
@@ -192,7 +211,7 @@ Pay-ins and payouts are directions of the same public payment resource. Create a
 
 Both direction-specific coordinators store orchestration state in `settlement_sagas`, keyed by payment ID and direction. The provider-facing `payins` and `payouts` tables remain separate because their execution details and provider statuses differ; they are not separate public API resources.
 
-The generic `payin.Provider` boundary uses opaque source-instrument and destination-account IDs resolved through `provider_resources`; provider wallet and bank-account identifiers do not appear in the shared contract. Verified `payin.*` webhooks advance `processing | on_hold` to `received | failed | refunded`. The saga turns `received` into `succeeded` only after the ledger command debits `cash:operating` and credits `settlement:payable`; a later provider refund posts the inverse journal. Early webhooks are retained and reconciled after the local pay-in becomes visible.
+The generic `payin.Provider` boundary uses opaque source-instrument and destination-account IDs resolved through `provider_resources`; provider wallet and bank-account identifiers do not appear in the shared contract. Verified `payin.*` webhooks can advance an executed pay-in to `processing`, `on_hold`, `received`, `failed`, or `refunded`. The saga turns `received` into `succeeded` only after the ledger command debits `cash:operating` and credits `settlement:payable`. A refund after that successful journal posts the inverse journal; a refund before ledger completion has no completed pay-in journal to reverse. Early webhooks are retained and reconciled after the local pay-in becomes visible.
 
 Pay-in and payout records own their source, destination, method, and monetary snapshot. At the generic data-model level, a quote is an optional commercial attachment that locks fees, FX, and source/destination amounts. Accepting a quote copies those terms into the operation, so lifecycle processing and accounting never depend on joining back to the quote. The schema permits providers that execute without a quote. The current pay-in HTTP workflow and BlindPay adapter remain quote-first.
 
@@ -253,7 +272,7 @@ done
 Create Kafka topics:
 
 ```bash
-for topic in payment-events payin-events payment-commands stablerail-dead-letter; do
+for topic in payout-events payin-events settlement-commands stablerail-dead-letter; do
   docker compose exec kafka /opt/kafka/bin/kafka-topics.sh \
     --bootstrap-server localhost:9092 \
     --create --if-not-exists \
@@ -288,7 +307,7 @@ curl -X POST http://localhost:8080/v1/payments \
   -H "Authorization: Bearer $STABLERAIL_API_KEY" \
   -H 'Content-Type: application/json' \
   -H 'Idempotency-Key: request-123' \
-    -d '{"direction":"payout","external_reference":"order-123","currency":"USD","amount_minor":2500}'
+  -d '{"direction":"payout","external_reference":"order-123","currency":"USD","amount_minor":2500}'
 
 curl -H "Authorization: Bearer $STABLERAIL_API_KEY" \
   http://localhost:8080/v1/payments/PAYMENT_ID/timeline
@@ -319,7 +338,7 @@ Stop the environment with `docker compose down`. Add `--volumes` to permanently 
 | `GET /readyz` | PostgreSQL readiness check |
 | `GET /metrics` | Prometheus metrics |
 
-Tenant endpoints require `Authorization: Bearer <api-key>`. Operator endpoints are available only when `STABLERAIL_OPERATOR_TOKEN` is set and require that token. Payment reads are tenant-scoped.
+Tenant endpoints require `Authorization: Bearer <api-key>`. Operator endpoints are available only when `STABLERAIL_OPERATOR_TOKEN` is set and require that token. Payment reads are tenant-scoped. `direction` should be supplied explicitly; omission currently defaults to `payout` for backward compatibility.
 
 `POST /v1/payments` returns `202 Accepted` for a created pay-in and `201 Created` for a created payout. Provider instructions and later lifecycle statuses are asynchronous; there is no provider network call in the HTTP transaction.
 

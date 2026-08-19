@@ -39,7 +39,7 @@ func TestKafkaProducerPublishesVersionedEvent(t *testing.T) {
 		Payload:       json.RawMessage(`{"amount_minor":2500,"currency":"USD"}`),
 	}
 
-	if err := producer.Publish(context.Background(), Topic("payment-events"), event); err != nil {
+	if err := producer.Publish(context.Background(), PayoutEventsTopic, event); err != nil {
 		t.Fatalf("Publish returned error: %v", err)
 	}
 	if len(writer.messages) != 1 {
@@ -47,7 +47,7 @@ func TestKafkaProducerPublishesVersionedEvent(t *testing.T) {
 	}
 
 	message := writer.messages[0]
-	if message.Topic != "payment-events" || string(message.Key) != "pay-1" {
+	if message.Topic != "payout-events" || string(message.Key) != "pay-1" {
 		t.Fatalf("unexpected routing: topic=%q key=%q", message.Topic, message.Key)
 	}
 
@@ -69,7 +69,7 @@ func TestKafkaProducerPublishesToMultipleTopics(t *testing.T) {
 		OccurredAt: time.Now().UTC(), Payload: json.RawMessage(`{}`),
 	}
 
-	if err := producer.Publish(context.Background(), Topic("payment-events"), event); err != nil {
+	if err := producer.Publish(context.Background(), PayoutEventsTopic, event); err != nil {
 		t.Fatalf("publish payment event: %v", err)
 	}
 	event.ID = "evt-2"
@@ -81,7 +81,7 @@ func TestKafkaProducerPublishesToMultipleTopics(t *testing.T) {
 	if len(writer.messages) != 2 {
 		t.Fatalf("expected two messages, got %d", len(writer.messages))
 	}
-	if writer.messages[0].Topic != "payment-events" || writer.messages[1].Topic != "settlement-events" {
+	if writer.messages[0].Topic != "payout-events" || writer.messages[1].Topic != "settlement-events" {
 		t.Fatalf("unexpected topics: %q, %q", writer.messages[0].Topic, writer.messages[1].Topic)
 	}
 }
@@ -90,7 +90,7 @@ func TestKafkaProducerRejectsInvalidEvent(t *testing.T) {
 	writer := &recordingWriter{}
 	producer := &KafkaProducer{writer: writer}
 
-	if err := producer.Publish(context.Background(), Topic("payment-events"), Event{}); err == nil {
+	if err := producer.Publish(context.Background(), PayoutEventsTopic, Event{}); err == nil {
 		t.Fatal("expected invalid event error")
 	}
 	if len(writer.messages) != 0 {
@@ -107,7 +107,7 @@ func TestKafkaProducerReturnsWriterError(t *testing.T) {
 		OccurredAt: time.Now().UTC(), Payload: json.RawMessage(`{}`),
 	}
 
-	if err := producer.Publish(context.Background(), Topic("payment-events"), event); err == nil {
+	if err := producer.Publish(context.Background(), PayoutEventsTopic, event); err == nil {
 		t.Fatal("expected writer error")
 	}
 }

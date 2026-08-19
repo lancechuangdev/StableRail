@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
+
+	"stablerail/eventbus"
 )
 
 func TestPostgresCreateCommitsPaymentAndOutboxTogether(t *testing.T) {
@@ -30,7 +32,7 @@ func TestPostgresCreateCommitsPaymentAndOutboxTogether(t *testing.T) {
 		WithArgs("pay_test", PaymentStatusCreated, "payment created", service.now()).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec("INSERT INTO outbox_events").
-		WithArgs("evt_test", PaymentEventsTopic, "payment.created", 1, "pay_test", "payment", sqlmock.AnyArg(), service.now()).
+		WithArgs("evt_test", eventbus.PayoutEventsTopic, "payment.created", 1, "pay_test", "payment", sqlmock.AnyArg(), service.now()).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 

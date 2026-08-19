@@ -23,7 +23,6 @@ import (
 	"stablerail/paymentcore"
 	"stablerail/paymentcore/payin"
 	"stablerail/paymentcore/payout"
-	"stablerail/paymentcore/workflow"
 	"stablerail/policy"
 	"stablerail/postgresdb"
 	"stablerail/reconciliation"
@@ -89,7 +88,7 @@ func run() error {
 	}
 
 	sagaLoop := &consumer.Loop{
-		Reader:    consumer.NewKafkaReader(config.KafkaBrokers, string(paymentcore.PaymentEventsTopic), "stablerail-saga"),
+		Reader:    consumer.NewKafkaReader(config.KafkaBrokers, string(eventbus.PayoutEventsTopic), "stablerail-saga"),
 		Processor: inbox.BoundProcessor{Processor: inboxProcessor, Handler: workers.PayoutSagaHandler(payoutCoordinator)},
 		Consumer:  "payment-saga",
 	}
@@ -99,7 +98,7 @@ func run() error {
 		return err
 	}
 	webhookLoop := &consumer.Loop{
-		Reader:    consumer.NewKafkaReader(config.KafkaBrokers, string(paymentcore.PaymentEventsTopic), "stablerail-webhooks"),
+		Reader:    consumer.NewKafkaReader(config.KafkaBrokers, string(eventbus.PayoutEventsTopic), "stablerail-webhooks"),
 		Processor: inbox.BoundProcessor{Processor: inboxProcessor, Handler: notification.EventHandler()},
 		Consumer:  "payment-webhooks",
 	}
@@ -207,12 +206,12 @@ func run() error {
 	}
 	handler = apiKeys.Middleware(handler)
 	payinSagaLoop := &consumer.Loop{
-		Reader:    consumer.NewKafkaReader(config.KafkaBrokers, string(payin.EventsTopic), "stablerail-payin-saga"),
+		Reader:    consumer.NewKafkaReader(config.KafkaBrokers, string(eventbus.PayinEventsTopic), "stablerail-payin-saga"),
 		Processor: inbox.BoundProcessor{Processor: inboxProcessor, Handler: workers.PayinSagaHandler(payinCoordinator)},
 		Consumer:  "payin-saga",
 	}
 	commandLoop := &consumer.Loop{
-		Reader:    consumer.NewKafkaReader(config.KafkaBrokers, string(workflow.CommandTopic), "stablerail-core-workers"),
+		Reader:    consumer.NewKafkaReader(config.KafkaBrokers, string(eventbus.SettlementCommandsTopic), "stablerail-core-workers"),
 		Processor: inbox.BoundProcessor{Processor: inboxProcessor, Handler: workers.NewCommandHandler(policy.DeterministicEvaluator{RejectAmountMinor: config.MockPolicyRejectAmount}, ledger.NewPostgresService(), payoutCreator, payins).Handle},
 		Consumer:  "core-workers",
 	}
@@ -278,8 +277,8 @@ func run() error {
 		server,
 		config.ShutdownTimeout,
 		relay.Run,
-		workflow.TimeoutWorker(payoutCoordinator, config.SagaPollInterval),
-		workflow.TimeoutWorker(payinCoordinator, config.SagaPollInterval),
+		workers.TimeoutWorker(payoutCoordinator, config.SagaPollInterval),
+		workers.TimeoutWorker(payinCoordinator, config.SagaPollInterval),
 		sagaLoop.Run,
 		payinSagaLoop.Run,
 		commandLoop.Run,

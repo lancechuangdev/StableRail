@@ -13,13 +13,12 @@ import (
 )
 
 const (
-	defaultBatchSize       = 100
-	defaultPollInterval    = time.Second
-	defaultInitialBackoff  = time.Second
-	defaultMaxBackoff      = time.Minute
-	defaultMaxAttempts     = 10
-	defaultMaxAge          = 24 * time.Hour
-	defaultDeadLetterTopic = eventbus.Topic("stablerail-dead-letter")
+	defaultBatchSize      = 100
+	defaultPollInterval   = time.Second
+	defaultInitialBackoff = time.Second
+	defaultMaxBackoff     = time.Minute
+	defaultMaxAttempts    = 10
+	defaultMaxAge         = 24 * time.Hour
 )
 
 var ErrEventNotDeadLettered = errors.New("outbox event is not dead-lettered")
@@ -86,7 +85,7 @@ func NewRelay(db *sql.DB, producer eventbus.Producer, config Config) (*Relay, er
 		config.MaxAge = defaultMaxAge
 	}
 	if config.DeadLetterTopic == "" {
-		config.DeadLetterTopic = defaultDeadLetterTopic
+		config.DeadLetterTopic = eventbus.DeadLetterTopic
 	}
 	if config.MaxBackoff < config.InitialBackoff {
 		return nil, errors.New("outbox maximum backoff cannot be less than initial backoff")

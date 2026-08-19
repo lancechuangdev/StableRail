@@ -40,7 +40,7 @@ until "${compose[@]}" exec -T kafka /opt/kafka/bin/kafka-topics.sh \
   --bootstrap-server localhost:19092 --list >/dev/null 2>&1; do
   sleep 1
 done
-for topic in payment-events payment-commands; do
+for topic in payout-events settlement-commands; do
   "${compose[@]}" exec -T kafka /opt/kafka/bin/kafka-topics.sh \
     --bootstrap-server localhost:19092 --create --if-not-exists \
     --topic "$topic" --partitions 1 --replication-factor 1 >/dev/null

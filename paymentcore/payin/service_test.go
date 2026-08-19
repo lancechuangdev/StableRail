@@ -37,7 +37,7 @@ func TestRecordLedgerCompletesReceivedPayin(t *testing.T) {
 	mock.ExpectExec("UPDATE payments SET payment_status='succeeded'").WithArgs(now, "pay_1").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO payment_timeline_entries").WithArgs("pay_1", now).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO webhook_deliveries").WithArgs("evt_pin_1_succeeded", "pay_1", "payin.succeeded", sqlmock.AnyArg(), now, "tenant_1").WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectExec("INSERT INTO outbox_events").WithArgs("evt_pin_1_succeeded", EventsTopic, "payin.succeeded", 1, "pay_1", sqlmock.AnyArg(), now).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO outbox_events").WithArgs("evt_pin_1_succeeded", eventbus.PayinEventsTopic, "payin.succeeded", 1, "pay_1", sqlmock.AnyArg(), now).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 	tx, _ := db.BeginTx(context.Background(), nil)
 	if err := service.RecordLedger(context.Background(), tx, "pin_1", "corr_1", now); err != nil {
@@ -65,7 +65,7 @@ func TestFailureBeforeReceiptPreservesPendingFunds(t *testing.T) {
 	mock.ExpectExec("UPDATE payments SET payment_status").WithArgs(paymentcore.PaymentStatusFailed, paymentcore.FundsStatusPending, now, "pay_1").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO payment_timeline_entries").WithArgs("pay_1", paymentcore.PaymentStatusFailed, "payin.failed", now).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO webhook_deliveries").WithArgs("evt_pin_1_failed", "pay_1", "payin.failed", sqlmock.AnyArg(), now, "tenant_1").WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectExec("INSERT INTO outbox_events").WithArgs("evt_pin_1_failed", EventsTopic, "payin.failed", eventbus.PayinFailedVersion, "pay_1", sqlmock.AnyArg(), now).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO outbox_events").WithArgs("evt_pin_1_failed", eventbus.PayinEventsTopic, "payin.failed", eventbus.PayinFailedVersion, "pay_1", sqlmock.AnyArg(), now).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 	tx, _ := db.BeginTx(context.Background(), nil)
 	if err := service.ApplyResult(context.Background(), tx, "pin_1", "corr_1", ExecuteResult{Status: StatusFailed, FailureReason: "policy rejected"}, now); err != nil {

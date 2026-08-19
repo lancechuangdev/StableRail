@@ -10,7 +10,7 @@ import (
 	"net/http"
 	"time"
 
-	"stablerail/paymentcore"
+	"stablerail/eventbus"
 )
 
 // LocalSettlementControl emits provider callbacks for the mock provider. It is
@@ -39,7 +39,7 @@ func (c *LocalSettlementControl) Emit(ctx context.Context, paymentID, status, re
 	}
 	payload, _ := json.Marshal(map[string]string{"correlation_id": correlationID, "reason": reason})
 	now := time.Now().UTC()
-	_, err := c.db.ExecContext(ctx, `INSERT INTO outbox_events(id,topic,event_type,event_version,aggregate_id,aggregate_type,payload,occurred_at,next_attempt_at) VALUES($1,$2,$3,1,$4,'payment',$5,$6,$7)`, "evt_"+hex.EncodeToString(b), paymentcore.PaymentEventsTopic, eventType, paymentID, payload, now, now.Add(delay))
+	_, err := c.db.ExecContext(ctx, `INSERT INTO outbox_events(id,topic,event_type,event_version,aggregate_id,aggregate_type,payload,occurred_at,next_attempt_at) VALUES($1,$2,$3,1,$4,'payment',$5,$6,$7)`, "evt_"+hex.EncodeToString(b), eventbus.PayoutEventsTopic, eventType, paymentID, payload, now, now.Add(delay))
 	return err
 }
 

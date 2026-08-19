@@ -17,8 +17,6 @@ import (
 var ErrNotFound = errors.New("payin not found")
 var ErrIdempotencyConflict = errors.New("idempotency key is bound to another payin quote")
 
-const EventsTopic eventbus.Topic = "payin-events"
-
 type Service struct {
 	db       *sql.DB
 	provider Provider
@@ -160,7 +158,7 @@ func (s *Service) createPayin(ctx context.Context, tenantID, quoteID, idempotenc
 	}
 	eventID := "evt_" + id + "_created"
 	eventBody, _ := json.Marshal(map[string]string{"payin_id": id})
-	if _, err := tx.ExecContext(ctx, `INSERT INTO outbox_events(id,topic,event_type,event_version,aggregate_id,aggregate_type,payload,occurred_at) VALUES($1,$2,'payin.created',$3,$4,'payment',$5,$6)`, eventID, EventsTopic, eventbus.PayinCreatedVersion, paymentID, eventBody, now); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO outbox_events(id,topic,event_type,event_version,aggregate_id,aggregate_type,payload,occurred_at) VALUES($1,$2,'payin.created',$3,$4,'payment',$5,$6)`, eventID, eventbus.PayinEventsTopic, eventbus.PayinCreatedVersion, paymentID, eventBody, now); err != nil {
 		return nil, err
 	}
 	if err = tx.Commit(); err != nil {
@@ -268,7 +266,7 @@ func (s *Service) ApplyResult(ctx context.Context, tx *sql.Tx, payinID, correlat
 		return err
 	}
 	version := map[PayinStatus]int{StatusProcessing: eventbus.PayinProcessingVersion, StatusOnHold: eventbus.PayinOnHoldVersion, StatusReceived: eventbus.PayinReceivedVersion, StatusFailed: eventbus.PayinFailedVersion, StatusRefunded: eventbus.PayinRefundedVersion}[lifecycleStatus]
-	_, err := tx.ExecContext(ctx, `INSERT INTO outbox_events(id,topic,event_type,event_version,aggregate_id,aggregate_type,payload,occurred_at) VALUES($1,$2,$3,$4,$5,'payment',$6,$7) ON CONFLICT(id) DO NOTHING`, eventID, EventsTopic, eventType, version, paymentID, body, now)
+	_, err := tx.ExecContext(ctx, `INSERT INTO outbox_events(id,topic,event_type,event_version,aggregate_id,aggregate_type,payload,occurred_at) VALUES($1,$2,$3,$4,$5,'payment',$6,$7) ON CONFLICT(id) DO NOTHING`, eventID, eventbus.PayinEventsTopic, eventType, version, paymentID, body, now)
 	return err
 }
 
@@ -311,7 +309,7 @@ func (s *Service) RecordLedger(ctx context.Context, tx *sql.Tx, payinID, correla
 	if _, err := tx.ExecContext(ctx, `INSERT INTO webhook_deliveries(id,endpoint_id,event_id,payment_id,event_type,payload,next_attempt_at,created_at) SELECT 'whd_'||md5(id||$1),id,$1,$2,$3,$4,$5,$5 FROM webhook_endpoints WHERE tenant_id=$6 AND active ON CONFLICT(endpoint_id,event_id) DO NOTHING`, eventID, paymentID, eventType, body, now, tenantID); err != nil {
 		return err
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO outbox_events(id,topic,event_type,event_version,aggregate_id,aggregate_type,payload,occurred_at) VALUES($1,$2,$3,$4,$5,'payment',$6,$7) ON CONFLICT(id) DO NOTHING`, eventID, EventsTopic, eventType, eventbus.PayinSucceededVersion, paymentID, body, now)
+	_, err = tx.ExecContext(ctx, `INSERT INTO outbox_events(id,topic,event_type,event_version,aggregate_id,aggregate_type,payload,occurred_at) VALUES($1,$2,$3,$4,$5,'payment',$6,$7) ON CONFLICT(id) DO NOTHING`, eventID, eventbus.PayinEventsTopic, eventType, eventbus.PayinSucceededVersion, paymentID, body, now)
 	return err
 }
 
