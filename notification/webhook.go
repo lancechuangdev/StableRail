@@ -83,8 +83,7 @@ func EventHandler() func(context.Context, *sql.Tx, eventbus.Event) error {
 			return errors.New("webhook transaction is required")
 		}
 		switch event.Type {
-		case "payment.created", "ledger.reserved", "payment.succeeded", "payment.failed", "payment.funds_returned", "payment.return.succeeded",
-			"payin.created", "payin.processing", "payin.on_hold", "payin.received", "payin.failed", "payin.refunded", "payin.succeeded":
+		case "payment.created", "payment.processing", "payment.succeeded", "payment.failed", "payment.funds_status_changed":
 		default:
 			return nil
 		}
@@ -92,17 +91,13 @@ func EventHandler() func(context.Context, *sql.Tx, eventbus.Event) error {
 		if err := tx.QueryRowContext(ctx, `SELECT tenant_id FROM payments WHERE id=$1`, event.AggregateID).Scan(&tenantID); err != nil {
 			return fmt.Errorf("load webhook tenant: %w", err)
 		}
-		publicType := map[string]string{"ledger.reserved": "payment.processing"}[event.Type]
-		if publicType == "" {
-			publicType = event.Type
-		}
-		body, err := json.Marshal(map[string]any{"id": event.ID, "type": publicType, "payment_id": event.AggregateID, "occurred_at": event.OccurredAt, "data": json.RawMessage(event.Payload)})
+		body, err := json.Marshal(map[string]any{"id": event.ID, "type": event.Type, "payment_id": event.AggregateID, "occurred_at": event.OccurredAt, "data": json.RawMessage(event.Payload)})
 		if err != nil {
 			return fmt.Errorf("encode webhook payload: %w", err)
 		}
 		_, err = tx.ExecContext(ctx, `INSERT INTO webhook_deliveries(id,endpoint_id,event_id,payment_id,event_type,payload,next_attempt_at,created_at)
 			SELECT 'whd_' || md5(id || $1), id, $1, $2, $3, $4, $5, $5 FROM webhook_endpoints WHERE tenant_id=$6 AND active
-			ON CONFLICT(endpoint_id,event_id) DO NOTHING`, event.ID, event.AggregateID, publicType, body, event.OccurredAt, tenantID)
+			ON CONFLICT(endpoint_id,event_id) DO NOTHING`, event.ID, event.AggregateID, event.Type, body, event.OccurredAt, tenantID)
 		if err != nil {
 			return fmt.Errorf("enqueue webhook deliveries: %w", err)
 		}

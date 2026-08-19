@@ -60,7 +60,7 @@ func TestPayoutWebhookServicePersistsCompletionAndEnqueuesSagaEvent(t *testing.T
 		WithArgs("pay_test").
 		WillReturnRows(sqlmock.NewRows([]string{"correlation_id"}).AddRow("corr_test"))
 	mock.ExpectExec("INSERT INTO outbox_events").
-		WithArgs("evt_blindpay_msg_test", eventbus.PayoutEventsTopic, "settlement.completed", 1, "pay_test", sqlmock.AnyArg(), now).
+		WithArgs("evt_blindpay_msg_test", eventbus.PayoutEventsTopic, "payout.provider_completed", 1, "pay_test", sqlmock.AnyArg(), now).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 
@@ -87,7 +87,7 @@ func TestPayoutWebhookServiceMapsRefundedToReturnedOutcome(t *testing.T) {
 	mock.ExpectQuery("SELECT payment_id,provider_status FROM payouts").WillReturnRows(sqlmock.NewRows([]string{"payment_id", "provider_status"}).AddRow("pay_test", "processing"))
 	mock.ExpectExec("UPDATE payouts SET provider_status").WithArgs("refunded", body, now, "pay_test").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectQuery("SELECT correlation_id FROM settlement_sagas").WillReturnRows(sqlmock.NewRows([]string{"correlation_id"}).AddRow("corr_test"))
-	mock.ExpectExec("INSERT INTO outbox_events").WithArgs("evt_blindpay_msg_refund", eventbus.PayoutEventsTopic, "settlement.returned", 1, "pay_test", sqlmock.AnyArg(), now).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO outbox_events").WithArgs("evt_blindpay_msg_refund", eventbus.PayoutEventsTopic, "payout.provider_returned", 1, "pay_test", sqlmock.AnyArg(), now).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 
 	if err := service.Process(context.Background(), "msg_refund", body); err != nil {
@@ -135,7 +135,8 @@ func TestPayoutWebhookRecordsPostSuccessReturnWithoutChangingPayment(t *testing.
 	mock.ExpectExec("INSERT INTO payment_returns").WithArgs("ret_blindpay_msg_return", "pay_test", "blindpay", "msg_return", int64(2500), "USD", "provider returned funds after completed payout", "jrn_ret_blindpay_msg_return", now).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO payment_audit_events").WithArgs("pay_test", "provider returned funds after completed payout", now).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO payment_timeline_entries").WithArgs("pay_test", "provider returned funds after completed payout", now).WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectExec("INSERT INTO outbox_events").WithArgs("evt_blindpay_msg_return", eventbus.PayoutEventsTopic, eventbus.PaymentReturnSucceededVersion, "pay_test", sqlmock.AnyArg(), now).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO outbox_events").WithArgs("evt_blindpay_msg_return", eventbus.PayoutEventsTopic, eventbus.PayoutReturnCompletedVersion, "pay_test", sqlmock.AnyArg(), now).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO outbox_events").WithArgs("evt_blindpay_msg_return_payment", eventbus.PaymentEventsTopic, eventbus.PaymentFundsStatusChangedVersion, "pay_test", sqlmock.AnyArg(), now).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 
 	if err := service.Process(context.Background(), "msg_return", body); err != nil {
@@ -162,7 +163,7 @@ func TestReconcileOnceRepairsInitiallyUnmatchedTerminalWebhook(t *testing.T) {
 	mock.ExpectQuery("SELECT payment_id,provider_status FROM payouts").WithArgs("po_early").WillReturnRows(sqlmock.NewRows([]string{"payment_id", "provider_status"}).AddRow("pay_early", "processing"))
 	mock.ExpectExec("UPDATE payouts SET provider_status").WithArgs("completed", body, now, "pay_early").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectQuery("SELECT correlation_id FROM settlement_sagas").WithArgs("pay_early").WillReturnRows(sqlmock.NewRows([]string{"correlation_id"}).AddRow("corr_early"))
-	mock.ExpectExec("INSERT INTO outbox_events").WithArgs("evt_blindpay_msg_early", eventbus.PayoutEventsTopic, "settlement.completed", 1, "pay_early", sqlmock.AnyArg(), now).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO outbox_events").WithArgs("evt_blindpay_msg_early", eventbus.PayoutEventsTopic, "payout.provider_completed", 1, "pay_early", sqlmock.AnyArg(), now).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 	mock.ExpectQuery("FROM blindpay_webhook_events w WHERE w.webhook_event LIKE 'payin").WillReturnRows(sqlmock.NewRows([]string{"svix_id", "payload"}))
 
@@ -192,7 +193,7 @@ func TestPayinCompletionMovesToReceivedAndDefersLedgerToSaga(t *testing.T) {
 	mock.ExpectExec("UPDATE payments SET payment_status").WithArgs("processing", "received", now, "pay_1").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO payment_timeline_entries").WithArgs("pay_1", "processing", "payin.received", now).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectQuery("SELECT correlation_id FROM settlement_sagas").WithArgs("pay_1").WillReturnError(sql.ErrNoRows)
-	mock.ExpectExec("INSERT INTO webhook_deliveries").WithArgs("evt_blindpay_pi_test_received", "pay_1", "payin.received", sqlmock.AnyArg(), now).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO outbox_events").WithArgs("evt_blindpay_pi_test_received_payment", eventbus.PaymentEventsTopic, "payment.funds_status_changed", eventbus.PaymentFundsStatusChangedVersion, "pay_1", sqlmock.AnyArg(), now).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO provider_webhook_applications").WithArgs("msg_payin", now, "pi_test").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 	if err := service.Process(context.Background(), "msg_payin", body); err != nil {

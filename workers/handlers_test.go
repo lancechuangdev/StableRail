@@ -78,7 +78,7 @@ func TestSettlementSubmissionFailureEmitsFailedResult(t *testing.T) {
 	mock.ExpectBegin()
 	mock.ExpectQuery("SELECT amount_minor, currency FROM payments").WithArgs("pay_1").WillReturnRows(sqlmock.NewRows([]string{"amount_minor", "currency"}).AddRow(1000, "USDC"))
 	mock.ExpectQuery("SELECT kind,COALESCE").WithArgs("pay_1").WillReturnError(sql.ErrNoRows)
-	mock.ExpectExec("INSERT INTO outbox_events").WithArgs("evt_result", eventbus.PayoutEventsTopic, "settlement.failed", eventbus.SettlementFailedVersion, "pay_1", sqlmock.AnyArg(), now).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO outbox_events").WithArgs("evt_result", eventbus.PayoutEventsTopic, "payout.provider_failed", eventbus.PayoutProviderFailedVersion, "pay_1", sqlmock.AnyArg(), now).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 
 	tx, err := db.BeginTx(context.Background(), nil)
@@ -167,7 +167,8 @@ func TestLateReturnMovesFailedReservedPaymentToReturned(t *testing.T) {
 	mock.ExpectExec("UPDATE payments SET payment_status=.*payment_status='failed' AND funds_status='reserved'").WithArgs(paymentcore.PaymentStatusFailed, paymentcore.FundsStatusReturned, now, "pay_1").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO payment_audit_events").WithArgs("pay_1", "returned", "provider confirmed return", now).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO payment_timeline_entries").WithArgs("pay_1", paymentcore.PaymentStatusFailed, "provider confirmed return", now).WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectExec("INSERT INTO outbox_events").WithArgs("evt_returned", eventbus.PayoutEventsTopic, "payment.funds_returned", eventbus.PaymentFundsReturnedVersion, "pay_1", sqlmock.AnyArg(), now).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO outbox_events").WithArgs("evt_returned", eventbus.PayoutEventsTopic, "payout.funds_returned", eventbus.PayoutFundsReturnedVersion, "pay_1", sqlmock.AnyArg(), now).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO outbox_events").WithArgs("evt_returned", eventbus.PaymentEventsTopic, "payment.funds_status_changed", eventbus.PaymentFundsStatusChangedVersion, "pay_1", sqlmock.AnyArg(), now).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 	tx, _ := db.BeginTx(context.Background(), nil)
 	if err := handler.Handle(context.Background(), tx, event); err != nil {

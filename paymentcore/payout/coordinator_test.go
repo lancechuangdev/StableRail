@@ -20,21 +20,21 @@ func TestWorkflowTransitions(t *testing.T) {
 		wantState   State
 		wantCommand string
 	}{
-		{StateAwaitingPolicy, "policy.approved", StateAwaitingLedger, "ledger.reserve"},
-		{StateAwaitingPolicy, "policy.rejected", StateFailed, "payment.fail"},
-		{StateAwaitingLedger, "ledger.reserved", StateAwaitingSettlement, "settlement.execute"},
-		{StateAwaitingLedger, "ledger.failed", StateFailed, "payment.fail"},
-		{StateAwaitingSettlement, "settlement.completed", StateSettlingPayment, "payment.settle"},
-		{StateAwaitingSettlement, "settlement.on_hold", StateOnHold, ""},
-		{StateOnHold, "settlement.completed", StateSettlingPayment, "payment.settle"},
-		{StateOnHold, "settlement.failed", StateFailed, "payment.fail_reserved"},
-		{StateOnHold, "settlement.returned", StateReturning, "ledger.release"},
-		{StateSettlingPayment, "payment.succeeded", StateCompleted, ""},
-		{StateAwaitingSettlement, "settlement.failed", StateFailed, "payment.fail_reserved"},
-		{StateAwaitingSettlement, "settlement.returned", StateReturning, "ledger.release"},
-		{StateFailed, "settlement.returned", StateReturning, "ledger.release"},
-		{StateReleasingLedger, "ledger.released", StateLedgerReleased, "payment.fail"},
-		{StateReturning, "ledger.released", StateReturned, "payment.return"},
+		{StateAwaitingPolicy, "payout.policy.approved", StateAwaitingLedger, "ledger.reserve"},
+		{StateAwaitingPolicy, "payout.policy.rejected", StateFailed, "payment.fail"},
+		{StateAwaitingLedger, "payout.funds_reserved", StateAwaitingSettlement, "settlement.execute"},
+		{StateAwaitingLedger, "payout.ledger_failed", StateFailed, "payment.fail"},
+		{StateAwaitingSettlement, "payout.provider_completed", StateSettlingPayment, "payment.settle"},
+		{StateAwaitingSettlement, "payout.on_hold", StateOnHold, ""},
+		{StateOnHold, "payout.provider_completed", StateSettlingPayment, "payment.settle"},
+		{StateOnHold, "payout.provider_failed", StateFailed, "payment.fail_reserved"},
+		{StateOnHold, "payout.provider_returned", StateReturning, "ledger.release"},
+		{StateSettlingPayment, "payout.completed", StateCompleted, ""},
+		{StateAwaitingSettlement, "payout.provider_failed", StateFailed, "payment.fail_reserved"},
+		{StateAwaitingSettlement, "payout.provider_returned", StateReturning, "ledger.release"},
+		{StateFailed, "payout.provider_returned", StateReturning, "ledger.release"},
+		{StateReleasingLedger, "payout.funds_released", StateLedgerReleased, "payment.fail"},
+		{StateReturning, "payout.funds_released", StateReturned, "payment.return"},
 	}
 	for _, tt := range tests {
 		next, command, _, _, err := c.transition(tt.state, tt.event, "")
@@ -42,10 +42,10 @@ func TestWorkflowTransitions(t *testing.T) {
 			t.Errorf("transition(%s, %s) = (%s, %s, %v)", tt.state, tt.event, next, command, err)
 		}
 	}
-	if _, _, _, _, err := c.transition(StateCompleted, "policy.approved", ""); err == nil {
+	if _, _, _, _, err := c.transition(StateCompleted, "payout.policy.approved", ""); err == nil {
 		t.Fatal("expected invalid transition error")
 	}
-	next, command, _, _, err := c.transition(StateAwaitingSettlement, "settlement.failed", "submission_failed")
+	next, command, _, _, err := c.transition(StateAwaitingSettlement, "payout.provider_failed", "submission_failed")
 	if err != nil || next != StateFailed || command != "payment.fail" {
 		t.Fatalf("submission failure transition = (%s, %s, %v)", next, command, err)
 	}
@@ -58,7 +58,7 @@ func TestHandleStartsSagaAndEnqueuesPolicyCommand(t *testing.T) {
 	}
 	defer db.Close()
 	c := testSagaCoordinator(t, db)
-	event := sagaEvent("payment.created", "evt-created", nil)
+	event := sagaEvent("payout.created", "evt-created", nil)
 	now := c.now()
 
 	mock.ExpectBegin()
@@ -92,7 +92,7 @@ func TestHandleRejectsMismatchedCorrelation(t *testing.T) {
 	}
 	defer db.Close()
 	c := testSagaCoordinator(t, db)
-	event := sagaEvent("policy.approved", "evt-approved", map[string]string{"correlation_id": "wrong"})
+	event := sagaEvent("payout.policy.approved", "evt-approved", map[string]string{"correlation_id": "wrong"})
 	mock.ExpectBegin()
 	mock.ExpectQuery("SELECT id, correlation_id, state FROM settlement_sagas").WithArgs("pay-1").
 		WillReturnRows(sqlmock.NewRows([]string{"id", "correlation_id", "state"}).AddRow("saga-1", "corr-1", StateAwaitingPolicy))

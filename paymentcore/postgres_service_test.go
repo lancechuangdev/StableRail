@@ -32,7 +32,10 @@ func TestPostgresCreateCommitsPaymentAndOutboxTogether(t *testing.T) {
 		WithArgs("pay_test", PaymentStatusCreated, "payment created", service.now()).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec("INSERT INTO outbox_events").
-		WithArgs("evt_test", eventbus.PayoutEventsTopic, "payment.created", 1, "pay_test", "payment", sqlmock.AnyArg(), service.now()).
+		WithArgs("evt_test", eventbus.PayoutEventsTopic, "payout.created", 1, "pay_test", "payout", sqlmock.AnyArg(), service.now()).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO outbox_events").
+		WithArgs("evt_test", eventbus.PaymentEventsTopic, "payment.created", 1, "pay_test", "payment", sqlmock.AnyArg(), service.now()).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 
@@ -93,6 +96,7 @@ func TestPostgresCreateWithPayoutQuoteBindsQuoteAndPaymentAtomically(t *testing.
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO payment_audit_events").WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec("INSERT INTO payment_timeline_entries").WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec("INSERT INTO outbox_events").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO outbox_events").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 
@@ -159,6 +163,7 @@ func TestPostgresTransitionCommitsStateAndOutboxTogether(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO payment_audit_events").WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec("INSERT INTO payment_timeline_entries").WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec("INSERT INTO outbox_events").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO outbox_events").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 

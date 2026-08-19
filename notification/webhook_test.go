@@ -47,9 +47,9 @@ func TestEventHandlerCreatesReturnDelivery(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)
-	event := eventbus.Event{ID: "evt_returned", Type: "payment.funds_returned", Version: 1, AggregateID: "pay_1", AggregateType: "payment", Payload: []byte(`{"reason":"provider returned payout funds"}`), OccurredAt: now}
+	event := eventbus.Event{ID: "evt_returned", Type: "payment.funds_status_changed", Version: 1, AggregateID: "pay_1", AggregateType: "payment", Payload: []byte(`{"funds_status":"returned"}`), OccurredAt: now}
 	mock.ExpectQuery("SELECT tenant_id FROM payments").WithArgs("pay_1").WillReturnRows(sqlmock.NewRows([]string{"tenant_id"}).AddRow("cus_1"))
-	mock.ExpectExec("INSERT INTO webhook_deliveries").WithArgs("evt_returned", "pay_1", "payment.funds_returned", sqlmock.AnyArg(), now, "cus_1").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO webhook_deliveries").WithArgs("evt_returned", "pay_1", "payment.funds_status_changed", sqlmock.AnyArg(), now, "cus_1").WillReturnResult(sqlmock.NewResult(0, 1))
 
 	if err := EventHandler()(context.Background(), tx, event); err != nil {
 		t.Fatal(err)
@@ -71,9 +71,9 @@ func TestEventHandlerCreatesPayinDelivery(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Date(2026, time.August, 19, 12, 0, 0, 0, time.UTC)
-	event := eventbus.Event{ID: "evt_payin_received", Type: "payin.received", Version: 1, AggregateID: "pay_1", AggregateType: "payment", Payload: []byte(`{"payin_id":"pin_1"}`), OccurredAt: now}
+	event := eventbus.Event{ID: "evt_payin_received", Type: "payment.funds_status_changed", Version: 1, AggregateID: "pay_1", AggregateType: "payment", Payload: []byte(`{"funds_status":"received","payin_id":"pin_1"}`), OccurredAt: now}
 	mock.ExpectQuery("SELECT tenant_id FROM payments").WithArgs("pay_1").WillReturnRows(sqlmock.NewRows([]string{"tenant_id"}).AddRow("cus_1"))
-	mock.ExpectExec("INSERT INTO webhook_deliveries").WithArgs("evt_payin_received", "pay_1", "payin.received", sqlmock.AnyArg(), now, "cus_1").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO webhook_deliveries").WithArgs("evt_payin_received", "pay_1", "payment.funds_status_changed", sqlmock.AnyArg(), now, "cus_1").WillReturnResult(sqlmock.NewResult(0, 1))
 
 	if err := EventHandler()(context.Background(), tx, event); err != nil {
 		t.Fatal(err)
@@ -83,7 +83,7 @@ func TestEventHandlerCreatesPayinDelivery(t *testing.T) {
 	}
 }
 
-func TestEventHandlerIgnoresProviderCompletionUntilPaymentSettles(t *testing.T) {
+func TestEventHandlerIgnoresWorkflowEvents(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatal(err)
@@ -91,7 +91,7 @@ func TestEventHandlerIgnoresProviderCompletionUntilPaymentSettles(t *testing.T) 
 	defer db.Close()
 	mock.ExpectBegin()
 	tx, _ := db.Begin()
-	event := eventbus.Event{ID: "evt_provider", Type: "settlement.completed", Version: 1, AggregateID: "pay_1", AggregateType: "payment", Payload: []byte(`{}`), OccurredAt: time.Now()}
+	event := eventbus.Event{ID: "evt_provider", Type: "payout.provider_completed", Version: 1, AggregateID: "pay_1", AggregateType: "payout", Payload: []byte(`{}`), OccurredAt: time.Now()}
 	if err := EventHandler()(context.Background(), tx, event); err != nil {
 		t.Fatal(err)
 	}

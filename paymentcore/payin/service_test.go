@@ -37,6 +37,7 @@ func TestRecordLedgerCompletesReceivedPayin(t *testing.T) {
 	mock.ExpectExec("UPDATE payments SET payment_status='succeeded'").WithArgs(now, "pay_1").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO payment_timeline_entries").WithArgs("pay_1", now).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO outbox_events").WithArgs("evt_pin_1_succeeded", eventbus.PayinEventsTopic, "payin.succeeded", 1, "pay_1", sqlmock.AnyArg(), now).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO outbox_events").WithArgs("evt_pin_1_succeeded_payment", eventbus.PaymentEventsTopic, "payment.succeeded", eventbus.PaymentSucceededVersion, "pay_1", sqlmock.AnyArg(), now).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 	tx, _ := db.BeginTx(context.Background(), nil)
 	if err := service.RecordLedger(context.Background(), tx, "pin_1", "corr_1", now); err != nil {
@@ -64,6 +65,7 @@ func TestFailureBeforeReceiptPreservesPendingFunds(t *testing.T) {
 	mock.ExpectExec("UPDATE payments SET payment_status").WithArgs(paymentcore.PaymentStatusFailed, paymentcore.FundsStatusPending, now, "pay_1").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO payment_timeline_entries").WithArgs("pay_1", paymentcore.PaymentStatusFailed, "payin.failed", now).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO outbox_events").WithArgs("evt_pin_1_failed", eventbus.PayinEventsTopic, "payin.failed", eventbus.PayinFailedVersion, "pay_1", sqlmock.AnyArg(), now).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO outbox_events").WithArgs("evt_pin_1_failed_payment", eventbus.PaymentEventsTopic, "payment.failed", eventbus.PaymentFailedVersion, "pay_1", sqlmock.AnyArg(), now).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 	tx, _ := db.BeginTx(context.Background(), nil)
 	if err := service.ApplyResult(context.Background(), tx, "pin_1", "corr_1", ExecuteResult{Status: StatusFailed, FailureReason: "policy rejected"}, now); err != nil {

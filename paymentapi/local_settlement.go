@@ -25,7 +25,7 @@ func NewLocalSettlementControl(db *sql.DB) (*LocalSettlementControl, error) {
 }
 
 func (c *LocalSettlementControl) Emit(ctx context.Context, paymentID, status, reason string, delay time.Duration) error {
-	eventType := map[string]string{"completed": "settlement.completed", "failed": "settlement.failed", "refunded": "settlement.returned"}[status]
+	eventType := map[string]string{"completed": "payout.provider_completed", "failed": "payout.provider_failed", "refunded": "payout.provider_returned"}[status]
 	if eventType == "" {
 		return errors.New("status must be completed, failed, or refunded")
 	}
@@ -39,7 +39,7 @@ func (c *LocalSettlementControl) Emit(ctx context.Context, paymentID, status, re
 	}
 	payload, _ := json.Marshal(map[string]string{"correlation_id": correlationID, "reason": reason})
 	now := time.Now().UTC()
-	_, err := c.db.ExecContext(ctx, `INSERT INTO outbox_events(id,topic,event_type,event_version,aggregate_id,aggregate_type,payload,occurred_at,next_attempt_at) VALUES($1,$2,$3,1,$4,'payment',$5,$6,$7)`, "evt_"+hex.EncodeToString(b), eventbus.PayoutEventsTopic, eventType, paymentID, payload, now, now.Add(delay))
+	_, err := c.db.ExecContext(ctx, `INSERT INTO outbox_events(id,topic,event_type,event_version,aggregate_id,aggregate_type,payload,occurred_at,next_attempt_at) VALUES($1,$2,$3,1,$4,'payout',$5,$6,$7)`, "evt_"+hex.EncodeToString(b), eventbus.PayoutEventsTopic, eventType, paymentID, payload, now, now.Add(delay))
 	return err
 }
 

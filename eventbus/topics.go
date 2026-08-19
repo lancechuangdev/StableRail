@@ -5,6 +5,7 @@ package eventbus
 const (
 	PayoutEventsTopic       Topic = "payout-events"
 	PayinEventsTopic        Topic = "payin-events"
+	PaymentEventsTopic      Topic = "payment-events"
 	SettlementCommandsTopic Topic = "settlement-commands"
 	DeadLetterTopic         Topic = "stablerail-dead-letter"
 )

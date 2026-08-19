@@ -161,6 +161,9 @@ func (s *Service) createPayin(ctx context.Context, tenantID, quoteID, idempotenc
 	if _, err := tx.ExecContext(ctx, `INSERT INTO outbox_events(id,topic,event_type,event_version,aggregate_id,aggregate_type,payload,occurred_at) VALUES($1,$2,'payin.created',$3,$4,'payment',$5,$6)`, eventID, eventbus.PayinEventsTopic, eventbus.PayinCreatedVersion, paymentID, eventBody, now); err != nil {
 		return nil, err
 	}
+	if err := enqueuePublicPaymentEvent(ctx, tx, eventID+"_payment", paymentID, "payment.created", eventbus.PaymentCreatedVersion, eventBody, now); err != nil {
+		return nil, err
+	}
 	if err = tx.Commit(); err != nil {
 		return nil, err
 	}
@@ -263,8 +266,18 @@ func (s *Service) ApplyResult(ctx context.Context, tx *sql.Tx, payinID, correlat
 	}
 	body, _ := json.Marshal(map[string]any{"id": eventID, "type": eventType, "payin_id": payinID, "correlation_id": correlationID, "reason": result.FailureReason, "occurred_at": now, "data": map[string]any{"status": result.Status}})
 	version := map[PayinStatus]int{StatusProcessing: eventbus.PayinProcessingVersion, StatusOnHold: eventbus.PayinOnHoldVersion, StatusReceived: eventbus.PayinReceivedVersion, StatusFailed: eventbus.PayinFailedVersion, StatusRefunded: eventbus.PayinRefundedVersion}[lifecycleStatus]
-	_, err := tx.ExecContext(ctx, `INSERT INTO outbox_events(id,topic,event_type,event_version,aggregate_id,aggregate_type,payload,occurred_at) VALUES($1,$2,$3,$4,$5,'payment',$6,$7) ON CONFLICT(id) DO NOTHING`, eventID, eventbus.PayinEventsTopic, eventType, version, paymentID, body, now)
-	return err
+	if _, err := tx.ExecContext(ctx, `INSERT INTO outbox_events(id,topic,event_type,event_version,aggregate_id,aggregate_type,payload,occurred_at) VALUES($1,$2,$3,$4,$5,'payin',$6,$7) ON CONFLICT(id) DO NOTHING`, eventID, eventbus.PayinEventsTopic, eventType, version, paymentID, body, now); err != nil {
+		return err
+	}
+	publicType := map[PayinStatus]string{StatusProcessing: "payment.processing", StatusOnHold: "payment.processing", StatusReceived: "payment.funds_status_changed", StatusFailed: "payment.failed", StatusRefunded: "payment.failed"}[lifecycleStatus]
+	publicVersion := map[string]int{"payment.processing": eventbus.PaymentProcessingVersion, "payment.failed": eventbus.PaymentFailedVersion, "payment.funds_status_changed": eventbus.PaymentFundsStatusChangedVersion}[publicType]
+	if err := enqueuePublicPaymentEvent(ctx, tx, eventID+"_payment", paymentID, publicType, publicVersion, body, now); err != nil {
+		return err
+	}
+	if lifecycleStatus == StatusRefunded {
+		return enqueuePublicPaymentEvent(ctx, tx, eventID+"_funds", paymentID, "payment.funds_status_changed", eventbus.PaymentFundsStatusChangedVersion, body, now)
+	}
+	return nil
 }
 
 func (s *Service) RecordLedger(ctx context.Context, tx *sql.Tx, payinID, correlationID string, now time.Time) error {
@@ -303,7 +316,17 @@ func (s *Service) RecordLedger(ctx context.Context, tx *sql.Tx, payinID, correla
 	}
 	eventID, eventType := "evt_"+payinID+"_succeeded", "payin.succeeded"
 	body, _ := json.Marshal(map[string]any{"id": eventID, "type": eventType, "payin_id": payinID, "correlation_id": correlationID, "occurred_at": now, "data": map[string]string{"status": "succeeded"}})
-	_, err = tx.ExecContext(ctx, `INSERT INTO outbox_events(id,topic,event_type,event_version,aggregate_id,aggregate_type,payload,occurred_at) VALUES($1,$2,$3,$4,$5,'payment',$6,$7) ON CONFLICT(id) DO NOTHING`, eventID, eventbus.PayinEventsTopic, eventType, eventbus.PayinSucceededVersion, paymentID, body, now)
+	if _, err = tx.ExecContext(ctx, `INSERT INTO outbox_events(id,topic,event_type,event_version,aggregate_id,aggregate_type,payload,occurred_at) VALUES($1,$2,$3,$4,$5,'payin',$6,$7) ON CONFLICT(id) DO NOTHING`, eventID, eventbus.PayinEventsTopic, eventType, eventbus.PayinSucceededVersion, paymentID, body, now); err != nil {
+		return err
+	}
+	return enqueuePublicPaymentEvent(ctx, tx, eventID+"_payment", paymentID, "payment.succeeded", eventbus.PaymentSucceededVersion, body, now)
+}
+
+func enqueuePublicPaymentEvent(ctx context.Context, tx *sql.Tx, eventID, paymentID, eventType string, version int, payload []byte, now time.Time) error {
+	if eventType == "" || version == 0 {
+		return fmt.Errorf("invalid public payment event %q", eventType)
+	}
+	_, err := tx.ExecContext(ctx, `INSERT INTO outbox_events(id,topic,event_type,event_version,aggregate_id,aggregate_type,payload,occurred_at) VALUES($1,$2,$3,$4,$5,'payment',$6,$7) ON CONFLICT(id) DO NOTHING`, eventID, eventbus.PaymentEventsTopic, eventType, version, paymentID, payload, now)
 	return err
 }
 

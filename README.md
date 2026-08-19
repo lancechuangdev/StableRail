@@ -58,14 +58,17 @@ Pay-in and payout services manage quotes, provider execution, and safe recovery 
 
 ### Kafka topics
 
-All application topic names are defined in `eventbus/topics.go`. Domain packages own event meaning and payload construction; `eventbus` owns the shared routing names and Kafka transport.
+All application topic names are defined in `eventbus/topics.go`. Pay-in and payout topics carry internal workflow events; `payment-events` carries the stable merchant-facing lifecycle shared by both directions.
 
 | Topic | Constant | Producers | Consumers | Purpose |
 | --- | --- | --- | --- | --- |
-| `payout-events` | `eventbus.PayoutEventsTopic` | Payment storage, payout workers, and provider webhooks | Payout saga coordinator and tenant-webhook dispatcher | Payout lifecycle facts |
-| `payin-events` | `eventbus.PayinEventsTopic` | Pay-in storage, pay-in workers, and provider webhooks | Pay-in saga coordinator and tenant-webhook dispatcher | Pay-in lifecycle facts |
+| `payout-events` | `eventbus.PayoutEventsTopic` | Payout services, workers, and provider webhooks | Payout saga coordinator | Internal payout workflow facts |
+| `payin-events` | `eventbus.PayinEventsTopic` | Pay-in services, workers, and provider webhooks | Pay-in saga coordinator | Internal pay-in workflow facts |
+| `payment-events` | `eventbus.PaymentEventsTopic` | Pay-in and payout workflows | Tenant-webhook dispatcher | Merchant-facing payment and funds lifecycle facts |
 | `settlement-commands` | `eventbus.SettlementCommandsTopic` | Pay-in and payout saga coordinators | Policy, ledger, and provider command workers | Durable workflow commands for both settlement directions |
 | `stablerail-dead-letter` | `eventbus.DeadLetterTopic` | Outbox relay | Operator inspection and redrive tooling | Events that exhausted outbox publication retries or exceeded the retry age |
+
+Workflow events use direction-specific names such as `payout.created`, `payout.provider_completed`, `payin.created`, and `payin.received`. Merchant integrations receive only the shared `payment.created`, `payment.processing`, `payment.succeeded`, `payment.failed`, and `payment.funds_status_changed` events.
 
 ## Payment lifecycle
 
@@ -130,9 +133,9 @@ Payment: created -> processing -> succeeded
 Return:  created -> processing -> succeeded | failed
 ```
 
-The return status domain contains only `created`, `processing`, `succeeded`, and `failed`. The current provider webhook path learns about a return after it has completed externally, so it creates the return directly as `succeeded`; initiated `created` and `processing` transitions are not implemented yet. The return journal debits `cash:operating` for the asset received back and credits `settlement:payable` to restore the obligation. The original payment is not rewritten. StableRail emits `payment.return.succeeded` for tenant notification.
+The return status domain contains only `created`, `processing`, `succeeded`, and `failed`. The current provider webhook path learns about a return after it has completed externally, so it creates the return directly as `succeeded`; initiated `created` and `processing` transitions are not implemented yet. The return journal debits `cash:operating` for the asset received back and credits `settlement:payable` to restore the obligation. The original payment is not rewritten. StableRail emits an internal `payout.return_completed` event and a merchant-facing `payment.funds_status_changed` event.
 
-Merchant-issued refunds are separate linked payments. `POST /v1/payments/{id}/refunds` accepts an idempotency key, a positive amount, a reason, and an optional fresh `payout_quote_id` for BlindPay routing. Partial refunds are supported up to the original payment amount. StableRail creates a new payment, links it through `payment_refunds.refund_payment_id`, binds the payout quote when supplied, and emits the normal `payment.created` event for that new payment. From there, policy, ledger reservation, settlement, failure handling, and tenant webhooks use the ordinary payment saga and `ExecutePayout`; no refund-specific provider operation or reversal journal is involved. The refund response contains `refund_payment_id` but no duplicated status; clients query `GET /v1/payments/{refund_payment_id}` for its payment and funds statuses. The original payment remains `succeeded/consumed`. Provider-originated returns remain separate and continue to use `payment_returns` and reversal accounting.
+Merchant-issued refunds are separate linked payments. `POST /v1/payments/{id}/refunds` accepts an idempotency key, a positive amount, a reason, and an optional fresh `payout_quote_id` for BlindPay routing. Partial refunds are supported up to the original payment amount. StableRail creates a new payment, links it through `payment_refunds.refund_payment_id`, binds the payout quote when supplied, and emits `payout.created` for workflow coordination and `payment.created` for merchant notification. From there, policy, ledger reservation, settlement, and failure handling use the ordinary payout workflow; no refund-specific provider operation or reversal journal is involved. The refund response contains `refund_payment_id` but no duplicated status; clients query `GET /v1/payments/{refund_payment_id}` for its payment and funds statuses. The original payment remains `succeeded/consumed`. Provider-originated returns remain separate and continue to use `payment_returns` and reversal accounting.
 
 ## Payout saga lifecycle
 
@@ -141,26 +144,26 @@ The persisted payout saga tracks internal workflow progress in more detail than 
 ```mermaid
 stateDiagram-v2
     state "funds_returned (saga)" as returned
-    [*] --> awaiting_policy: payment.created
-    awaiting_policy --> awaiting_ledger: policy.approved / ledger.reserve
-    awaiting_policy --> failed: policy.rejected / payment.fail
-    awaiting_ledger --> awaiting_settlement: ledger.reserved / settlement.execute
-    awaiting_ledger --> failed: ledger.failed / payment.fail
+    [*] --> awaiting_policy: payout.created
+    awaiting_policy --> awaiting_ledger: payout.policy.approved / ledger.reserve
+    awaiting_policy --> failed: payout.policy.rejected / payment.fail
+    awaiting_ledger --> awaiting_settlement: payout.funds_reserved / settlement.execute
+    awaiting_ledger --> failed: payout.ledger_failed / payment.fail
 
-    awaiting_settlement --> settling_payment: settlement.completed / payment.settle
-    settling_payment --> completed: payment.succeeded
+    awaiting_settlement --> settling_payment: payout.provider_completed / payment.settle
+    settling_payment --> completed: payout.completed
 
-    awaiting_settlement --> failed: settlement.failed or timeout / payment.fail_reserved
+    awaiting_settlement --> failed: payout.provider_failed or timeout / payment.fail_reserved
     awaiting_settlement --> failed: submission_failed / payment.fail
 
-    awaiting_settlement --> returning: settlement.returned / ledger.release
-    failed --> returning: late settlement.returned / ledger.release
-    returning --> returned: ledger.released / payment.return
+    awaiting_settlement --> returning: payout.provider_returned / ledger.release
+    failed --> returning: late payout.provider_returned / ledger.release
+    returning --> returned: payout.funds_released / payment.return
 
-    awaiting_settlement --> on_hold: settlement.on_hold
-    on_hold --> settling_payment: settlement.completed / payment.settle
-    on_hold --> failed: settlement.failed / payment.fail_reserved
-    on_hold --> returning: settlement.returned / ledger.release
+    awaiting_settlement --> on_hold: payout.on_hold
+    on_hold --> settling_payment: payout.provider_completed / payment.settle
+    on_hold --> failed: payout.provider_failed / payment.fail_reserved
+    on_hold --> returning: payout.provider_returned / ledger.release
     on_hold --> manual_review: compliance timeout
     manual_review --> on_hold: operator retry
     manual_review --> settling_payment: operator complete / payment.settle
@@ -272,7 +275,7 @@ done
 Create Kafka topics:
 
 ```bash
-for topic in payout-events payin-events settlement-commands stablerail-dead-letter; do
+for topic in payout-events payin-events payment-events settlement-commands stablerail-dead-letter; do
   docker compose exec kafka /opt/kafka/bin/kafka-topics.sh \
     --bootstrap-server localhost:9092 \
     --create --if-not-exists \

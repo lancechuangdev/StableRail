@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"stablerail/consumer"
@@ -122,9 +123,9 @@ func (h *CommandHandler) Handle(ctx context.Context, tx *sql.Tx, event eventbus.
 			return fmt.Errorf("evaluate payment policy: %w", err)
 		}
 		if !decision.Approved {
-			payload.Reason, reply = decision.Reason, "policy.rejected"
+			payload.Reason, reply = decision.Reason, "payout.policy.rejected"
 		} else {
-			reply = "policy.approved"
+			reply = "payout.policy.approved"
 		}
 	case "ledger.reserve":
 		if err := h.ledgerService.Reserve(ctx, tx, ledger.ReservationRequest{PaymentID: payload.PaymentID, At: h.now()}); err != nil {
@@ -133,7 +134,7 @@ func (h *CommandHandler) Handle(ctx context.Context, tx *sql.Tx, event eventbus.
 			}
 			return fmt.Errorf("reserve ledger funds: %w", err)
 		}
-		reply = "ledger.reserved"
+		reply = "payout.funds_reserved"
 	case "settlement.execute":
 		amount, currency, err := loadPaymentAmount(ctx, tx, payload.PaymentID)
 		if err != nil {
@@ -149,7 +150,7 @@ func (h *CommandHandler) Handle(ctx context.Context, tx *sql.Tx, event eventbus.
 			if errors.As(err, &providerErr) && !providerErr.Retryable {
 				if providerErr.Code == "submission_failed" {
 					payload.Reason = providerErr.Code
-					return h.enqueueReply(ctx, tx, event, payload, "settlement.failed")
+					return h.enqueueReply(ctx, tx, event, payload, "payout.provider_failed")
 				}
 				return consumer.Permanent(err)
 			}
@@ -168,7 +169,7 @@ func (h *CommandHandler) Handle(ctx context.Context, tx *sql.Tx, event eventbus.
 			return nil
 		}
 		if result.Status == payout.StatusOnHold {
-			return h.enqueueReply(ctx, tx, event, payload, "settlement.on_hold")
+			return h.enqueueReply(ctx, tx, event, payload, "payout.on_hold")
 		}
 		if result.Status == payout.StatusFailed {
 			payload.Reason = result.FailureMessage
@@ -176,14 +177,14 @@ func (h *CommandHandler) Handle(ctx context.Context, tx *sql.Tx, event eventbus.
 				payload.Reason = result.FailureCode
 			}
 			if result.FailureCode == "refunded" {
-				return h.enqueueReply(ctx, tx, event, payload, "settlement.returned")
+				return h.enqueueReply(ctx, tx, event, payload, "payout.provider_returned")
 			}
-			return h.enqueueReply(ctx, tx, event, payload, "settlement.failed")
+			return h.enqueueReply(ctx, tx, event, payload, "payout.provider_failed")
 		}
 		if err := transitionPayment(ctx, tx, payload.PaymentID, paymentcore.PaymentStatusProcessing, paymentcore.PaymentStatusSucceeded, h.now()); err != nil {
 			return err
 		}
-		reply = "settlement.completed"
+		reply = "payout.provider_completed"
 	case "ledger.release":
 		if err := h.ledgerService.Release(ctx, tx, ledger.ReleaseRequest{PaymentID: payload.PaymentID, At: h.now()}); err != nil {
 			if errors.Is(err, ledger.ErrInvalidPaymentStatus) {
@@ -191,12 +192,12 @@ func (h *CommandHandler) Handle(ctx context.Context, tx *sql.Tx, event eventbus.
 			}
 			return fmt.Errorf("release ledger funds: %w", err)
 		}
-		reply = "ledger.released"
+		reply = "payout.funds_released"
 	case "payment.settle":
 		if err := transitionPayment(ctx, tx, payload.PaymentID, paymentcore.PaymentStatusProcessing, paymentcore.PaymentStatusSucceeded, h.now()); err != nil {
 			return err
 		}
-		return h.enqueueReply(ctx, tx, event, payload, "payment.succeeded")
+		return h.enqueueReply(ctx, tx, event, payload, "payout.completed")
 	case "payment.fail", "payment.fail_reserved", "payment.return":
 		status, fundsStatus, eventName, message := paymentcore.PaymentStatusFailed, paymentcore.FundsStatusAvailable, "failed", payload.Reason
 		if event.Type == "payment.fail_reserved" {
@@ -229,9 +230,9 @@ func (h *CommandHandler) Handle(ctx context.Context, tx *sql.Tx, event eventbus.
 		if _, err := tx.ExecContext(ctx, `INSERT INTO payment_timeline_entries(payment_id,payment_status,note,occurred_at) VALUES($1,$2,$3,$4)`, payload.PaymentID, status, message, now); err != nil {
 			return fmt.Errorf("timeline payment outcome: %w", err)
 		}
-		reply := "payment.failed"
+		reply := "payout.failed"
 		if event.Type == "payment.return" {
-			reply = "payment.funds_returned"
+			reply = "payout.funds_returned"
 		}
 		return h.enqueueReply(ctx, tx, event, payload, reply)
 	default:
@@ -327,29 +328,47 @@ func (h *CommandHandler) enqueueReply(ctx context.Context, tx *sql.Tx, caused ev
 	}
 	bodyFields := map[string]string{"correlation_id": p.CorrelationID, "caused_by_event_id": caused.ID, "reason": p.Reason}
 	switch reply {
-	case "payment.succeeded":
+	case "payout.completed":
 		bodyFields["payment_status"], bodyFields["funds_status"] = "succeeded", "consumed"
-	case "payment.failed":
+	case "payout.failed":
 		bodyFields["payment_status"] = "failed"
 		if caused.Type == "payment.fail_reserved" {
 			bodyFields["funds_status"] = "reserved"
 		} else {
 			bodyFields["funds_status"] = "available"
 		}
-	case "payment.funds_returned":
+	case "payout.funds_returned":
 		bodyFields["payment_status"], bodyFields["funds_status"] = "failed", "returned"
 	}
 	body, _ := json.Marshal(bodyFields)
-	version := map[string]int{"policy.approved": eventbus.PolicyApprovedVersion, "policy.rejected": eventbus.PolicyRejectedVersion, "ledger.reserved": eventbus.LedgerReservedVersion, "ledger.released": eventbus.LedgerReleasedVersion, "settlement.completed": eventbus.SettlementCompletedVersion, "settlement.failed": eventbus.SettlementFailedVersion, "settlement.returned": eventbus.SettlementReturnedVersion, "settlement.on_hold": eventbus.SettlementOnHoldVersion, "payment.succeeded": eventbus.PaymentSucceededVersion, "payment.failed": eventbus.PaymentFailedVersion, "payment.funds_returned": eventbus.PaymentFundsReturnedVersion}[reply]
-	_, err = tx.ExecContext(ctx, `INSERT INTO outbox_events(id,topic,event_type,event_version,aggregate_id,aggregate_type,payload,occurred_at) VALUES($1,$2,$3,$4,$5,'payment',$6,$7)`, id, eventbus.PayoutEventsTopic, reply, version, p.PaymentID, body, h.now())
+	version := map[string]int{"payout.policy.approved": eventbus.PayoutPolicyApprovedVersion, "payout.policy.rejected": eventbus.PayoutPolicyRejectedVersion, "payout.funds_reserved": eventbus.PayoutFundsReservedVersion, "payout.ledger_failed": eventbus.PayoutLedgerFailedVersion, "payout.funds_released": eventbus.PayoutFundsReleasedVersion, "payout.provider_completed": eventbus.PayoutProviderCompletedVersion, "payout.provider_failed": eventbus.PayoutProviderFailedVersion, "payout.provider_returned": eventbus.PayoutProviderReturnedVersion, "payout.on_hold": eventbus.PayoutOnHoldVersion, "payout.completed": eventbus.PayoutCompletedVersion, "payout.failed": eventbus.PayoutFailedVersion, "payout.funds_returned": eventbus.PayoutFundsReturnedVersion}[reply]
+	now := h.now()
+	_, err = tx.ExecContext(ctx, `INSERT INTO outbox_events(id,topic,event_type,event_version,aggregate_id,aggregate_type,payload,occurred_at) VALUES($1,$2,$3,$4,$5,'payout',$6,$7)`, id, eventbus.PayoutEventsTopic, reply, version, p.PaymentID, body, now)
 	if err != nil {
 		return fmt.Errorf("enqueue %s: %w", reply, err)
+	}
+	publicType := map[string]string{
+		"payout.funds_reserved": "payment.processing",
+		"payout.completed":      "payment.succeeded",
+		"payout.failed":         "payment.failed",
+		"payout.funds_returned": "payment.funds_status_changed",
+	}[reply]
+	if publicType == "" {
+		return nil
+	}
+	publicID, err := h.newID()
+	if err != nil {
+		return err
+	}
+	publicVersion := map[string]int{"payment.processing": eventbus.PaymentProcessingVersion, "payment.succeeded": eventbus.PaymentSucceededVersion, "payment.failed": eventbus.PaymentFailedVersion, "payment.funds_status_changed": eventbus.PaymentFundsStatusChangedVersion}[publicType]
+	if _, err := tx.ExecContext(ctx, `INSERT INTO outbox_events(id,topic,event_type,event_version,aggregate_id,aggregate_type,payload,occurred_at) VALUES($1,$2,$3,$4,$5,'payment',$6,$7)`, publicID, eventbus.PaymentEventsTopic, publicType, publicVersion, p.PaymentID, body, now); err != nil {
+		return fmt.Errorf("enqueue %s: %w", publicType, err)
 	}
 	return nil
 }
 
 func PayoutSagaHandler(coordinator *payout.SagaCoordinator) func(context.Context, *sql.Tx, eventbus.Event) error {
-	allowed := map[string]bool{"payment.created": true, "payment.succeeded": true, "policy.approved": true, "policy.rejected": true, "ledger.reserved": true, "ledger.failed": true, "ledger.released": true, "settlement.completed": true, "settlement.failed": true, "settlement.returned": true, "settlement.on_hold": true}
+	allowed := map[string]bool{"payout.created": true, "payout.completed": true, "payout.failed": true, "payout.policy.approved": true, "payout.policy.rejected": true, "payout.funds_reserved": true, "payout.ledger_failed": true, "payout.funds_released": true, "payout.provider_completed": true, "payout.provider_failed": true, "payout.provider_returned": true, "payout.on_hold": true}
 	return func(ctx context.Context, tx *sql.Tx, event eventbus.Event) error {
 		if !allowed[event.Type] {
 			return nil
@@ -360,7 +379,7 @@ func PayoutSagaHandler(coordinator *payout.SagaCoordinator) func(context.Context
 
 func PayinSagaHandler(coordinator *payin.SagaCoordinator) func(context.Context, *sql.Tx, eventbus.Event) error {
 	return func(ctx context.Context, tx *sql.Tx, event eventbus.Event) error {
-		if event.AggregateType != "payin" {
+		if !strings.HasPrefix(event.Type, "payin.") {
 			return nil
 		}
 		return coordinator.Handle(ctx, tx, event)

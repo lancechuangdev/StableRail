@@ -245,12 +245,19 @@ func (s *WebhookService) applyPayinWebhook(ctx context.Context, tx *sql.Tx, prov
 	body, _ := json.Marshal(map[string]any{"id": eventID, "type": eventType, "payin_id": id, "correlation_id": correlationID, "reason": providerStatus, "occurred_at": now, "data": map[string]any{"status": lifecycleStatus, "provider_status": providerStatus}})
 	if correlationID != "" {
 		version := map[string]int{"processing": eventbus.PayinProcessingVersion, "on_hold": eventbus.PayinOnHoldVersion, "received": eventbus.PayinReceivedVersion, "failed": eventbus.PayinFailedVersion, "refunded": eventbus.PayinRefundedVersion}[lifecycleStatus]
-		if _, err := tx.ExecContext(ctx, `INSERT INTO outbox_events(id,topic,event_type,event_version,aggregate_id,aggregate_type,payload,occurred_at) VALUES($1,$2,$3,$4,$5,'payment',$6,$7) ON CONFLICT(id) DO NOTHING`, "evt_payin_saga_"+providerID+"_"+lifecycleStatus, eventbus.PayinEventsTopic, eventType, version, paymentID, body, now); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO outbox_events(id,topic,event_type,event_version,aggregate_id,aggregate_type,payload,occurred_at) VALUES($1,$2,$3,$4,$5,'payin',$6,$7) ON CONFLICT(id) DO NOTHING`, "evt_payin_saga_"+providerID+"_"+lifecycleStatus, eventbus.PayinEventsTopic, eventType, version, paymentID, body, now); err != nil {
 			return false, fmt.Errorf("enqueue payin saga event: %w", err)
 		}
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO webhook_deliveries(id,endpoint_id,event_id,payment_id,event_type,payload,next_attempt_at,created_at) SELECT 'whd_'||md5(e.id||$1),e.id,$1,$2,$3,$4,$5,$5 FROM webhook_endpoints e JOIN payins p ON p.payment_id=$2 WHERE e.tenant_id=p.tenant_id AND e.active ON CONFLICT(endpoint_id,event_id) DO NOTHING`, eventID, paymentID, eventType, body, now); err != nil {
-		return false, fmt.Errorf("enqueue payin webhook: %w", err)
+	publicType := map[string]string{"processing": "payment.processing", "on_hold": "payment.processing", "received": "payment.funds_status_changed", "failed": "payment.failed", "refunded": "payment.failed"}[lifecycleStatus]
+	publicVersion := map[string]int{"payment.processing": eventbus.PaymentProcessingVersion, "payment.failed": eventbus.PaymentFailedVersion, "payment.funds_status_changed": eventbus.PaymentFundsStatusChangedVersion}[publicType]
+	if _, err := tx.ExecContext(ctx, `INSERT INTO outbox_events(id,topic,event_type,event_version,aggregate_id,aggregate_type,payload,occurred_at) VALUES($1,$2,$3,$4,$5,'payment',$6,$7) ON CONFLICT(id) DO NOTHING`, eventID+"_payment", eventbus.PaymentEventsTopic, publicType, publicVersion, paymentID, body, now); err != nil {
+		return false, fmt.Errorf("enqueue public payin event: %w", err)
+	}
+	if lifecycleStatus == "refunded" {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO outbox_events(id,topic,event_type,event_version,aggregate_id,aggregate_type,payload,occurred_at) VALUES($1,$2,'payment.funds_status_changed',$3,$4,'payment',$5,$6) ON CONFLICT(id) DO NOTHING`, eventID+"_funds", eventbus.PaymentEventsTopic, eventbus.PaymentFundsStatusChangedVersion, paymentID, body, now); err != nil {
+			return false, fmt.Errorf("enqueue public payin funds event: %w", err)
+		}
 	}
 	if !(current == "succeeded" && lifecycleStatus == "refunded") {
 		return true, nil
@@ -293,11 +300,12 @@ func (s *WebhookService) enqueuePaymentReturn(ctx context.Context, tx *sql.Tx, s
 	if err != nil {
 		return err
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO outbox_events(id,topic,event_type,event_version,aggregate_id,aggregate_type,payload,occurred_at) VALUES($1,$2,'payment.return.succeeded',$3,$4,'payment',$5,$6) ON CONFLICT(id) DO NOTHING`, "evt_blindpay_"+svixID, eventbus.PayoutEventsTopic, eventbus.PaymentReturnSucceededVersion, paymentID, body, now)
+	_, err = tx.ExecContext(ctx, `INSERT INTO outbox_events(id,topic,event_type,event_version,aggregate_id,aggregate_type,payload,occurred_at) VALUES($1,$2,'payout.return_completed',$3,$4,'payout',$5,$6) ON CONFLICT(id) DO NOTHING`, "evt_blindpay_"+svixID, eventbus.PayoutEventsTopic, eventbus.PayoutReturnCompletedVersion, paymentID, body, now)
 	if err != nil {
 		return fmt.Errorf("enqueue post-success payment return: %w", err)
 	}
-	return nil
+	_, err = tx.ExecContext(ctx, `INSERT INTO outbox_events(id,topic,event_type,event_version,aggregate_id,aggregate_type,payload,occurred_at) VALUES($1,$2,'payment.funds_status_changed',$3,$4,'payment',$5,$6) ON CONFLICT(id) DO NOTHING`, "evt_blindpay_"+svixID+"_payment", eventbus.PaymentEventsTopic, eventbus.PaymentFundsStatusChangedVersion, paymentID, body, now)
+	return err
 }
 
 func payoutStatusRank(status string) int {
@@ -410,19 +418,19 @@ func (s *WebhookService) enqueueSagaResult(ctx context.Context, tx *sql.Tx, svix
 		}
 		return fmt.Errorf("get payout saga correlation: %w", err)
 	}
-	eventType, version, reason := "settlement.failed", eventbus.SettlementFailedVersion, status
+	eventType, version, reason := "payout.provider_failed", eventbus.PayoutProviderFailedVersion, status
 	if status == "completed" {
-		eventType, version, reason = "settlement.completed", eventbus.SettlementCompletedVersion, ""
+		eventType, version, reason = "payout.provider_completed", eventbus.PayoutProviderCompletedVersion, ""
 	} else if status == "refunded" {
-		eventType, version = "settlement.returned", eventbus.SettlementReturnedVersion
+		eventType, version = "payout.provider_returned", eventbus.PayoutProviderReturnedVersion
 	} else if status == "on_hold" {
-		eventType, version, reason = "settlement.on_hold", eventbus.SettlementOnHoldVersion, "settlement on hold"
+		eventType, version, reason = "payout.on_hold", eventbus.PayoutOnHoldVersion, "settlement on hold"
 	}
 	body, err := json.Marshal(map[string]string{"correlation_id": correlationID, "reason": reason})
 	if err != nil {
 		return err
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO outbox_events(id,topic,event_type,event_version,aggregate_id,aggregate_type,payload,occurred_at) VALUES($1,$2,$3,$4,$5,'payment',$6,$7) ON CONFLICT(id) DO NOTHING`, "evt_blindpay_"+svixID, eventbus.PayoutEventsTopic, eventType, version, paymentID, body, now)
+	_, err = tx.ExecContext(ctx, `INSERT INTO outbox_events(id,topic,event_type,event_version,aggregate_id,aggregate_type,payload,occurred_at) VALUES($1,$2,$3,$4,$5,'payout',$6,$7) ON CONFLICT(id) DO NOTHING`, "evt_blindpay_"+svixID, eventbus.PayoutEventsTopic, eventType, version, paymentID, body, now)
 	if err != nil {
 		return fmt.Errorf("enqueue BlindPay payout outcome: %w", err)
 	}

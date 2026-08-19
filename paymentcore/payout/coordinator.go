@@ -103,7 +103,7 @@ func (c *SagaCoordinator) Handle(ctx context.Context, tx *sql.Tx, event eventbus
 	if event.AggregateType != "payment" {
 		return fmt.Errorf("unsupported saga aggregate type %q", event.AggregateType)
 	}
-	if event.Type == "payment.created" {
+	if event.Type == "payout.created" {
 		return c.start(ctx, tx, event)
 	}
 
@@ -167,38 +167,38 @@ func (c *SagaCoordinator) start(ctx context.Context, tx *sql.Tx, event eventbus.
 
 func (c *SagaCoordinator) transition(state State, eventType, reason string) (State, string, time.Duration, string, error) {
 	switch {
-	case state == StateAwaitingPolicy && eventType == "policy.approved":
+	case state == StateAwaitingPolicy && eventType == "payout.policy.approved":
 		return StateAwaitingLedger, "ledger.reserve", c.ledgerTimeout, "", nil
-	case state == StateAwaitingPolicy && eventType == "policy.rejected":
+	case state == StateAwaitingPolicy && eventType == "payout.policy.rejected":
 		return StateFailed, "payment.fail", 0, reasonOrDefault(reason, "policy rejected"), nil
-	case state == StateAwaitingLedger && eventType == "ledger.reserved":
+	case state == StateAwaitingLedger && eventType == "payout.funds_reserved":
 		return StateAwaitingSettlement, "settlement.execute", c.settlementTimeout, "", nil
-	case state == StateAwaitingLedger && eventType == "ledger.failed":
+	case state == StateAwaitingLedger && eventType == "payout.ledger_failed":
 		return StateFailed, "payment.fail", 0, reasonOrDefault(reason, "ledger reservation failed"), nil
-	case state == StateAwaitingSettlement && eventType == "settlement.completed":
+	case state == StateAwaitingSettlement && eventType == "payout.provider_completed":
 		return StateSettlingPayment, "payment.settle", c.ledgerTimeout, "", nil
-	case state == StateAwaitingSettlement && eventType == "settlement.on_hold":
+	case state == StateAwaitingSettlement && eventType == "payout.on_hold":
 		return StateOnHold, "", c.complianceTimeout, reasonOrDefault(reason, "settlement on hold"), nil
-	case state == StateOnHold && eventType == "settlement.completed":
+	case state == StateOnHold && eventType == "payout.provider_completed":
 		return StateSettlingPayment, "payment.settle", c.ledgerTimeout, "", nil
-	case state == StateOnHold && eventType == "settlement.failed":
+	case state == StateOnHold && eventType == "payout.provider_failed":
 		return StateFailed, "payment.fail_reserved", 0, reasonOrDefault(reason, "settlement failed"), nil
-	case state == StateOnHold && eventType == "settlement.returned":
+	case state == StateOnHold && eventType == "payout.provider_returned":
 		return StateReturning, "ledger.release", c.ledgerTimeout, reasonOrDefault(reason, "settlement funds returned"), nil
-	case state == StateSettlingPayment && eventType == "payment.succeeded":
+	case state == StateSettlingPayment && eventType == "payout.completed":
 		return StateCompleted, "", 0, "", nil
-	case state == StateAwaitingSettlement && eventType == "settlement.failed":
+	case state == StateAwaitingSettlement && eventType == "payout.provider_failed":
 		if reason == "submission_failed" {
 			return StateFailed, "payment.fail", 0, reason, nil
 		}
 		return StateFailed, "payment.fail_reserved", 0, reasonOrDefault(reason, "settlement failed"), nil
-	case state == StateAwaitingSettlement && eventType == "settlement.returned":
+	case state == StateAwaitingSettlement && eventType == "payout.provider_returned":
 		return StateReturning, "ledger.release", c.ledgerTimeout, reasonOrDefault(reason, "settlement funds returned"), nil
-	case state == StateFailed && eventType == "settlement.returned":
+	case state == StateFailed && eventType == "payout.provider_returned":
 		return StateReturning, "ledger.release", c.ledgerTimeout, reasonOrDefault(reason, "settlement funds returned after payment failure"), nil
-	case state == StateReleasingLedger && eventType == "ledger.released":
+	case state == StateReleasingLedger && eventType == "payout.funds_released":
 		return StateLedgerReleased, "payment.fail", 0, reason, nil
-	case state == StateReturning && eventType == "ledger.released":
+	case state == StateReturning && eventType == "payout.funds_released":
 		return StateReturned, "payment.return", 0, reason, nil
 	default:
 		return "", "", 0, "", fmt.Errorf("event %s is invalid while saga is %s", eventType, state)

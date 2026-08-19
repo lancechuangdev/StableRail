@@ -97,10 +97,10 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	payoutWebhookLoop := &consumer.Loop{
-		Reader:    consumer.NewKafkaReader(config.KafkaBrokers, string(eventbus.PayoutEventsTopic), "stablerail-payout-webhooks"),
+	paymentWebhookLoop := &consumer.Loop{
+		Reader:    consumer.NewKafkaReader(config.KafkaBrokers, string(eventbus.PaymentEventsTopic), "stablerail-payment-webhooks"),
 		Processor: inbox.BoundProcessor{Processor: inboxProcessor, Handler: notification.EventHandler()},
-		Consumer:  "payout-webhooks",
+		Consumer:  "payment-webhooks",
 	}
 	reconciler, err := reconciliation.New(db, reconciliation.Config{Interval: config.ReconciliationInterval}, logger)
 	if err != nil {
@@ -210,11 +210,6 @@ func run() error {
 		Processor: inbox.BoundProcessor{Processor: inboxProcessor, Handler: workers.PayinSagaHandler(payinCoordinator)},
 		Consumer:  "payin-saga",
 	}
-	payinWebhookLoop := &consumer.Loop{
-		Reader:    consumer.NewKafkaReader(config.KafkaBrokers, string(eventbus.PayinEventsTopic), "stablerail-payin-webhooks"),
-		Processor: inbox.BoundProcessor{Processor: inboxProcessor, Handler: notification.EventHandler()},
-		Consumer:  "payin-webhooks",
-	}
 	commandLoop := &consumer.Loop{
 		Reader:    consumer.NewKafkaReader(config.KafkaBrokers, string(eventbus.SettlementCommandsTopic), "stablerail-core-workers"),
 		Processor: inbox.BoundProcessor{Processor: inboxProcessor, Handler: workers.NewCommandHandler(policy.DeterministicEvaluator{RejectAmountMinor: config.MockPolicyRejectAmount}, ledger.NewPostgresService(), payoutCreator, payins).Handle},
@@ -287,8 +282,7 @@ func run() error {
 		payoutSagaLoop.Run,
 		payinSagaLoop.Run,
 		commandLoop.Run,
-		payoutWebhookLoop.Run,
-		payinWebhookLoop.Run,
+		paymentWebhookLoop.Run,
 		webhookDispatcher.Run,
 		reconciler.Run,
 		webhookReconciler,
