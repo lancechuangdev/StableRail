@@ -231,9 +231,9 @@ func (h *CommandHandler) enqueuePayinReply(ctx context.Context, tx *sql.Tx, caus
 		return err
 	}
 	now := h.now()
-	body, _ := json.Marshal(map[string]any{"correlation_id": correlationID, "payin_id": payinID, "reason": reason, "caused_by_event_id": caused.ID})
+	body, _ := json.Marshal(map[string]any{"correlation_id": correlationID, "payment_id": caused.AggregateID, "payin_id": payinID, "reason": reason, "caused_by_event_id": caused.ID})
 	version := map[string]int{"payin.policy.approved": eventbus.PayinPolicyApprovedVersion}[eventType]
-	_, err = tx.ExecContext(ctx, `INSERT INTO outbox_events(id,topic,event_type,event_version,aggregate_id,aggregate_type,payload,occurred_at) VALUES($1,$2,$3,$4,$5,'payin',$6,$7)`, id, payin.EventsTopic, eventType, version, payinID, body, now)
+	_, err = tx.ExecContext(ctx, `INSERT INTO outbox_events(id,topic,event_type,event_version,aggregate_id,aggregate_type,payload,occurred_at) VALUES($1,$2,$3,$4,$5,'payment',$6,$7)`, id, payin.EventsTopic, eventType, version, caused.AggregateID, body, now)
 	return err
 }
 

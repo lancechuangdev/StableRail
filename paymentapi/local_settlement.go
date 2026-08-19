@@ -30,7 +30,7 @@ func (c *LocalSettlementControl) Emit(ctx context.Context, paymentID, status, re
 		return errors.New("status must be completed, failed, or refunded")
 	}
 	var correlationID string
-	if err := c.db.QueryRowContext(ctx, `SELECT correlation_id FROM payment_sagas WHERE payment_id=$1`, paymentID).Scan(&correlationID); err != nil {
+	if err := c.db.QueryRowContext(ctx, `SELECT correlation_id FROM settlement_sagas WHERE payment_id=$1`, paymentID).Scan(&correlationID); err != nil {
 		return err
 	}
 	b := make([]byte, 16)

@@ -112,7 +112,7 @@ func (c *Coordinator) Handle(ctx context.Context, tx *sql.Tx, event eventbus.Eve
 	var sagaID, correlationID string
 	var state State
 	if err := tx.QueryRowContext(ctx, `
-		SELECT id, correlation_id, state FROM payment_sagas
+		SELECT id, correlation_id, state FROM settlement_sagas
 		WHERE payment_id = $1 FOR UPDATE`, event.AggregateID).Scan(&sagaID, &correlationID, &state); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return fmt.Errorf("payment saga for %s not found", event.AggregateID)
@@ -147,9 +147,9 @@ func (c *Coordinator) start(ctx context.Context, tx *sql.Tx, event eventbus.Even
 		return fmt.Errorf("generate correlation ID: %w", err)
 	}
 	now := c.now()
-	result, err := tx.ExecContext(ctx, `INSERT INTO payment_sagas
-		(id, payment_id, correlation_id, state, deadline_at, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $6) ON CONFLICT (payment_id) DO NOTHING`,
+	result, err := tx.ExecContext(ctx, `INSERT INTO settlement_sagas
+		(id, payment_id, direction, correlation_id, state, deadline_at, created_at, updated_at)
+		VALUES ($1, $2, 'payout', $3, $4, $5, $6, $6) ON CONFLICT (payment_id) DO NOTHING`,
 		sagaID, event.AggregateID, correlationID, StateAwaitingPolicy, now.Add(c.policyTimeout), now)
 	if err != nil {
 		return fmt.Errorf("create payment saga: %w", err)
@@ -213,7 +213,7 @@ func (c *Coordinator) updateAndCommand(ctx context.Context, tx *sql.Tx, sagaID, 
 	if timeout > 0 {
 		deadline = now.Add(timeout)
 	}
-	_, err := tx.ExecContext(ctx, `UPDATE payment_sagas SET state = $1, deadline_at = $2,
+	_, err := tx.ExecContext(ctx, `UPDATE settlement_sagas SET state = $1, deadline_at = $2,
 		failure_reason = COALESCE(NULLIF($3, ''), failure_reason), updated_at = $4 WHERE id = $5`, state, deadline, failure, now, sagaID)
 	if err != nil {
 		return fmt.Errorf("update payment saga: %w", err)
@@ -283,7 +283,7 @@ func (c *Coordinator) ResolveManualReview(ctx context.Context, paymentID, action
 	defer tx.Rollback()
 	var sagaID, correlationID string
 	var state State
-	if err := tx.QueryRowContext(ctx, `SELECT id,correlation_id,state FROM payment_sagas WHERE payment_id=$1 FOR UPDATE`, paymentID).Scan(&sagaID, &correlationID, &state); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT id,correlation_id,state FROM settlement_sagas WHERE payment_id=$1 FOR UPDATE`, paymentID).Scan(&sagaID, &correlationID, &state); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrSagaNotFound
 		}
@@ -327,7 +327,7 @@ func (c *Coordinator) ExpireOnce(ctx context.Context) (int, error) {
 	defer tx.Rollback()
 	now := c.now()
 	rows, err := tx.QueryContext(ctx, `SELECT id, payment_id, correlation_id, state
-		FROM payment_sagas WHERE deadline_at <= $1
+		FROM settlement_sagas WHERE deadline_at <= $1
 		  AND state IN ('awaiting_policy', 'awaiting_ledger', 'awaiting_settlement', 'on_hold', 'releasing_ledger', 'returning', 'settling_payment')
 		ORDER BY deadline_at FOR UPDATE SKIP LOCKED LIMIT $2`, now, c.timeoutBatchSize)
 	if err != nil {

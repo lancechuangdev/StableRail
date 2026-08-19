@@ -186,7 +186,7 @@ func TestLOCAL007ManualReviewResolution(t *testing.T) {
 	}
 	tenant.WaitForPaymentStatus(t, payment.ID, "succeeded")
 	env.WaitForSagaState(t, payment.ID, "completed")
-	env.WaitForCount(t, `SELECT count(*) FROM saga_manual_review_actions a JOIN payment_sagas s ON s.id=a.saga_id WHERE s.payment_id=$1`, 1, payment.ID)
+	env.WaitForCount(t, `SELECT count(*) FROM saga_manual_review_actions a JOIN settlement_sagas s ON s.id=a.saga_id WHERE s.payment_id=$1`, 1, payment.ID)
 }
 
 func TestLOCAL008IndependentSignedWebhooks(t *testing.T) {

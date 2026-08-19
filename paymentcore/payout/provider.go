@@ -67,6 +67,7 @@ type QuoteRequest struct {
 }
 
 type QuoteResult struct {
+	Direction                              string `json:"direction"`
 	ID, Provider, ProviderQuoteID, Status  string
 	SourceCurrency, DestinationCurrency    string
 	SenderAmountMinor, ReceiverAmountMinor int64

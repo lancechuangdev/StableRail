@@ -140,7 +140,7 @@ func (e *Environment) WaitForSagaState(t *testing.T, paymentID, wanted string) {
 	deadline := time.Now().Add(60 * time.Second)
 	var last string
 	for time.Now().Before(deadline) {
-		if err := e.DB.QueryRow(`SELECT state FROM payment_sagas WHERE payment_id=$1`, paymentID).Scan(&last); err == nil && last == wanted {
+		if err := e.DB.QueryRow(`SELECT state FROM settlement_sagas WHERE payment_id=$1`, paymentID).Scan(&last); err == nil && last == wanted {
 			return
 		}
 		time.Sleep(100 * time.Millisecond)

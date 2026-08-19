@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"stablerail/paymentcore"
+	"stablerail/paymentcore/payin"
 	"stablerail/paymentcore/payout"
 )
 
@@ -28,22 +29,30 @@ type Health interface{ PingContext(context.Context) error }
 type PayoutQuoteService interface {
 	CreateQuote(context.Context, payout.QuoteRequest) (payout.QuoteResult, error)
 }
+type PayinPaymentService interface {
+	CreatePayment(context.Context, string, string, string, string) (*paymentcore.Payment, error)
+	CreateQuote(context.Context, payin.QuoteRequest) (*payin.Quote, error)
+}
 
 type Handler struct {
 	payments     PaymentStore
 	health       Health
 	payoutQuotes PayoutQuoteService
+	payins       PayinPaymentService
 }
 
-func NewHandler(payments PaymentStore, health Health, payoutQuotes PayoutQuoteService) (http.Handler, error) {
+func NewHandler(payments PaymentStore, health Health, payoutQuotes PayoutQuoteService, payinServices ...PayinPaymentService) (http.Handler, error) {
 	if payments == nil || health == nil {
 		return nil, errors.New("payment API and health dependencies are required")
 	}
 	h := &Handler{payments: payments, health: health, payoutQuotes: payoutQuotes}
+	if len(payinServices) > 0 {
+		h.payins = payinServices[0]
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/payments", h.create)
-	if payoutQuotes != nil {
-		mux.HandleFunc("POST /v1/payout-quotes", h.createPayoutQuote)
+	if payoutQuotes != nil || h.payins != nil {
+		mux.HandleFunc("POST /v1/payment-quotes", h.createPaymentQuote)
 	}
 	mux.HandleFunc("GET /v1/payments/{id}", h.get)
 	mux.HandleFunc("GET /v1/payments/{id}/timeline", h.timeline)
@@ -103,12 +112,14 @@ func (h *Handler) createRefund(w http.ResponseWriter, r *http.Request) {
 }
 
 type createRequest struct {
-	ExternalReference string                   `json:"external_reference"`
-	Currency          string                   `json:"currency"`
-	AmountMinor       int64                    `json:"amount_minor"`
-	TenantID          string                   `json:"tenant_id"`
-	Destination       *paymentcore.Destination `json:"destination,omitempty"`
-	PayoutQuoteID     string                   `json:"payout_quote_id,omitempty"`
+	Direction         paymentcore.PaymentDirection `json:"direction"`
+	ExternalReference string                       `json:"external_reference"`
+	Currency          string                       `json:"currency"`
+	AmountMinor       int64                        `json:"amount_minor"`
+	TenantID          string                       `json:"tenant_id"`
+	Destination       *paymentcore.Destination     `json:"destination,omitempty"`
+	QuoteID           string                       `json:"quote_id,omitempty"`
+	PayoutQuoteID     string                       `json:"payout_quote_id,omitempty"` // deprecated input alias
 }
 
 func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
@@ -130,6 +141,12 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	input.Currency = strings.ToUpper(strings.TrimSpace(input.Currency))
+	if input.Direction == "" {
+		input.Direction = paymentcore.PaymentDirectionPayout
+	}
+	if input.QuoteID == "" {
+		input.QuoteID = input.PayoutQuoteID
+	}
 	tenantID := strings.TrimSpace(input.TenantID)
 	if authenticated, ok := TenantIDFromContext(r.Context()); ok {
 		if tenantID != "" && tenantID != authenticated {
@@ -138,7 +155,7 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 		}
 		tenantID = authenticated
 	}
-	if strings.TrimSpace(input.ExternalReference) == "" || len(input.Currency) < 3 || len(input.Currency) > 10 || input.AmountMinor <= 0 || tenantID == "" {
+	if strings.TrimSpace(input.ExternalReference) == "" || tenantID == "" || (input.Direction == paymentcore.PaymentDirectionPayout && (len(input.Currency) < 3 || len(input.Currency) > 10 || input.AmountMinor <= 0)) {
 		problem(w, http.StatusBadRequest, "external_reference, currency, positive amount_minor, and an authenticated tenant are required")
 		return
 	}
@@ -148,12 +165,29 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if input.Destination != nil && input.PayoutQuoteID != "" {
+	if input.Destination != nil && input.QuoteID != "" {
 		problem(w, http.StatusBadRequest, "destination and payout_quote_id cannot be combined")
 		return
 	}
 	var p *paymentcore.Payment
 	var err error
+	if input.Direction == paymentcore.PaymentDirectionPayin {
+		if h.payins == nil || input.QuoteID == "" || input.Destination != nil {
+			problem(w, http.StatusBadRequest, "payin payments require quote_id")
+			return
+		}
+		p, err = h.payins.CreatePayment(r.Context(), tenantID, input.QuoteID, key, input.ExternalReference)
+		if err != nil {
+			problem(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusAccepted, p)
+		return
+	}
+	if input.Direction != paymentcore.PaymentDirectionPayout {
+		problem(w, http.StatusBadRequest, "direction must be payin or payout")
+		return
+	}
 	if input.Destination != nil {
 		store, ok := h.payments.(DestinationPaymentStore)
 		if !ok {
@@ -161,8 +195,8 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		p, err = store.CreatePaymentWithDestination(r.Context(), input.ExternalReference, input.Currency, input.AmountMinor, tenantID, key, *input.Destination)
-	} else if input.PayoutQuoteID != "" {
-		p, err = h.payments.CreatePaymentWithPayoutQuote(r.Context(), input.ExternalReference, input.Currency, input.AmountMinor, tenantID, key, input.PayoutQuoteID)
+	} else if input.QuoteID != "" {
+		p, err = h.payments.CreatePaymentWithPayoutQuote(r.Context(), input.ExternalReference, input.Currency, input.AmountMinor, tenantID, key, input.QuoteID)
 	} else {
 		p, err = h.payments.CreatePayment(r.Context(), input.ExternalReference, input.Currency, input.AmountMinor, tenantID, key)
 	}
@@ -178,14 +212,85 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 }
 
 type createPayoutQuoteRequest struct {
-	TenantID                string `json:"tenant_id"`
-	SourceAccountID         string `json:"source_account_id"`
-	DestinationInstrumentID string `json:"destination_instrument_id"`
-	SourceCurrency          string `json:"source_currency"`
-	DestinationCurrency     string `json:"destination_currency"`
-	CurrencyType            string `json:"currency_type"`
-	CoverFees               bool   `json:"cover_fees"`
-	RequestAmountMinor      int64  `json:"request_amount_minor"`
+	Direction               paymentcore.PaymentDirection `json:"direction"`
+	FundingMethod           string                       `json:"funding_method,omitempty"`
+	TenantID                string                       `json:"tenant_id"`
+	SourceAccountID         string                       `json:"source_account_id"`
+	DestinationInstrumentID string                       `json:"destination_instrument_id"`
+	SourceCurrency          string                       `json:"source_currency"`
+	DestinationCurrency     string                       `json:"destination_currency"`
+	CurrencyType            string                       `json:"currency_type"`
+	CoverFees               bool                         `json:"cover_fees"`
+	RequestAmountMinor      int64                        `json:"request_amount_minor"`
+}
+
+func (h *Handler) createPaymentQuote(w http.ResponseWriter, r *http.Request) {
+	var probe struct {
+		Direction paymentcore.PaymentDirection `json:"direction"`
+	}
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
+	if err != nil || json.Unmarshal(body, &probe) != nil {
+		problem(w, http.StatusBadRequest, "invalid JSON request body")
+		return
+	}
+	r.Body = io.NopCloser(strings.NewReader(string(body)))
+	if probe.Direction == paymentcore.PaymentDirectionPayin {
+		h.createPayinQuote(w, r)
+		return
+	}
+	if probe.Direction != paymentcore.PaymentDirectionPayout {
+		problem(w, http.StatusBadRequest, "direction must be payin or payout")
+		return
+	}
+	h.createPayoutQuote(w, r)
+}
+
+func (h *Handler) createPayinQuote(w http.ResponseWriter, r *http.Request) {
+	if h.payins == nil {
+		problem(w, http.StatusNotImplemented, "payin quotes are not configured")
+		return
+	}
+	key := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	tenant, ok := TenantIDFromContext(r.Context())
+	if !ok || key == "" {
+		problem(w, http.StatusBadRequest, "authentication and Idempotency-Key are required")
+		return
+	}
+	var in struct {
+		Direction            paymentcore.PaymentDirection `json:"direction"`
+		FundingMethod        string                       `json:"funding_method"`
+		CurrencyType         string                       `json:"currency_type"`
+		SourceInstrumentID   string                       `json:"source_instrument_id,omitempty"`
+		DestinationAccountID string                       `json:"destination_account_id"`
+		SourceCurrency       string                       `json:"source_currency"`
+		DestinationCurrency  string                       `json:"destination_currency"`
+		AmountMinor          int64                        `json:"amount_minor"`
+		CoverFees            bool                         `json:"cover_fees"`
+	}
+	if decodePayin(w, r, &in) != nil {
+		return
+	}
+	q, err := h.payins.CreateQuote(r.Context(), payin.QuoteRequest{IdempotencyKey: key, TenantID: tenant, FundingMethod: in.FundingMethod, CurrencyType: in.CurrencyType, SourceInstrumentID: in.SourceInstrumentID, DestinationAccountID: in.DestinationAccountID, SourceCurrency: in.SourceCurrency, DestinationCurrency: in.DestinationCurrency, AmountMinor: in.AmountMinor, CoverFees: in.CoverFees})
+	if err != nil {
+		problem(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, q)
+}
+
+func decodePayin(w http.ResponseWriter, r *http.Request, out any) error {
+	d := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	d.DisallowUnknownFields()
+	if err := d.Decode(out); err != nil {
+		problem(w, http.StatusBadRequest, "invalid JSON request body")
+		return err
+	}
+	var extra any
+	if err := d.Decode(&extra); !errors.Is(err, io.EOF) {
+		problem(w, http.StatusBadRequest, "request body must contain one JSON object")
+		return errors.New("extra JSON")
+	}
+	return nil
 }
 
 func (h *Handler) createPayoutQuote(w http.ResponseWriter, r *http.Request) {

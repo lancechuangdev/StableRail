@@ -110,7 +110,7 @@ func EventHandler() func(context.Context, *sql.Tx, eventbus.Event) error {
 }
 
 func (d *Dispatcher) DispatchOnce(ctx context.Context) (int, error) {
-	rows, err := d.db.QueryContext(ctx, `SELECT d.id,d.endpoint_id,d.event_id,COALESCE(d.payment_id,d.payin_id),d.event_type,d.payload,e.url,e.secret,d.attempt_count,d.created_at
+	rows, err := d.db.QueryContext(ctx, `SELECT d.id,d.endpoint_id,d.event_id,d.payment_id,d.event_type,d.payload,e.url,e.secret,d.attempt_count,d.created_at
 		FROM webhook_deliveries d JOIN webhook_endpoints e ON e.id=d.endpoint_id
 		WHERE d.status='pending' AND d.next_attempt_at <= $1 AND e.active ORDER BY d.created_at LIMIT $2`, d.now(), d.config.BatchSize)
 	if err != nil {

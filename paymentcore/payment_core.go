@@ -27,30 +27,50 @@ const (
 // FundsStatus represents the disposition of funds for a payment.
 type FundsStatus string
 
+type PaymentDirection string
+
+const (
+	PaymentDirectionPayin  PaymentDirection = "payin"
+	PaymentDirectionPayout PaymentDirection = "payout"
+)
+
 const (
 	FundsStatusAvailable FundsStatus = "available"
 	FundsStatusReserved  FundsStatus = "reserved"
 	FundsStatusConsumed  FundsStatus = "consumed"
 	FundsStatusReturned  FundsStatus = "returned"
+	FundsStatusPending   FundsStatus = "pending"
+	FundsStatusReceived  FundsStatus = "received"
 )
 
 // Payment represents a payment intent and its ledger state.
 type Payment struct {
-	ID                string          `json:"id"`
-	ExternalReference string          `json:"external_reference"`
-	Currency          string          `json:"currency"`
-	AmountMinor       int64           `json:"amount_minor"` // The payment amount expressed in the currency’s smallest unit
-	TenantID          string          `json:"tenant_id"`
-	PaymentStatus     PaymentStatus   `json:"payment_status"`
-	FundsStatus       FundsStatus     `json:"funds_status"`
-	LedgerEntries     []LedgerEntry   `json:"ledger_entries,omitempty"`
-	AuditLog          []AuditEvent    `json:"audit_log,omitempty"`
-	Timeline          []TimelineEntry `json:"timeline,omitempty"`
-	CreatedAt         time.Time       `json:"created_at"`
-	UpdatedAt         time.Time       `json:"updated_at"`
-	IdempotencyKey    string          `json:"-"`
-	PayoutQuoteID     string          `json:"payout_quote_id,omitempty"`
-	Destination       *Destination    `json:"destination,omitempty"`
+	ID                string               `json:"id"`
+	Direction         PaymentDirection     `json:"direction"`
+	ExternalReference string               `json:"external_reference"`
+	Currency          string               `json:"currency"`
+	AmountMinor       int64                `json:"amount_minor"` // The payment amount expressed in the currency’s smallest unit
+	TenantID          string               `json:"tenant_id"`
+	PaymentStatus     PaymentStatus        `json:"payment_status"`
+	FundsStatus       FundsStatus          `json:"funds_status"`
+	LedgerEntries     []LedgerEntry        `json:"ledger_entries,omitempty"`
+	AuditLog          []AuditEvent         `json:"audit_log,omitempty"`
+	Timeline          []TimelineEntry      `json:"timeline,omitempty"`
+	CreatedAt         time.Time            `json:"created_at"`
+	UpdatedAt         time.Time            `json:"updated_at"`
+	IdempotencyKey    string               `json:"-"`
+	QuoteID           string               `json:"quote_id,omitempty"`
+	Destination       *Destination         `json:"destination,omitempty"`
+	Settlement        *SettlementOperation `json:"settlement,omitempty"`
+}
+
+// SettlementOperation exposes provider execution state without making payins
+// and payouts separate public resources.
+type SettlementOperation struct {
+	Provider          string `json:"provider"`
+	ProviderReference string `json:"provider_reference,omitempty"`
+	Status            string `json:"status"`
+	Instructions      any    `json:"instructions,omitempty"`
 }
 
 // Destination is immutable settlement routing selected when a payment is created.
@@ -150,6 +170,7 @@ func (s *Service) CreatePayment(externalRef, currency string, amountMinor int64,
 	s.nextID++
 	payment := &Payment{
 		ID:                fmt.Sprintf("pay_%d", s.nextID),
+		Direction:         PaymentDirectionPayout,
 		ExternalReference: externalRef,
 		Currency:          currency,
 		AmountMinor:       amountMinor,

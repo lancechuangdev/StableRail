@@ -32,14 +32,14 @@ func NewSagaCoordinator(db *sql.DB) (*SagaCoordinator, error) {
 }
 
 func (c *SagaCoordinator) Handle(ctx context.Context, tx *sql.Tx, event eventbus.Event) error {
-	if event.AggregateType != "payin" {
+	if event.AggregateType != "payment" {
 		return fmt.Errorf("unsupported payin saga aggregate %q", event.AggregateType)
 	}
 	if event.Type == "payin.created" {
 		return c.start(ctx, tx, event)
 	}
 	var id, correlation, state string
-	if err := tx.QueryRowContext(ctx, `SELECT id,correlation_id,state FROM payin_sagas WHERE payin_id=$1 FOR UPDATE`, event.AggregateID).Scan(&id, &correlation, &state); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT id,correlation_id,state FROM settlement_sagas WHERE payment_id=$1 AND direction='payin' FOR UPDATE`, event.AggregateID).Scan(&id, &correlation, &state); err != nil {
 		return err
 	}
 	var payload struct {
@@ -74,7 +74,7 @@ func (c *SagaCoordinator) Handle(ctx context.Context, tx *sql.Tx, event eventbus
 		return fmt.Errorf("event %s is invalid while payin saga is %s", event.Type, state)
 	}
 	now := c.now()
-	if _, err := tx.ExecContext(ctx, `UPDATE payin_sagas SET state=$1,failure_reason=COALESCE(NULLIF($2,''),failure_reason),updated_at=$3 WHERE id=$4`, next, payload.Reason, now, id); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE settlement_sagas SET state=$1,failure_reason=COALESCE(NULLIF($2,''),failure_reason),updated_at=$3 WHERE id=$4`, next, payload.Reason, now, id); err != nil {
 		return err
 	}
 	if command == "" {
@@ -93,7 +93,7 @@ func (c *SagaCoordinator) start(ctx context.Context, tx *sql.Tx, event eventbus.
 		return err
 	}
 	now := c.now()
-	res, err := tx.ExecContext(ctx, `INSERT INTO payin_sagas(id,payin_id,correlation_id,state,created_at,updated_at) VALUES($1,$2,$3,'awaiting_policy',$4,$4) ON CONFLICT(payin_id) DO NOTHING`, id, event.AggregateID, correlation, now)
+	res, err := tx.ExecContext(ctx, `INSERT INTO settlement_sagas(id,payment_id,direction,correlation_id,state,created_at,updated_at) VALUES($1,$2,'payin',$3,'awaiting_policy',$4,$4) ON CONFLICT(payment_id) DO NOTHING`, id, event.AggregateID, correlation, now)
 	if err != nil {
 		return err
 	}
@@ -109,8 +109,12 @@ func (c *SagaCoordinator) enqueueCommand(ctx context.Context, tx *sql.Tx, sagaID
 	if err != nil {
 		return err
 	}
-	body, _ := json.Marshal(map[string]string{"saga_id": sagaID, "correlation_id": correlationID, "payin_id": payinID, "caused_by_event_id": causedBy})
+	var operationID string
+	if err := tx.QueryRowContext(ctx, `SELECT id FROM payins WHERE payment_id=$1`, payinID).Scan(&operationID); err != nil {
+		return err
+	}
+	body, _ := json.Marshal(map[string]string{"saga_id": sagaID, "correlation_id": correlationID, "payment_id": payinID, "payin_id": operationID, "caused_by_event_id": causedBy})
 	version := map[string]int{"payin.policy.evaluate": eventbus.PayinPolicyEvaluateVersion, "payin.execute": eventbus.PayinExecuteVersion, "payin.ledger.record": eventbus.PayinLedgerRecordVersion}[command]
-	_, err = tx.ExecContext(ctx, `INSERT INTO outbox_events(id,topic,event_type,event_version,aggregate_id,aggregate_type,payload,occurred_at) VALUES($1,$2,$3,$4,$5,'payin',$6,$7)`, commandID, saga.CommandTopic, command, version, payinID, body, now)
+	_, err = tx.ExecContext(ctx, `INSERT INTO outbox_events(id,topic,event_type,event_version,aggregate_id,aggregate_type,payload,occurred_at) VALUES($1,$2,$3,$4,$5,'payment',$6,$7)`, commandID, saga.CommandTopic, command, version, payinID, body, now)
 	return err
 }

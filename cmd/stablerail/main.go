@@ -193,19 +193,19 @@ func run() error {
 	default:
 		return fmt.Errorf("unsupported settlement provider %q", config.SettlementProvider)
 	}
-	handler, err := paymentapi.NewHandler(paymentcore.NewPostgresService(db), db, payoutQuoteCreator)
-	if err != nil {
-		return err
-	}
 	apiKeys, err := paymentapi.NewAPIKeyService(db)
 	if err != nil {
 		return err
 	}
-	handler = apiKeys.Middleware(handler)
 	payins, err := payin.NewService(db, provider)
 	if err != nil {
 		return err
 	}
+	handler, err := paymentapi.NewHandler(paymentcore.NewPostgresService(db), db, payoutQuoteCreator, payins)
+	if err != nil {
+		return err
+	}
+	handler = apiKeys.Middleware(handler)
 	payinSagaLoop := &consumer.Loop{
 		Reader:    consumer.NewKafkaReader(config.KafkaBrokers, string(payin.EventsTopic), "stablerail-payin-saga"),
 		Processor: inbox.BoundProcessor{Processor: inboxProcessor, Handler: workers.PayinSagaHandler(payinCoordinator)},
@@ -216,11 +216,6 @@ func run() error {
 		Processor: inbox.BoundProcessor{Processor: inboxProcessor, Handler: workers.NewCommandHandler(policy.DeterministicEvaluator{RejectAmountMinor: config.MockPolicyRejectAmount}, ledger.NewPostgresService(), payoutCreator, payins).Handle},
 		Consumer:  "core-workers",
 	}
-	payinHandler, err := paymentapi.NewPayinHandler(payins)
-	if err != nil {
-		return err
-	}
-	payinHandler = apiKeys.Middleware(payinHandler)
 	webhookEndpoints, err := paymentapi.NewWebhookEndpointService(db)
 	if err != nil {
 		return err
@@ -270,9 +265,6 @@ func run() error {
 	root.Handle("POST /v1/webhook-endpoints", apiKeys.Middleware(webhookEndpointHandler))
 	root.Handle("GET /v1/webhook-endpoints", apiKeys.Middleware(webhookEndpointHandler))
 	root.Handle("DELETE /v1/webhook-endpoints/{id}", apiKeys.Middleware(webhookEndpointHandler))
-	root.Handle("POST /v1/payin-quotes", payinHandler)
-	root.Handle("POST /v1/payins", payinHandler)
-	root.Handle("GET /v1/payins/{id}", payinHandler)
 	root.Handle("/", metrics.Middleware(handler, logger))
 	server := &http.Server{
 		Addr:              config.HTTPAddress,

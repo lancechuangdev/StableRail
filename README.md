@@ -47,20 +47,9 @@ Every business update and outgoing event commits in one PostgreSQL transaction. 
 | `saga` and `workers` | Durable outbound orchestration across policy, ledger, and settlement |
 | `paymentapi` | HTTP transport, authentication, and tenant/operator endpoints |
 
-`paymentcore` owns the parent payment and funds lifecycle. Its `payin` and
-`payout` subpackages each own their direction-specific statuses, quote and
-execution contracts, provider errors, and provider interfaces. `settlement`
-only composes `payin.Provider` and `payout.Provider` into the complete
-`SettlementProvider`; it does not redefine either domain's types.
+`paymentcore` owns the parent payment and funds lifecycle. Its `payin` and `payout` subpackages each own their direction-specific statuses, quote and execution contracts, provider errors, and provider interfaces. `settlement` only composes `payin.Provider` and `payout.Provider` into the complete `SettlementProvider`; it does not redefine either domain's types.
 
-`payout.Service` owns the provider-neutral `payout_quotes` and `payouts`
-records. `CreateQuote` enforces tenant-scoped idempotency, calls the provider,
-and stores normalized commercial terms plus the raw provider payload.
-`CreatePayout` commits a `submission_pending` attempt before calling the
-provider, records the returned reference and status, and retries `unknown`
-outcomes with the original idempotency key. Provider adapters such as BlindPay
-do not write generic quote, payout, or payment state; they resolve provider
-resources, execute external API operations, and translate the results.
+`payout.Service` owns payout quote and provider-operation persistence in the shared `payment_quotes` and direction-specific `payouts` tables records. `CreateQuote` enforces tenant-scoped idempotency, calls the provider, and stores normalized commercial terms plus the raw provider payload. `CreatePayout` commits a `submission_pending` attempt before calling the provider, records the returned reference and status, and retries `unknown` outcomes with the original idempotency key. Provider adapters such as BlindPay do not write generic quote, payout, or payment state; they resolve provider resources, execute external API operations, and translate the results.
 
 ## Payment lifecycle
 
@@ -148,84 +137,50 @@ stateDiagram-v2
     manual_review --> returning: operator return / ledger.release
 ```
 
-The saga's `funds_returned` label is persisted internally as `returned`. It is
-not a payment status: the resulting payment remains `payment_status=failed`
-while `funds_status=returned`. The transition from `failed` handles a provider
-return that arrives after a reserved-funds failure was already recorded.
+The saga's `funds_returned` label is persisted internally as `returned`. It is not a payment status: the resulting payment remains `payment_status=failed` while `funds_status=returned`. The transition from `failed` handles a provider return that arrives after a reserved-funds failure was already recorded.
 
 Timeout handling is conservative: settlement timeouts fail the payment but preserve its reservation, compliance timeouts require manual review, and ambiguous submissions remain in processing until recovery or reconciliation establishes an outcome. A reservation becomes available only after a confirmed pre-capture failure, and becomes returned only after the provider confirms the funds came back.
 
-## Pay-ins
+## Pay-ins and payouts
 
-Pay-ins model inbound fiat independently from outbound payments. The current
-HTTP flow creates a quote with `POST /v1/payin-quotes`, then consumes it with
-`POST /v1/payins`. Creating the pay-in persists a `created` intent and a
-transactional outbox event. A dedicated pay-in saga sends `payin.execute`
-through Kafka only after `payin.policy.evaluate` is approved, and the command
-worker performs the provider call. Provider confirmation moves the pay-in to
-`received`; the saga then sends `payin.ledger.record`, and only a successful
-balanced journal advances the pay-in to `succeeded`. The quote
-selects an opaque destination account and locks the funding method, amounts,
-fees, currencies, and expiry. Provider instructions such as an ACH memo, bank
-details, Pix code, or CLABE become available asynchronously; retrieve current
-state with `GET /v1/payins/{id}`.
+Pay-ins and payouts are directions of the same public payment resource. Create an optional direction-aware quote with `POST /v1/payment-quotes`, then create the operation with `POST /v1/payments` using `direction`, `quote_id`, and an external reference. Creating either direction persists a `created` payment and a transactional outbox event. A dedicated pay-in coordinator sends `payin.execute` through Kafka only after `payin.policy.evaluate` is approved, and the command worker performs the provider call. Provider confirmation moves the pay-in to `received`; the saga then sends `payin.ledger.record`, and only a successful balanced journal advances the pay-in to `succeeded`. The quote selects an opaque destination account and locks the funding method, amounts, fees, currencies, and expiry. Provider instructions such as an ACH memo, bank details, Pix code, or CLABE become available asynchronously; retrieve current state with `GET /v1/payments/{id}`.
 
-The generic `payin.Provider` boundary uses opaque source-instrument
-and destination-account IDs resolved through `provider_resources`; provider
-wallet and bank-account identifiers do not appear in the shared contract.
-Verified `payin.*` webhooks advance `processing | on_hold` to `received |
-failed | refunded`. The saga turns `received` into `succeeded` only after the
-ledger command debits `cash:operating` and credits
-`settlement:payable`; a later provider refund posts the inverse journal. Early
-webhooks are retained and reconciled after the local pay-in becomes visible.
+Both direction-specific coordinators store orchestration state in `settlement_sagas`, keyed by payment ID and direction. The provider-facing `payins` and `payouts` tables remain separate because their execution details and provider statuses differ; they are not separate public API resources.
 
-Pay-in and payout records own their source, destination, method, and monetary
-snapshot. A quote is an optional commercial attachment that locks fees, FX,
-and source/destination amounts. Accepting a quote copies those terms into the
-operation, so lifecycle processing and accounting never depend on joining back
-to the quote. The schema permits providers that execute without a quote. The
-current pay-in HTTP workflow and BlindPay adapter remain quote-first.
+The generic `payin.Provider` boundary uses opaque source-instrument and destination-account IDs resolved through `provider_resources`; provider wallet and bank-account identifiers do not appear in the shared contract. Verified `payin.*` webhooks advance `processing | on_hold` to `received | failed | refunded`. The saga turns `received` into `succeeded` only after the ledger command debits `cash:operating` and credits `settlement:payable`; a later provider refund posts the inverse journal. Early webhooks are retained and reconciled after the local pay-in becomes visible.
+
+Pay-in and payout records own their source, destination, method, and monetary snapshot. A quote is an optional commercial attachment that locks fees, FX, and source/destination amounts. Accepting a quote copies those terms into the operation, so lifecycle processing and accounting never depend on joining back to the quote. The schema permits providers that execute without a quote. The current pay-in HTTP workflow and BlindPay adapter remain quote-first.
 
 ## Provider resources
 
-Shared APIs and workflow tables use provider-resource IDs instead of naming
-provider-specific bank-account or wallet fields:
+Shared APIs and workflow tables use provider-resource IDs instead of naming provider-specific bank-account or wallet fields:
 
 ```text
 Payout: source account -> destination payment instrument
 Pay-in: optional source payment instrument -> destination account
 ```
 
-An account represents a balance-holding resource, such as a managed wallet. A
-payment instrument represents an external routing endpoint, such as a bank
-account or blockchain address. `provider_resources` maps those stable IDs to a
-provider and its reference. For example:
+An account represents a balance-holding resource, such as a managed wallet. A payment instrument represents an external routing endpoint, such as a bank account or blockchain address. `provider_resources` maps those stable IDs to a provider and its reference. For example:
 
 ```text
 acct_123       -> blindpay / managed wallet / bl_...
 instrument_456 -> blindpay / bank account / ba_...
 ```
 
-Callers must treat resource IDs as opaque; the current BlindPay reference sync
-may reuse a provider reference as the local resource ID for compatibility, but
-the adapter still resolves it through `provider_resources`. Adding another
-provider requires new resource mappings and an adapter, not new columns in
-`payins`, `payouts`, or their quote tables. Raw provider responses are isolated
-in `provider_payload`, while raw webhook events remain adapter-owned data.
+Callers must treat resource IDs as opaque; the current BlindPay reference sync may reuse a provider reference as the local resource ID for compatibility, but the adapter still resolves it through `provider_resources`. Adding another provider requires new resource mappings and an adapter, not new columns in `payins`, `payouts`, or their quote tables. Raw provider responses are isolated in `provider_payload`, while raw webhook events remain adapter-owned data.
 
 ## Database migrations
 
-Migrations are ordered by dependency. Provider-neutral platform and workflow
-schema is created before the BlindPay-specific adapter schema.
+Migrations are ordered by dependency. Provider-neutral platform and workflow schema is created before the BlindPay-specific adapter schema.
 
 | Migration | Main purpose |
 | --- | --- |
-| [001_payment_core.sql](migrations/001_payment_core.sql) | Payments, audit/timeline, destinations, and refunds |
+| [001_payment_core.sql](migrations/001_payment_core.sql) | Payments, shared quotes and provider resources, audit/timeline, destinations, and refunds |
 | [002_eventing.sql](migrations/002_eventing.sql) | Transactional outbox and consumer inbox |
-| [003_payment_workflow.sql](migrations/003_payment_workflow.sql) | Payment sagas, manual review actions, and settlement submission records |
-| [004_payouts.sql](migrations/004_payouts.sql) | Provider resources, provider-neutral payout quotes, and payouts |
-| [005_payins.sql](migrations/005_payins.sql) | Provider-neutral pay-in quotes, pay-ins, and pay-in sagas |
-| [006_ledger.sql](migrations/006_ledger.sql) | Accounts, balanced entries, payment/pay-in journals, and payment returns |
+| [003_payment_workflow.sql](migrations/003_payment_workflow.sql) | Direction-aware settlement sagas, manual review actions, and settlement submission records |
+| [004_payouts.sql](migrations/004_payouts.sql) | Payout provider operations linked to payments |
+| [005_payins.sql](migrations/005_payins.sql) | Pay-in provider operations linked to payments |
+| [006_ledger.sql](migrations/006_ledger.sql) | Accounts, balanced payment journals, and payment returns |
 | [007_webhooks.sql](migrations/007_webhooks.sql) | Merchant webhook delivery and provider webhook ingestion/application tracking |
 | [008_reconciliation.sql](migrations/008_reconciliation.sql) | Reconciliation runs and discrepancies |
 | [009_tenant_access.sql](migrations/009_tenant_access.sql) | Tenant API-key authentication |
@@ -302,14 +257,11 @@ Stop the environment with `docker compose down`. Add `--volumes` to permanently 
 
 | Endpoint | Purpose |
 | --- | --- |
-| `POST /v1/payments` | Create a payment |
+| `POST /v1/payments` | Create a pay-in or payout payment (`direction=payin|payout`) |
 | `GET /v1/payments/{id}` | Read a payment |
 | `GET /v1/payments/{id}/timeline` | Read payment history |
 | `POST /v1/payments/{id}/refunds` | Create a merchant-issued refund as a linked payment |
-| `POST /v1/payout-quotes` | Create a provider-neutral payout quote |
-| `POST /v1/payin-quotes` | Create a provider-neutral pay-in quote |
-| `POST /v1/payins` | Create an asynchronous pay-in intent from a quote |
-| `GET /v1/payins/{id}` | Read a pay-in |
+| `POST /v1/payment-quotes` | Create a provider-neutral pay-in or payout quote |
 | `POST /v1/providers/blindpay/webhooks` | Receive signed BlindPay events |
 | `POST /v1/webhook-endpoints` | Register a tenant webhook |
 | `GET /v1/webhook-endpoints` | List tenant webhooks |
@@ -324,23 +276,11 @@ Stop the environment with `docker compose down`. Add `--volumes` to permanently 
 
 Tenant endpoints require `Authorization: Bearer <api-key>`. Operator endpoints are available only when `STABLERAIL_OPERATOR_TOKEN` is set and require that token. Payment reads are tenant-scoped.
 
-`POST /v1/payins` returns `202 Accepted` with a `created` pay-in. Provider
-instructions and later lifecycle statuses are asynchronous; clients retrieve
-them with `GET /v1/payins/{id}`. There is no provider network call in the HTTP
-transaction.
+`POST /v1/payments` returns `202 Accepted` for a created pay-in and `201 Created` for a created payout. Provider instructions and later lifecycle statuses are asynchronous; there is no provider network call in the HTTP transaction.
 
 ## Settlement providers
 
-The application selects one complete `settlement.SettlementProvider`, which
-composes `payout.Provider` and `payin.Provider`. Those capabilities expose
-generic quotes and execution, while workers depend on the application service
-they use.
-The runtime includes a deterministic mock provider and a BlindPay adapter with
-durable payout submission, pay-ins, signed webhooks, compliance holds,
-reconciliation, and ambiguous-outcome recovery. BlindPay's provider status
-`refunded` maps either to a failed payment with returned funds or, if completion
-was already recorded, to a separate post-success return. It is not a
-merchant-initiated refund.
+The application selects one complete `settlement.SettlementProvider`, which composes `payout.Provider` and `payin.Provider`. Those capabilities expose generic quotes and execution, while workers depend on the application service they use. The runtime includes a deterministic mock provider and a BlindPay adapter with durable payout submission, pay-ins, signed webhooks, compliance holds, reconciliation, and ambiguous-outcome recovery. BlindPay's provider status `refunded` maps either to a failed payment with returned funds or, if completion was already recorded, to a separate post-success return. It is not a merchant-initiated refund.
 
 Configure the BlindPay provider with:
 
@@ -391,12 +331,6 @@ Set `STABLERAIL_E2E_KEEP_STACK=1` to retain its isolated containers. See the [lo
 
 ## Operational status
 
-The core payment, saga, managed-wallet payout, pay-in, merchant-issued refund,
-provider-return, webhook, reconciliation, and manual-review paths are
-implemented. Merchant refunds are linked payments and reuse the ordinary payout
-saga; provider-originated returns remain separate operations with reversal
-accounting. Remaining production work includes distributed tracing, alert
-integrations, credential rotation, provider rate limiting, rollout controls,
-direct quote-free pay-in APIs, and external-wallet payout submission.
+The core payment, saga, managed-wallet payout, pay-in, merchant-issued refund, provider-return, webhook, reconciliation, and manual-review paths are implemented. Merchant refunds are linked payments and reuse the ordinary payout saga; provider-originated returns remain separate operations with reversal accounting. Remaining production work includes distributed tracing, alert integrations, credential rotation, provider rate limiting, rollout controls, direct quote-free pay-in APIs, and external-wallet payout submission.
 
 The mock provider and local Compose environment are intended for development and verification. A production deployment still requires environment-specific security controls, topic provisioning, monitoring, and a limited provider pilot.

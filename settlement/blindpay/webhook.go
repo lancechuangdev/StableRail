@@ -206,9 +206,9 @@ func (s *WebhookService) applyPayinWebhook(ctx context.Context, tx *sql.Tx, prov
 	if status == "succeeded" {
 		lifecycleStatus = "received"
 	}
-	var id, current, currency string
+	var id, paymentID, current, currency string
 	var amount int64
-	err := tx.QueryRowContext(ctx, `SELECT id,status,destination_amount_minor,destination_currency FROM payins WHERE provider='blindpay' AND provider_payin_id=$1 FOR UPDATE`, providerID).Scan(&id, &current, &amount, &currency)
+	err := tx.QueryRowContext(ctx, `SELECT id,payment_id,status,destination_amount_minor,destination_currency FROM payins WHERE provider='blindpay' AND provider_payin_id=$1 FOR UPDATE`, providerID).Scan(&id, &paymentID, &current, &amount, &currency)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
@@ -221,8 +221,21 @@ func (s *WebhookService) applyPayinWebhook(ctx context.Context, tx *sql.Tx, prov
 	if _, err := tx.ExecContext(ctx, `UPDATE payins SET status=$1,provider_payload=$2,instructions=$2,failure_reason=CASE WHEN $1 IN ('failed','refunded') THEN $3 ELSE NULL END,updated_at=$4 WHERE id=$5`, lifecycleStatus, raw, providerStatus, now, id); err != nil {
 		return false, fmt.Errorf("update BlindPay payin status: %w", err)
 	}
+	paymentStatus, fundsStatus := "processing", "pending"
+	if lifecycleStatus == "received" {
+		fundsStatus = "received"
+	}
+	if lifecycleStatus == "failed" || lifecycleStatus == "refunded" {
+		paymentStatus, fundsStatus = "failed", "returned"
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE payments SET payment_status=$1,funds_status=$2,updated_at=$3 WHERE id=$4`, paymentStatus, fundsStatus, now, paymentID); err != nil {
+		return false, fmt.Errorf("update payin payment: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO payment_timeline_entries(payment_id,payment_status,note,occurred_at) VALUES($1,$2,$3,$4)`, paymentID, paymentStatus, "payin."+lifecycleStatus, now); err != nil {
+		return false, err
+	}
 	var correlationID string
-	if err := tx.QueryRowContext(ctx, `SELECT correlation_id FROM payin_sagas WHERE payin_id=$1`, id).Scan(&correlationID); err != nil && !errors.Is(err, sql.ErrNoRows) {
+	if err := tx.QueryRowContext(ctx, `SELECT correlation_id FROM settlement_sagas WHERE payment_id=$1 AND direction='payin'`, paymentID).Scan(&correlationID); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return false, fmt.Errorf("load payin saga correlation: %w", err)
 	}
 	eventID := "evt_blindpay_" + providerID + "_" + lifecycleStatus
@@ -230,11 +243,11 @@ func (s *WebhookService) applyPayinWebhook(ctx context.Context, tx *sql.Tx, prov
 	body, _ := json.Marshal(map[string]any{"id": eventID, "type": eventType, "payin_id": id, "correlation_id": correlationID, "reason": providerStatus, "occurred_at": now, "data": map[string]any{"status": lifecycleStatus, "provider_status": providerStatus}})
 	if correlationID != "" {
 		version := map[string]int{"processing": eventbus.PayinProcessingVersion, "on_hold": eventbus.PayinOnHoldVersion, "received": eventbus.PayinReceivedVersion, "failed": eventbus.PayinFailedVersion, "refunded": eventbus.PayinRefundedVersion}[lifecycleStatus]
-		if _, err := tx.ExecContext(ctx, `INSERT INTO outbox_events(id,topic,event_type,event_version,aggregate_id,aggregate_type,payload,occurred_at) VALUES($1,$2,$3,$4,$5,'payin',$6,$7) ON CONFLICT(id) DO NOTHING`, "evt_payin_saga_"+providerID+"_"+lifecycleStatus, payin.EventsTopic, eventType, version, id, body, now); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO outbox_events(id,topic,event_type,event_version,aggregate_id,aggregate_type,payload,occurred_at) VALUES($1,$2,$3,$4,$5,'payment',$6,$7) ON CONFLICT(id) DO NOTHING`, "evt_payin_saga_"+providerID+"_"+lifecycleStatus, payin.EventsTopic, eventType, version, paymentID, body, now); err != nil {
 			return false, fmt.Errorf("enqueue payin saga event: %w", err)
 		}
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO webhook_deliveries(id,endpoint_id,event_id,payment_id,payin_id,event_type,payload,next_attempt_at,created_at) SELECT 'whd_'||md5(e.id||$1),e.id,$1,NULL,$2,$3,$4,$5,$5 FROM webhook_endpoints e JOIN payins p ON p.id=$2 WHERE e.tenant_id=p.tenant_id AND e.active ON CONFLICT(endpoint_id,event_id) DO NOTHING`, eventID, id, eventType, body, now); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO webhook_deliveries(id,endpoint_id,event_id,payment_id,event_type,payload,next_attempt_at,created_at) SELECT 'whd_'||md5(e.id||$1),e.id,$1,$2,$3,$4,$5,$5 FROM webhook_endpoints e JOIN payins p ON p.payment_id=$2 WHERE e.tenant_id=p.tenant_id AND e.active ON CONFLICT(endpoint_id,event_id) DO NOTHING`, eventID, paymentID, eventType, body, now); err != nil {
 		return false, fmt.Errorf("enqueue payin webhook: %w", err)
 	}
 	if !(current == "succeeded" && lifecycleStatus == "refunded") {
@@ -242,7 +255,7 @@ func (s *WebhookService) applyPayinWebhook(ctx context.Context, tx *sql.Tx, prov
 	}
 	eventType, debit, credit := "payin.refunded", paymentcore.SettlementAccount, paymentcore.CashOperatingAccount
 	journalID := "jrn_" + id + "_" + strings.TrimPrefix(eventType, "payin.")
-	result, err := tx.ExecContext(ctx, `INSERT INTO ledger_transactions(id,payment_id,payin_id,event_type,occurred_at) VALUES($1,NULL,$2,$3,$4) ON CONFLICT(payin_id,event_type) DO NOTHING`, journalID, id, eventType, now)
+	result, err := tx.ExecContext(ctx, `INSERT INTO ledger_transactions(id,payment_id,event_type,occurred_at) VALUES($1,$2,$3,$4) ON CONFLICT(payment_id,event_type) DO NOTHING`, journalID, paymentID, eventType, now)
 	if err != nil {
 		return false, fmt.Errorf("insert payin journal: %w", err)
 	}
@@ -389,7 +402,7 @@ func (s *WebhookService) RunReconciler(ctx context.Context, interval time.Durati
 
 func (s *WebhookService) enqueueSagaResult(ctx context.Context, tx *sql.Tx, svixID, paymentID, status string, now time.Time) error {
 	var correlationID string
-	if err := tx.QueryRowContext(ctx, `SELECT correlation_id FROM payment_sagas WHERE payment_id=$1`, paymentID).Scan(&correlationID); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT correlation_id FROM settlement_sagas WHERE payment_id=$1`, paymentID).Scan(&correlationID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil // reconciliation will repair an early webhook.
 		}

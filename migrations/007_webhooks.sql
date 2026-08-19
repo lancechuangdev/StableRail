@@ -13,8 +13,7 @@ CREATE TABLE webhook_deliveries (
     id              TEXT PRIMARY KEY,
     endpoint_id     TEXT NOT NULL REFERENCES webhook_endpoints(id),
     event_id        TEXT NOT NULL,
-    payment_id      TEXT REFERENCES payments(id),
-    payin_id        TEXT REFERENCES payins(id),
+    payment_id      TEXT NOT NULL REFERENCES payments(id),
     event_type      TEXT NOT NULL,
     payload         JSONB NOT NULL,
     status          TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','delivered','failed')),
@@ -25,16 +24,13 @@ CREATE TABLE webhook_deliveries (
     delivered_at    TIMESTAMPTZ,
     failed_at       TIMESTAMPTZ,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE (endpoint_id, event_id),
-    CHECK (num_nonnulls(payment_id, payin_id) = 1)
+    UNIQUE (endpoint_id, event_id)
 );
 
 CREATE INDEX webhook_deliveries_pending_idx
     ON webhook_deliveries (next_attempt_at, created_at) WHERE status = 'pending';
 CREATE INDEX webhook_deliveries_payment_idx
     ON webhook_deliveries (payment_id, created_at, id);
-CREATE INDEX webhook_deliveries_payin_idx
-    ON webhook_deliveries (payin_id, created_at, id);
 
 CREATE TABLE provider_notifications (
     provider        TEXT NOT NULL,

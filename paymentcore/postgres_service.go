@@ -79,9 +79,9 @@ func (s *PostgresService) createPayment(
 	}
 	now := s.now()
 	payment := &Payment{
-		ID: paymentID, ExternalReference: externalRef, Currency: currency,
+		ID: paymentID, Direction: PaymentDirectionPayout, ExternalReference: externalRef, Currency: currency,
 		AmountMinor: amountMinor, TenantID: tenantID, PaymentStatus: PaymentStatusCreated, FundsStatus: FundsStatusAvailable,
-		IdempotencyKey: idempotencyKey, PayoutQuoteID: payoutQuoteID, CreatedAt: now, UpdatedAt: now,
+		IdempotencyKey: idempotencyKey, QuoteID: payoutQuoteID, CreatedAt: now, UpdatedAt: now,
 		Destination: destination,
 	}
 	if payoutQuoteID != "" {
@@ -89,7 +89,7 @@ func (s *PostgresService) createPayment(
 		var quoteAmount int64
 		var quoteStatus string
 		var expiresAt time.Time
-		err := tx.QueryRowContext(ctx, `SELECT tenant_id,source_currency,sender_amount_minor,status,expires_at FROM payout_quotes WHERE id=$1 FOR UPDATE`, payoutQuoteID).Scan(&quoteTenant, &quoteCurrency, &quoteAmount, &quoteStatus, &expiresAt)
+		err := tx.QueryRowContext(ctx, `SELECT tenant_id,source_currency,sender_amount_minor,status,expires_at FROM payment_quotes WHERE direction='payout' AND id=$1 FOR UPDATE`, payoutQuoteID).Scan(&quoteTenant, &quoteCurrency, &quoteAmount, &quoteStatus, &expiresAt)
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, errors.New("payout quote not found")
 		}
@@ -113,7 +113,7 @@ func (s *PostgresService) createPayment(
 			return nil, errors.New("payout quote already accepted")
 		}
 		if quoteStatus != "open" || !expiresAt.After(now) {
-			if _, err := tx.ExecContext(ctx, `UPDATE payout_quotes SET status='expired',updated_at=$1 WHERE id=$2 AND status='open'`, now, payoutQuoteID); err != nil {
+			if _, err := tx.ExecContext(ctx, `UPDATE payment_quotes SET status='expired',updated_at=$1 WHERE id=$2 AND status='open'`, now, payoutQuoteID); err != nil {
 				return nil, fmt.Errorf("expire payout quote: %w", err)
 			}
 			if err := tx.Commit(); err != nil {
@@ -128,11 +128,11 @@ func (s *PostgresService) createPayment(
 
 	result, err := tx.ExecContext(ctx, `
 		INSERT INTO payments
-			(id, external_reference, currency, amount_minor, tenant_id, payment_status, funds_status,
+			(id, direction, external_reference, currency, amount_minor, tenant_id, payment_status, funds_status,
 			 idempotency_key, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10)
 		ON CONFLICT (idempotency_key) DO NOTHING`,
-		payment.ID, payment.ExternalReference, payment.Currency, payment.AmountMinor,
+		payment.ID, payment.Direction, payment.ExternalReference, payment.Currency, payment.AmountMinor,
 		payment.TenantID, payment.PaymentStatus, payment.FundsStatus, payment.IdempotencyKey, now,
 	)
 	if err != nil {
@@ -161,7 +161,7 @@ func (s *PostgresService) createPayment(
 		}
 	}
 	if payoutQuoteID != "" {
-		result, err := tx.ExecContext(ctx, `UPDATE payout_quotes SET status='accepted',payment_id=$1,updated_at=$2 WHERE id=$3 AND status='open'`, payment.ID, now, payoutQuoteID)
+		result, err := tx.ExecContext(ctx, `UPDATE payment_quotes SET status='accepted',payment_id=$1,updated_at=$2 WHERE id=$3 AND status='open'`, payment.ID, now, payoutQuoteID)
 		if err != nil {
 			return nil, fmt.Errorf("accept payout quote: %w", err)
 		}
@@ -207,9 +207,9 @@ func (s *PostgresService) Settle(ctx context.Context, paymentID string) error {
 // GetPayment returns the durable payment and its history.
 func (s *PostgresService) GetPayment(ctx context.Context, paymentID string) (*Payment, error) {
 	p := &Payment{}
-	err := s.db.QueryRowContext(ctx, `SELECT id, external_reference, currency, amount_minor,
+	err := s.db.QueryRowContext(ctx, `SELECT id, direction, external_reference, currency, amount_minor,
 		tenant_id, payment_status, funds_status, idempotency_key, created_at, updated_at FROM payments WHERE id = $1`, paymentID).
-		Scan(&p.ID, &p.ExternalReference, &p.Currency, &p.AmountMinor, &p.TenantID,
+		Scan(&p.ID, &p.Direction, &p.ExternalReference, &p.Currency, &p.AmountMinor, &p.TenantID,
 			&p.PaymentStatus, &p.FundsStatus, &p.IdempotencyKey, &p.CreatedAt, &p.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("%w: %s", ErrPaymentNotFound, paymentID)
@@ -224,8 +224,29 @@ func (s *PostgresService) GetPayment(ctx context.Context, paymentID string) (*Pa
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("get payment destination: %w", err)
 	}
-	if err := s.db.QueryRowContext(ctx, `SELECT id FROM payout_quotes WHERE payment_id=$1`, paymentID).Scan(&p.PayoutQuoteID); err != nil && !errors.Is(err, sql.ErrNoRows) {
+	if err := s.db.QueryRowContext(ctx, `SELECT id FROM payment_quotes WHERE payment_id=$1`, paymentID).Scan(&p.QuoteID); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("get payment payout quote: %w", err)
+	}
+	if p.Direction == PaymentDirectionPayin {
+		var operation SettlementOperation
+		var instructions []byte
+		err = s.db.QueryRowContext(ctx, `SELECT provider,COALESCE(provider_payin_id,''),status,instructions FROM payins WHERE payment_id=$1`, paymentID).Scan(&operation.Provider, &operation.ProviderReference, &operation.Status, &instructions)
+		if err == nil {
+			if len(instructions) > 0 {
+				_ = json.Unmarshal(instructions, &operation.Instructions)
+			}
+			p.Settlement = &operation
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("get payin operation: %w", err)
+		}
+	} else {
+		var operation SettlementOperation
+		err = s.db.QueryRowContext(ctx, `SELECT provider,COALESCE(provider_payout_id,''),provider_status FROM payouts WHERE payment_id=$1`, paymentID).Scan(&operation.Provider, &operation.ProviderReference, &operation.Status)
+		if err == nil {
+			p.Settlement = &operation
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("get payout operation: %w", err)
+		}
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT payment_status, occurred_at, note FROM payment_timeline_entries
 		WHERE payment_id = $1 ORDER BY occurred_at, id`, paymentID)
@@ -428,18 +449,18 @@ func insertHistory(
 func getPaymentByIdempotencyKey(ctx context.Context, tx *sql.Tx, key string) (*Payment, error) {
 	payment := &Payment{}
 	err := tx.QueryRowContext(ctx, `
-		SELECT id, external_reference, currency, amount_minor, tenant_id, payment_status, funds_status,
+		SELECT id, direction, external_reference, currency, amount_minor, tenant_id, payment_status, funds_status,
 		       idempotency_key, created_at, updated_at
 		FROM payments WHERE idempotency_key = $1`, key,
 	).Scan(
-		&payment.ID, &payment.ExternalReference, &payment.Currency, &payment.AmountMinor,
+		&payment.ID, &payment.Direction, &payment.ExternalReference, &payment.Currency, &payment.AmountMinor,
 		&payment.TenantID, &payment.PaymentStatus, &payment.FundsStatus, &payment.IdempotencyKey,
 		&payment.CreatedAt, &payment.UpdatedAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("get idempotent payment: %w", err)
 	}
-	if err := tx.QueryRowContext(ctx, `SELECT id FROM payout_quotes WHERE payment_id=$1`, payment.ID).Scan(&payment.PayoutQuoteID); err != nil && !errors.Is(err, sql.ErrNoRows) {
+	if err := tx.QueryRowContext(ctx, `SELECT id FROM payment_quotes WHERE payment_id=$1`, payment.ID).Scan(&payment.QuoteID); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("get idempotent payment payout quote: %w", err)
 	}
 	var destination Destination
@@ -452,7 +473,7 @@ func getPaymentByIdempotencyKey(ctx context.Context, tx *sql.Tx, key string) (*P
 }
 
 func paymentRequestMatches(payment *Payment, externalRef, currency string, amountMinor int64, tenantID, payoutQuoteID string, destination *Destination) bool {
-	if payment.ExternalReference != externalRef || payment.Currency != currency || payment.AmountMinor != amountMinor || payment.TenantID != tenantID || payment.PayoutQuoteID != payoutQuoteID {
+	if payment.ExternalReference != externalRef || payment.Currency != currency || payment.AmountMinor != amountMinor || payment.TenantID != tenantID || payment.QuoteID != payoutQuoteID {
 		return false
 	}
 	if payment.Destination == nil || destination == nil {

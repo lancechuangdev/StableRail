@@ -1,31 +1,7 @@
-CREATE TABLE payin_quotes (
-    id                    TEXT PRIMARY KEY,
-    provider              TEXT NOT NULL,
-    provider_quote_id     TEXT NOT NULL,
-    tenant_id             TEXT NOT NULL,
-    idempotency_key       TEXT NOT NULL,
-    funding_method        TEXT NOT NULL,
-    currency_type         TEXT NOT NULL CHECK (currency_type IN ('sender','receiver')),
-    cover_fees            BOOLEAN NOT NULL,
-    request_amount_minor  BIGINT NOT NULL CHECK (request_amount_minor > 0),
-    source_instrument_id  TEXT REFERENCES provider_resources(id),
-    destination_account_id TEXT NOT NULL REFERENCES provider_resources(id),
-    source_currency       TEXT NOT NULL,
-    destination_currency  TEXT NOT NULL,
-    sender_amount_minor   BIGINT NOT NULL CHECK (sender_amount_minor > 0),
-    receiver_amount_minor BIGINT NOT NULL CHECK (receiver_amount_minor > 0),
-    status                TEXT NOT NULL CHECK (status IN ('open','accepted','expired')),
-    expires_at            TIMESTAMPTZ NOT NULL,
-    provider_payload      JSONB NOT NULL,
-    created_at            TIMESTAMPTZ NOT NULL,
-    updated_at            TIMESTAMPTZ NOT NULL,
-    UNIQUE (tenant_id, idempotency_key),
-    UNIQUE (provider, provider_quote_id)
-);
-
 CREATE TABLE payins (
     id                 TEXT PRIMARY KEY,
-    quote_id           TEXT UNIQUE REFERENCES payin_quotes(id),
+    payment_id         TEXT NOT NULL UNIQUE REFERENCES payments(id),
+    quote_id           TEXT UNIQUE REFERENCES payment_quotes(id),
     tenant_id          TEXT NOT NULL,
     idempotency_key    TEXT NOT NULL,
     funding_method     TEXT NOT NULL,
@@ -49,13 +25,3 @@ CREATE TABLE payins (
 
 CREATE INDEX payins_tenant_idx ON payins (tenant_id, created_at, id);
 CREATE INDEX payins_status_idx ON payins (status, updated_at);
-
-CREATE TABLE payin_sagas (
-    id             TEXT PRIMARY KEY,
-    payin_id       TEXT NOT NULL UNIQUE REFERENCES payins(id),
-    correlation_id TEXT NOT NULL UNIQUE,
-    state          TEXT NOT NULL CHECK (state IN ('awaiting_policy','awaiting_execution','processing','on_hold','awaiting_ledger','completed','failed','refunded')),
-    failure_reason TEXT,
-    created_at     TIMESTAMPTZ NOT NULL,
-    updated_at     TIMESTAMPTZ NOT NULL
-);

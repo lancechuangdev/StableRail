@@ -27,11 +27,12 @@ func TestPayinSagaStartsWithPolicyCommand(t *testing.T) {
 		return id, nil
 	}
 	mock.ExpectBegin()
-	mock.ExpectExec("INSERT INTO payin_sagas").WithArgs("psaga_1", "pin_1", "corr_1", now).WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectExec("INSERT INTO outbox_events").WithArgs("evt_command", saga.CommandTopic, "payin.policy.evaluate", eventbus.PayinPolicyEvaluateVersion, "pin_1", sqlmock.AnyArg(), now).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO settlement_sagas").WithArgs("psaga_1", "pay_1", "corr_1", now).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery("SELECT id FROM payins").WithArgs("pay_1").WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("pin_1"))
+	mock.ExpectExec("INSERT INTO outbox_events").WithArgs("evt_command", saga.CommandTopic, "payin.policy.evaluate", eventbus.PayinPolicyEvaluateVersion, "pay_1", sqlmock.AnyArg(), now).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 	tx, _ := db.BeginTx(context.Background(), nil)
-	event := eventbus.Event{ID: "evt_created", Type: "payin.created", Version: 1, AggregateID: "pin_1", AggregateType: "payin", OccurredAt: now, Payload: json.RawMessage(`{"payin_id":"pin_1"}`)}
+	event := eventbus.Event{ID: "evt_created", Type: "payin.created", Version: 1, AggregateID: "pay_1", AggregateType: "payment", OccurredAt: now, Payload: json.RawMessage(`{"payin_id":"pin_1"}`)}
 	if err := coordinator.Handle(context.Background(), tx, event); err != nil {
 		t.Fatal(err)
 	}
@@ -53,11 +54,11 @@ func TestPayinSagaRecordsSucceededResult(t *testing.T) {
 	coordinator, _ := NewSagaCoordinator(db)
 	coordinator.now = func() time.Time { return now }
 	mock.ExpectBegin()
-	mock.ExpectQuery("SELECT id,correlation_id,state FROM payin_sagas").WithArgs("pin_1").WillReturnRows(sqlmock.NewRows([]string{"id", "correlation_id", "state"}).AddRow("psaga_1", "corr_1", "awaiting_ledger"))
-	mock.ExpectExec("UPDATE payin_sagas SET state").WithArgs("completed", "", now, "psaga_1").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery("SELECT id,correlation_id,state FROM settlement_sagas").WithArgs("pay_1").WillReturnRows(sqlmock.NewRows([]string{"id", "correlation_id", "state"}).AddRow("psaga_1", "corr_1", "awaiting_ledger"))
+	mock.ExpectExec("UPDATE settlement_sagas SET state").WithArgs("completed", "", now, "psaga_1").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 	tx, _ := db.BeginTx(context.Background(), nil)
-	event := eventbus.Event{ID: "evt_succeeded", Type: "payin.succeeded", Version: 1, AggregateID: "pin_1", AggregateType: "payin", OccurredAt: now, Payload: json.RawMessage(`{"correlation_id":"corr_1"}`)}
+	event := eventbus.Event{ID: "evt_succeeded", Type: "payin.succeeded", Version: 1, AggregateID: "pay_1", AggregateType: "payment", OccurredAt: now, Payload: json.RawMessage(`{"correlation_id":"corr_1"}`)}
 	if err := coordinator.Handle(context.Background(), tx, event); err != nil {
 		t.Fatal(err)
 	}
@@ -80,12 +81,13 @@ func TestPayinReceivedEnqueuesLedgerCommand(t *testing.T) {
 	coordinator.now = func() time.Time { return now }
 	coordinator.newID = func(string) (string, error) { return "evt_ledger", nil }
 	mock.ExpectBegin()
-	mock.ExpectQuery("SELECT id,correlation_id,state FROM payin_sagas").WithArgs("pin_1").WillReturnRows(sqlmock.NewRows([]string{"id", "correlation_id", "state"}).AddRow("psaga_1", "corr_1", "processing"))
-	mock.ExpectExec("UPDATE payin_sagas SET state").WithArgs("awaiting_ledger", "", now, "psaga_1").WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectExec("INSERT INTO outbox_events").WithArgs("evt_ledger", saga.CommandTopic, "payin.ledger.record", eventbus.PayinLedgerRecordVersion, "pin_1", sqlmock.AnyArg(), now).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery("SELECT id,correlation_id,state FROM settlement_sagas").WithArgs("pay_1").WillReturnRows(sqlmock.NewRows([]string{"id", "correlation_id", "state"}).AddRow("psaga_1", "corr_1", "processing"))
+	mock.ExpectExec("UPDATE settlement_sagas SET state").WithArgs("awaiting_ledger", "", now, "psaga_1").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery("SELECT id FROM payins").WithArgs("pay_1").WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("pin_1"))
+	mock.ExpectExec("INSERT INTO outbox_events").WithArgs("evt_ledger", saga.CommandTopic, "payin.ledger.record", eventbus.PayinLedgerRecordVersion, "pay_1", sqlmock.AnyArg(), now).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 	tx, _ := db.BeginTx(context.Background(), nil)
-	event := eventbus.Event{ID: "evt_received", Type: "payin.received", Version: 1, AggregateID: "pin_1", AggregateType: "payin", OccurredAt: now, Payload: json.RawMessage(`{"correlation_id":"corr_1"}`)}
+	event := eventbus.Event{ID: "evt_received", Type: "payin.received", Version: 1, AggregateID: "pay_1", AggregateType: "payment", OccurredAt: now, Payload: json.RawMessage(`{"correlation_id":"corr_1"}`)}
 	if err := coordinator.Handle(context.Background(), tx, event); err != nil {
 		t.Fatal(err)
 	}

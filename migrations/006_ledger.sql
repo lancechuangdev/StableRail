@@ -10,13 +10,10 @@ INSERT INTO ledger_accounts (code, name, account_type) VALUES
 
 CREATE TABLE ledger_transactions (
     id           TEXT PRIMARY KEY,
-    payment_id   TEXT REFERENCES payments(id),
-    payin_id     TEXT REFERENCES payins(id),
+    payment_id   TEXT NOT NULL REFERENCES payments(id),
     event_type   TEXT NOT NULL,
     occurred_at  TIMESTAMPTZ NOT NULL,
-    UNIQUE (payment_id, event_type),
-    UNIQUE (payin_id, event_type),
-    CHECK (num_nonnulls(payment_id, payin_id) = 1)
+    UNIQUE (payment_id, event_type)
 );
 
 CREATE TABLE ledger_entries (
@@ -30,8 +27,6 @@ CREATE TABLE ledger_entries (
 
 CREATE INDEX ledger_transactions_payment_idx
     ON ledger_transactions (payment_id, occurred_at, id);
-CREATE INDEX ledger_transactions_payin_idx
-    ON ledger_transactions (payin_id, occurred_at, id);
 CREATE INDEX ledger_entries_transaction_idx
     ON ledger_entries (transaction_id, id);
 

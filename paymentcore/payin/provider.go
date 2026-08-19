@@ -76,6 +76,7 @@ func (r ExecuteResult) Validate() error {
 }
 
 type Quote struct {
+	Direction            string    `json:"direction"`
 	ID                   string    `json:"id"`
 	Provider             string    `json:"provider"`
 	TenantID             string    `json:"tenant_id"`
@@ -94,6 +95,7 @@ type Quote struct {
 
 type Payin struct {
 	ID                     string          `json:"id"`
+	PaymentID              string          `json:"payment_id"`
 	QuoteID                string          `json:"quote_id,omitempty"`
 	Provider               string          `json:"provider"`
 	ProviderPayinID        string          `json:"provider_payin_id,omitempty"`

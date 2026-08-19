@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"stablerail/eventbus"
+	"stablerail/paymentcore"
 )
 
 var ErrNotFound = errors.New("payin not found")
@@ -44,8 +45,9 @@ func (s *Service) CreateQuote(ctx context.Context, r QuoteRequest) (*Quote, erro
 	var existingCurrencyType string
 	var existingCoverFees bool
 	var existingRequestAmount int64
-	err := s.db.QueryRowContext(ctx, `SELECT id,provider,tenant_id,funding_method,COALESCE(source_instrument_id,''),destination_account_id,source_currency,destination_currency,sender_amount_minor,receiver_amount_minor,status,expires_at,created_at,updated_at,currency_type,cover_fees,request_amount_minor FROM payin_quotes WHERE tenant_id=$1 AND idempotency_key=$2`, r.TenantID, r.IdempotencyKey).Scan(&existing.ID, &existing.Provider, &existing.TenantID, &existing.FundingMethod, &existing.SourceInstrumentID, &existing.DestinationAccountID, &existing.SourceCurrency, &existing.DestinationCurrency, &existing.SenderAmountMinor, &existing.ReceiverAmountMinor, &existing.Status, &existing.ExpiresAt, &existing.CreatedAt, &existing.UpdatedAt, &existingCurrencyType, &existingCoverFees, &existingRequestAmount)
+	err := s.db.QueryRowContext(ctx, `SELECT id,provider,tenant_id,payment_method,COALESCE(source_resource_id,''),destination_resource_id,source_currency,destination_currency,sender_amount_minor,receiver_amount_minor,status,expires_at,created_at,updated_at,currency_type,cover_fees,request_amount_minor FROM payment_quotes WHERE direction='payin' AND tenant_id=$1 AND idempotency_key=$2`, r.TenantID, r.IdempotencyKey).Scan(&existing.ID, &existing.Provider, &existing.TenantID, &existing.FundingMethod, &existing.SourceInstrumentID, &existing.DestinationAccountID, &existing.SourceCurrency, &existing.DestinationCurrency, &existing.SenderAmountMinor, &existing.ReceiverAmountMinor, &existing.Status, &existing.ExpiresAt, &existing.CreatedAt, &existing.UpdatedAt, &existingCurrencyType, &existingCoverFees, &existingRequestAmount)
 	if err == nil {
+		existing.Direction = "payin"
 		if existing.FundingMethod != r.FundingMethod || existing.SourceInstrumentID != r.SourceInstrumentID || existing.DestinationAccountID != r.DestinationAccountID || existingCurrencyType != r.CurrencyType || existingCoverFees != r.CoverFees || existingRequestAmount != r.AmountMinor || existing.SourceCurrency != r.SourceCurrency || existing.DestinationCurrency != r.DestinationCurrency {
 			return nil, ErrIdempotencyConflict
 		}
@@ -67,14 +69,28 @@ func (s *Service) CreateQuote(ctx context.Context, r QuoteRequest) (*Quote, erro
 	if len(payload) == 0 {
 		payload = json.RawMessage(`{}`)
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO payin_quotes(id,provider,provider_quote_id,tenant_id,idempotency_key,funding_method,currency_type,cover_fees,request_amount_minor,source_instrument_id,destination_account_id,source_currency,destination_currency,sender_amount_minor,receiver_amount_minor,status,expires_at,provider_payload,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,NULLIF($10,''),$11,$12,$13,$14,$15,'open',$16,$17,$18,$18)`, id, s.provider.Name(), result.ProviderQuoteID, r.TenantID, r.IdempotencyKey, r.FundingMethod, r.CurrencyType, r.CoverFees, r.AmountMinor, r.SourceInstrumentID, r.DestinationAccountID, result.SourceCurrency, result.DestinationCurrency, result.SenderAmountMinor, result.ReceiverAmountMinor, result.ExpiresAt, payload, now)
+	_, err = s.db.ExecContext(ctx, `INSERT INTO payment_quotes(id,direction,provider,provider_quote_id,tenant_id,idempotency_key,payment_method,currency_type,cover_fees,request_amount_minor,source_resource_id,destination_resource_id,source_currency,destination_currency,sender_amount_minor,receiver_amount_minor,status,expires_at,provider_payload,created_at,updated_at) VALUES($1,'payin',$2,$3,$4,$5,$6,$7,$8,$9,NULLIF($10,''),$11,$12,$13,$14,$15,'open',$16,$17,$18,$18)`, id, s.provider.Name(), result.ProviderQuoteID, r.TenantID, r.IdempotencyKey, r.FundingMethod, r.CurrencyType, r.CoverFees, r.AmountMinor, r.SourceInstrumentID, r.DestinationAccountID, result.SourceCurrency, result.DestinationCurrency, result.SenderAmountMinor, result.ReceiverAmountMinor, result.ExpiresAt, payload, now)
 	if err != nil {
 		return nil, fmt.Errorf("store payin quote: %w", err)
 	}
-	return &Quote{ID: id, Provider: s.provider.Name(), TenantID: r.TenantID, FundingMethod: r.FundingMethod, SourceInstrumentID: r.SourceInstrumentID, DestinationAccountID: r.DestinationAccountID, SourceCurrency: result.SourceCurrency, DestinationCurrency: result.DestinationCurrency, SenderAmountMinor: result.SenderAmountMinor, ReceiverAmountMinor: result.ReceiverAmountMinor, Status: "open", ExpiresAt: result.ExpiresAt, CreatedAt: now, UpdatedAt: now}, nil
+	return &Quote{Direction: "payin", ID: id, Provider: s.provider.Name(), TenantID: r.TenantID, FundingMethod: r.FundingMethod, SourceInstrumentID: r.SourceInstrumentID, DestinationAccountID: r.DestinationAccountID, SourceCurrency: result.SourceCurrency, DestinationCurrency: result.DestinationCurrency, SenderAmountMinor: result.SenderAmountMinor, ReceiverAmountMinor: result.ReceiverAmountMinor, Status: "open", ExpiresAt: result.ExpiresAt, CreatedAt: now, UpdatedAt: now}, nil
 }
 
 func (s *Service) CreatePayin(ctx context.Context, tenantID, quoteID, idempotencyKey string) (*Payin, error) {
+	return s.createPayin(ctx, tenantID, quoteID, idempotencyKey, "payin:"+quoteID)
+}
+
+// CreatePayment creates the public payment aggregate and its provider pay-in
+// operation atomically. Clients track the returned payment, not the payins row.
+func (s *Service) CreatePayment(ctx context.Context, tenantID, quoteID, idempotencyKey, externalReference string) (*paymentcore.Payment, error) {
+	p, err := s.createPayin(ctx, tenantID, quoteID, idempotencyKey, externalReference)
+	if err != nil {
+		return nil, err
+	}
+	return &paymentcore.Payment{ID: p.PaymentID, Direction: paymentcore.PaymentDirectionPayin, ExternalReference: externalReference, Currency: p.DestinationCurrency, AmountMinor: p.DestinationAmountMinor, TenantID: tenantID, PaymentStatus: paymentcore.PaymentStatusCreated, FundsStatus: paymentcore.FundsStatusPending, CreatedAt: p.CreatedAt, UpdatedAt: p.UpdatedAt}, nil
+}
+
+func (s *Service) createPayin(ctx context.Context, tenantID, quoteID, idempotencyKey, externalReference string) (*Payin, error) {
 	if tenantID == "" || quoteID == "" || idempotencyKey == "" {
 		return nil, errors.New("tenant, quote, and idempotency key are required")
 	}
@@ -94,7 +110,7 @@ func (s *Service) CreatePayin(ctx context.Context, tenantID, quoteID, idempotenc
 	var providerQuote, status, quoteTenant, fundingMethod, sourceInstrumentID, destinationAccountID, sourceCurrency, destinationCurrency string
 	var sourceAmountMinor, destinationAmountMinor int64
 	var expires time.Time
-	err = tx.QueryRowContext(ctx, `SELECT provider_quote_id,status,tenant_id,expires_at,funding_method,COALESCE(source_instrument_id,''),destination_account_id,sender_amount_minor,source_currency,receiver_amount_minor,destination_currency FROM payin_quotes WHERE id=$1 FOR UPDATE`, quoteID).Scan(&providerQuote, &status, &quoteTenant, &expires, &fundingMethod, &sourceInstrumentID, &destinationAccountID, &sourceAmountMinor, &sourceCurrency, &destinationAmountMinor, &destinationCurrency)
+	err = tx.QueryRowContext(ctx, `SELECT provider_quote_id,status,tenant_id,expires_at,payment_method,COALESCE(source_resource_id,''),destination_resource_id,sender_amount_minor,source_currency,receiver_amount_minor,destination_currency FROM payment_quotes WHERE direction='payin' AND id=$1 FOR UPDATE`, quoteID).Scan(&providerQuote, &status, &quoteTenant, &expires, &fundingMethod, &sourceInstrumentID, &destinationAccountID, &sourceAmountMinor, &sourceCurrency, &destinationAmountMinor, &destinationCurrency)
 	if errors.Is(err, sql.ErrNoRows) || quoteTenant != tenantID {
 		return nil, ErrNotFound
 	}
@@ -102,7 +118,7 @@ func (s *Service) CreatePayin(ctx context.Context, tenantID, quoteID, idempotenc
 		return nil, err
 	}
 	var existing Payin
-	err = tx.QueryRowContext(ctx, `SELECT id,COALESCE(quote_id,''),provider,COALESCE(provider_payin_id,''),funding_method,COALESCE(source_instrument_id,''),destination_account_id,source_amount_minor,source_currency,destination_amount_minor,destination_currency,status,instructions,created_at,updated_at FROM payins WHERE quote_id=$1`, quoteID).Scan(&existing.ID, &existing.QuoteID, &existing.Provider, &existing.ProviderPayinID, &existing.FundingMethod, &existing.SourceInstrumentID, &existing.DestinationAccountID, &existing.SourceAmountMinor, &existing.SourceCurrency, &existing.DestinationAmountMinor, &existing.DestinationCurrency, &existing.Status, &existing.Instructions, &existing.CreatedAt, &existing.UpdatedAt)
+	err = tx.QueryRowContext(ctx, `SELECT id,payment_id,COALESCE(quote_id,''),provider,COALESCE(provider_payin_id,''),funding_method,COALESCE(source_instrument_id,''),destination_account_id,source_amount_minor,source_currency,destination_amount_minor,destination_currency,status,instructions,created_at,updated_at FROM payins WHERE quote_id=$1`, quoteID).Scan(&existing.ID, &existing.PaymentID, &existing.QuoteID, &existing.Provider, &existing.ProviderPayinID, &existing.FundingMethod, &existing.SourceInstrumentID, &existing.DestinationAccountID, &existing.SourceAmountMinor, &existing.SourceCurrency, &existing.DestinationAmountMinor, &existing.DestinationCurrency, &existing.Status, &existing.Instructions, &existing.CreatedAt, &existing.UpdatedAt)
 	if err == nil {
 		return &existing, tx.Commit()
 	}
@@ -117,22 +133,40 @@ func (s *Service) CreatePayin(ctx context.Context, tenantID, quoteID, idempotenc
 		return nil, err
 	}
 	now := s.now()
-	_, err = tx.ExecContext(ctx, `INSERT INTO payins(id,quote_id,tenant_id,idempotency_key,funding_method,source_instrument_id,destination_account_id,source_amount_minor,source_currency,destination_amount_minor,destination_currency,provider,provider_payin_id,status,instructions,provider_payload,created_at,updated_at) VALUES($1,$2,$3,$4,$5,NULLIF($6,''),$7,$8,$9,$10,$11,$12,NULL,'created','{}','{}',$13,$13)`, id, quoteID, tenantID, idempotencyKey, fundingMethod, sourceInstrumentID, destinationAccountID, sourceAmountMinor, sourceCurrency, destinationAmountMinor, destinationCurrency, s.provider.Name(), now)
+	paymentID, err := s.newID("pay_")
+	if err != nil {
+		return nil, err
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO payments(id,direction,external_reference,currency,amount_minor,tenant_id,payment_status,funds_status,idempotency_key,created_at,updated_at) VALUES($1,'payin',$2,$3,$4,$5,'created','pending',$6,$7,$7)`, paymentID, externalReference, destinationCurrency, destinationAmountMinor, tenantID, idempotencyKey, now)
+	if err != nil {
+		return nil, fmt.Errorf("store payin payment: %w", err)
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO payment_audit_events(payment_id,event,message,occurred_at) VALUES($1,'created','payin payment intent created',$2)`, paymentID, now); err != nil {
+		return nil, err
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO payment_timeline_entries(payment_id,payment_status,note,occurred_at) VALUES($1,'created','payin payment created',$2)`, paymentID, now); err != nil {
+		return nil, err
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO payins(id,payment_id,quote_id,tenant_id,idempotency_key,funding_method,source_instrument_id,destination_account_id,source_amount_minor,source_currency,destination_amount_minor,destination_currency,provider,provider_payin_id,status,instructions,provider_payload,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,NULLIF($7,''),$8,$9,$10,$11,$12,$13,NULL,'created','{}','{}',$14,$14)`, id, paymentID, quoteID, tenantID, idempotencyKey, fundingMethod, sourceInstrumentID, destinationAccountID, sourceAmountMinor, sourceCurrency, destinationAmountMinor, destinationCurrency, s.provider.Name(), now)
 	if err != nil {
 		return nil, fmt.Errorf("store payin: %w", err)
 	}
-	if _, err = tx.ExecContext(ctx, `UPDATE payin_quotes SET status='accepted',updated_at=$1 WHERE id=$2 AND status='open'`, now, quoteID); err != nil {
+	accepted, err := tx.ExecContext(ctx, `UPDATE payment_quotes SET status='accepted',payment_id=$1,updated_at=$2 WHERE id=$3 AND direction='payin' AND status='open'`, paymentID, now, quoteID)
+	if err != nil {
 		return nil, err
+	}
+	if rows, err := accepted.RowsAffected(); err != nil || rows != 1 {
+		return nil, errors.New("payin quote was consumed concurrently")
 	}
 	eventID := "evt_" + id + "_created"
 	eventBody, _ := json.Marshal(map[string]string{"payin_id": id})
-	if _, err := tx.ExecContext(ctx, `INSERT INTO outbox_events(id,topic,event_type,event_version,aggregate_id,aggregate_type,payload,occurred_at) VALUES($1,$2,'payin.created',$3,$4,'payin',$5,$6)`, eventID, EventsTopic, eventbus.PayinCreatedVersion, id, eventBody, now); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO outbox_events(id,topic,event_type,event_version,aggregate_id,aggregate_type,payload,occurred_at) VALUES($1,$2,'payin.created',$3,$4,'payment',$5,$6)`, eventID, EventsTopic, eventbus.PayinCreatedVersion, paymentID, eventBody, now); err != nil {
 		return nil, err
 	}
 	if err = tx.Commit(); err != nil {
 		return nil, err
 	}
-	return &Payin{ID: id, QuoteID: quoteID, Provider: s.provider.Name(), FundingMethod: fundingMethod, SourceInstrumentID: sourceInstrumentID, DestinationAccountID: destinationAccountID, SourceAmountMinor: sourceAmountMinor, SourceCurrency: sourceCurrency, DestinationAmountMinor: destinationAmountMinor, DestinationCurrency: destinationCurrency, Status: StatusCreated, Instructions: json.RawMessage(`{}`), CreatedAt: now, UpdatedAt: now}, nil
+	return &Payin{ID: id, PaymentID: paymentID, QuoteID: quoteID, Provider: s.provider.Name(), FundingMethod: fundingMethod, SourceInstrumentID: sourceInstrumentID, DestinationAccountID: destinationAccountID, SourceAmountMinor: sourceAmountMinor, SourceCurrency: sourceCurrency, DestinationAmountMinor: destinationAmountMinor, DestinationCurrency: destinationCurrency, Status: StatusCreated, Instructions: json.RawMessage(`{}`), CreatedAt: now, UpdatedAt: now}, nil
 }
 
 // ExecutePayin is called by the Kafka command worker. The durable pay-in row
@@ -145,7 +179,7 @@ func (s *Service) ExecutePayin(ctx context.Context, payinID string) (ExecuteResu
 	defer tx.Rollback()
 	var providerQuote, key, status string
 	var providerID sql.NullString
-	err = tx.QueryRowContext(ctx, `SELECT q.provider_quote_id,p.idempotency_key,p.status,p.provider_payin_id FROM payins p JOIN payin_quotes q ON q.id=p.quote_id WHERE p.id=$1 AND p.provider=$2 FOR UPDATE`, payinID, s.provider.Name()).Scan(&providerQuote, &key, &status, &providerID)
+	err = tx.QueryRowContext(ctx, `SELECT q.provider_quote_id,p.idempotency_key,p.status,p.provider_payin_id FROM payins p JOIN payment_quotes q ON q.id=p.quote_id WHERE p.id=$1 AND p.provider=$2 FOR UPDATE`, payinID, s.provider.Name()).Scan(&providerQuote, &key, &status, &providerID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ExecuteResult{}, ErrNotFound
 	}
@@ -200,8 +234,8 @@ func (s *Service) ApplyResult(ctx context.Context, tx *sql.Tx, payinID, correlat
 	if len(instructions) == 0 {
 		instructions = json.RawMessage(`{}`)
 	}
-	var tenantID string
-	if err := tx.QueryRowContext(ctx, `SELECT tenant_id FROM payins WHERE id=$1 FOR UPDATE`, payinID).Scan(&tenantID); err != nil {
+	var tenantID, paymentID string
+	if err := tx.QueryRowContext(ctx, `SELECT tenant_id,payment_id FROM payins WHERE id=$1 FOR UPDATE`, payinID).Scan(&tenantID, &paymentID); err != nil {
 		return err
 	}
 	lifecycleStatus := result.Status
@@ -211,20 +245,33 @@ func (s *Service) ApplyResult(ctx context.Context, tx *sql.Tx, payinID, correlat
 	if _, err := tx.ExecContext(ctx, `UPDATE payins SET provider_payin_id=NULLIF($1,''),status=$2,instructions=$3,provider_payload=$4,failure_reason=NULLIF($5,''),updated_at=$6 WHERE id=$7`, result.ProviderPayinID, lifecycleStatus, instructions, payload, result.FailureReason, now, payinID); err != nil {
 		return err
 	}
+	paymentStatus, fundsStatus := paymentcore.PaymentStatusProcessing, paymentcore.FundsStatusPending
+	if lifecycleStatus == StatusReceived {
+		fundsStatus = paymentcore.FundsStatusReceived
+	}
+	if lifecycleStatus == StatusFailed {
+		paymentStatus, fundsStatus = paymentcore.PaymentStatusFailed, paymentcore.FundsStatusReturned
+	}
 	eventType, eventID := "payin."+string(lifecycleStatus), "evt_"+payinID+"_"+string(lifecycleStatus)
+	if _, err := tx.ExecContext(ctx, `UPDATE payments SET payment_status=$1,funds_status=$2,updated_at=$3 WHERE id=$4`, paymentStatus, fundsStatus, now, paymentID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO payment_timeline_entries(payment_id,payment_status,note,occurred_at) VALUES($1,$2,$3,$4)`, paymentID, paymentStatus, eventType, now); err != nil {
+		return err
+	}
 	body, _ := json.Marshal(map[string]any{"id": eventID, "type": eventType, "payin_id": payinID, "correlation_id": correlationID, "reason": result.FailureReason, "occurred_at": now, "data": map[string]any{"status": result.Status}})
-	if _, err := tx.ExecContext(ctx, `INSERT INTO webhook_deliveries(id,endpoint_id,event_id,payment_id,payin_id,event_type,payload,next_attempt_at,created_at) SELECT 'whd_'||md5(id||$1),id,$1,NULL,$2,$3,$4,$5,$5 FROM webhook_endpoints WHERE tenant_id=$6 AND active ON CONFLICT(endpoint_id,event_id) DO NOTHING`, eventID, payinID, eventType, body, now, tenantID); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO webhook_deliveries(id,endpoint_id,event_id,payment_id,event_type,payload,next_attempt_at,created_at) SELECT 'whd_'||md5(id||$1),id,$1,$2,$3,$4,$5,$5 FROM webhook_endpoints WHERE tenant_id=$6 AND active ON CONFLICT(endpoint_id,event_id) DO NOTHING`, eventID, paymentID, eventType, body, now, tenantID); err != nil {
 		return err
 	}
 	version := map[PayinStatus]int{StatusProcessing: eventbus.PayinProcessingVersion, StatusOnHold: eventbus.PayinOnHoldVersion, StatusReceived: eventbus.PayinReceivedVersion, StatusFailed: eventbus.PayinFailedVersion, StatusRefunded: eventbus.PayinRefundedVersion}[lifecycleStatus]
-	_, err := tx.ExecContext(ctx, `INSERT INTO outbox_events(id,topic,event_type,event_version,aggregate_id,aggregate_type,payload,occurred_at) VALUES($1,$2,$3,$4,$5,'payin',$6,$7) ON CONFLICT(id) DO NOTHING`, eventID, EventsTopic, eventType, version, payinID, body, now)
+	_, err := tx.ExecContext(ctx, `INSERT INTO outbox_events(id,topic,event_type,event_version,aggregate_id,aggregate_type,payload,occurred_at) VALUES($1,$2,$3,$4,$5,'payment',$6,$7) ON CONFLICT(id) DO NOTHING`, eventID, EventsTopic, eventType, version, paymentID, body, now)
 	return err
 }
 
 func (s *Service) RecordLedger(ctx context.Context, tx *sql.Tx, payinID, correlationID string, now time.Time) error {
-	var tenantID, status, currency string
+	var tenantID, paymentID, status, currency string
 	var amount int64
-	if err := tx.QueryRowContext(ctx, `SELECT tenant_id,status,destination_amount_minor,destination_currency FROM payins WHERE id=$1 FOR UPDATE`, payinID).Scan(&tenantID, &status, &amount, &currency); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT tenant_id,payment_id,status,destination_amount_minor,destination_currency FROM payins WHERE id=$1 FOR UPDATE`, payinID).Scan(&tenantID, &paymentID, &status, &amount, &currency); err != nil {
 		return err
 	}
 	if status == "succeeded" {
@@ -234,7 +281,7 @@ func (s *Service) RecordLedger(ctx context.Context, tx *sql.Tx, payinID, correla
 		return fmt.Errorf("payin %s cannot record ledger from status %s", payinID, status)
 	}
 	journalID := "jrn_" + payinID + "_succeeded"
-	res, err := tx.ExecContext(ctx, `INSERT INTO ledger_transactions(id,payment_id,payin_id,event_type,occurred_at) VALUES($1,NULL,$2,'payin.succeeded',$3) ON CONFLICT(payin_id,event_type) DO NOTHING`, journalID, payinID, now)
+	res, err := tx.ExecContext(ctx, `INSERT INTO ledger_transactions(id,payment_id,event_type,occurred_at) VALUES($1,$2,'payin.succeeded',$3) ON CONFLICT(payment_id,event_type) DO NOTHING`, journalID, paymentID, now)
 	if err != nil {
 		return err
 	}
@@ -249,12 +296,18 @@ func (s *Service) RecordLedger(ctx context.Context, tx *sql.Tx, payinID, correla
 	if _, err := tx.ExecContext(ctx, `UPDATE payins SET status='succeeded',updated_at=$1 WHERE id=$2`, now, payinID); err != nil {
 		return err
 	}
-	eventID, eventType := "evt_"+payinID+"_succeeded", "payin.succeeded"
-	body, _ := json.Marshal(map[string]any{"id": eventID, "type": eventType, "payin_id": payinID, "correlation_id": correlationID, "occurred_at": now, "data": map[string]string{"status": "succeeded"}})
-	if _, err := tx.ExecContext(ctx, `INSERT INTO webhook_deliveries(id,endpoint_id,event_id,payment_id,payin_id,event_type,payload,next_attempt_at,created_at) SELECT 'whd_'||md5(id||$1),id,$1,NULL,$2,$3,$4,$5,$5 FROM webhook_endpoints WHERE tenant_id=$6 AND active ON CONFLICT(endpoint_id,event_id) DO NOTHING`, eventID, payinID, eventType, body, now, tenantID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE payments SET payment_status='succeeded',funds_status='received',updated_at=$1 WHERE id=$2`, now, paymentID); err != nil {
 		return err
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO outbox_events(id,topic,event_type,event_version,aggregate_id,aggregate_type,payload,occurred_at) VALUES($1,$2,$3,$4,$5,'payin',$6,$7) ON CONFLICT(id) DO NOTHING`, eventID, EventsTopic, eventType, eventbus.PayinSucceededVersion, payinID, body, now)
+	if _, err := tx.ExecContext(ctx, `INSERT INTO payment_timeline_entries(payment_id,payment_status,note,occurred_at) VALUES($1,'succeeded','payin ledger recorded',$2)`, paymentID, now); err != nil {
+		return err
+	}
+	eventID, eventType := "evt_"+payinID+"_succeeded", "payin.succeeded"
+	body, _ := json.Marshal(map[string]any{"id": eventID, "type": eventType, "payin_id": payinID, "correlation_id": correlationID, "occurred_at": now, "data": map[string]string{"status": "succeeded"}})
+	if _, err := tx.ExecContext(ctx, `INSERT INTO webhook_deliveries(id,endpoint_id,event_id,payment_id,event_type,payload,next_attempt_at,created_at) SELECT 'whd_'||md5(id||$1),id,$1,$2,$3,$4,$5,$5 FROM webhook_endpoints WHERE tenant_id=$6 AND active ON CONFLICT(endpoint_id,event_id) DO NOTHING`, eventID, paymentID, eventType, body, now, tenantID); err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO outbox_events(id,topic,event_type,event_version,aggregate_id,aggregate_type,payload,occurred_at) VALUES($1,$2,$3,$4,$5,'payment',$6,$7) ON CONFLICT(id) DO NOTHING`, eventID, EventsTopic, eventType, eventbus.PayinSucceededVersion, paymentID, body, now)
 	return err
 }
 
