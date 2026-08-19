@@ -78,6 +78,10 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	payinCoordinator, err := payin.NewSagaCoordinator(db)
+	if err != nil {
+		return err
+	}
 
 	inboxProcessor, err := inbox.NewProcessor(db)
 	if err != nil {
@@ -189,12 +193,6 @@ func run() error {
 	default:
 		return fmt.Errorf("unsupported settlement provider %q", config.SettlementProvider)
 	}
-	commandLoop := &consumer.Loop{
-		Reader:    consumer.NewKafkaReader(config.KafkaBrokers, string(saga.CommandTopic), "stablerail-core-workers"),
-		Processor: inbox.BoundProcessor{Processor: inboxProcessor, Handler: workers.NewCommandHandler(policy.DeterministicEvaluator{RejectAmountMinor: config.MockPolicyRejectAmount}, ledger.NewPostgresService(), payoutCreator).Handle},
-		Consumer:  "core-workers",
-	}
-
 	handler, err := paymentapi.NewHandler(paymentcore.NewPostgresService(db), db, payoutQuoteCreator)
 	if err != nil {
 		return err
@@ -207,6 +205,16 @@ func run() error {
 	payins, err := payin.NewService(db, provider)
 	if err != nil {
 		return err
+	}
+	payinSagaLoop := &consumer.Loop{
+		Reader:    consumer.NewKafkaReader(config.KafkaBrokers, string(payin.EventsTopic), "stablerail-payin-saga"),
+		Processor: inbox.BoundProcessor{Processor: inboxProcessor, Handler: workers.PayinSagaHandler(payinCoordinator)},
+		Consumer:  "payin-saga",
+	}
+	commandLoop := &consumer.Loop{
+		Reader:    consumer.NewKafkaReader(config.KafkaBrokers, string(saga.CommandTopic), "stablerail-core-workers"),
+		Processor: inbox.BoundProcessor{Processor: inboxProcessor, Handler: workers.NewCommandHandler(policy.DeterministicEvaluator{RejectAmountMinor: config.MockPolicyRejectAmount}, ledger.NewPostgresService(), payoutCreator, payins).Handle},
+		Consumer:  "core-workers",
 	}
 	payinHandler, err := paymentapi.NewPayinHandler(payins)
 	if err != nil {
@@ -280,6 +288,7 @@ func run() error {
 		relay.Run,
 		saga.TimeoutWorker(coordinator, config.SagaPollInterval),
 		sagaLoop.Run,
+		payinSagaLoop.Run,
 		commandLoop.Run,
 		webhookLoop.Run,
 		webhookDispatcher.Run,

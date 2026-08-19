@@ -15,6 +15,7 @@ import (
 	"stablerail/eventbus"
 	"stablerail/ledger"
 	"stablerail/paymentcore"
+	"stablerail/paymentcore/payin"
 	"stablerail/paymentcore/payout"
 	"stablerail/policy"
 	"stablerail/saga"
@@ -26,6 +27,7 @@ type CommandHandler struct {
 	policyEvaluator policy.PolicyEvaluator
 	ledgerService   ledger.LedgerService
 	payoutService   namedPayoutService
+	payinService    payinCommandService
 }
 
 type namedPayoutService interface {
@@ -33,8 +35,14 @@ type namedPayoutService interface {
 	CreatePayout(context.Context, payout.Request) (payout.Result, error)
 }
 
-func NewCommandHandler(evaluator policy.PolicyEvaluator, ledgerService ledger.LedgerService, payouts namedPayoutService) *CommandHandler {
-	h := &CommandHandler{policyEvaluator: evaluator, ledgerService: ledgerService, payoutService: payouts, now: func() time.Time { return time.Now().UTC() }, newID: func() (string, error) {
+type payinCommandService interface {
+	ExecutePayin(context.Context, string) (payin.ExecuteResult, error)
+	ApplyResult(context.Context, *sql.Tx, string, string, payin.ExecuteResult, time.Time) error
+	RecordLedger(context.Context, *sql.Tx, string, string, time.Time) error
+}
+
+func NewCommandHandler(evaluator policy.PolicyEvaluator, ledgerService ledger.LedgerService, payouts namedPayoutService, payins payinCommandService) *CommandHandler {
+	h := &CommandHandler{policyEvaluator: evaluator, ledgerService: ledgerService, payoutService: payouts, payinService: payins, now: func() time.Time { return time.Now().UTC() }, newID: func() (string, error) {
 		b := make([]byte, 16)
 		_, err := rand.Read(b)
 		return "evt_" + hex.EncodeToString(b), err
@@ -45,11 +53,12 @@ func NewCommandHandler(evaluator policy.PolicyEvaluator, ledgerService ledger.Le
 type commandPayload struct {
 	CorrelationID string `json:"correlation_id"`
 	PaymentID     string `json:"payment_id"`
+	PayinID       string `json:"payin_id"`
 	Reason        string `json:"reason"`
 }
 
 func (h *CommandHandler) Handle(ctx context.Context, tx *sql.Tx, event eventbus.Event) error {
-	if h.policyEvaluator == nil || h.ledgerService == nil || h.payoutService == nil {
+	if h.policyEvaluator == nil || h.ledgerService == nil || h.payoutService == nil || h.payinService == nil {
 		return errors.New("command handler dependencies are required")
 	}
 	var payload commandPayload
@@ -64,12 +73,47 @@ func (h *CommandHandler) Handle(ctx context.Context, tx *sql.Tx, event eventbus.
 	}
 	var reply string
 	switch event.Type {
+	case "payin.policy.evaluate":
+		if payload.PayinID == "" {
+			payload.PayinID = event.AggregateID
+		}
+		var amount int64
+		var currency string
+		if err := tx.QueryRowContext(ctx, `SELECT source_amount_minor,source_currency FROM payins WHERE id=$1`, payload.PayinID).Scan(&amount, &currency); err != nil {
+			return fmt.Errorf("load payin for policy: %w", err)
+		}
+		decision, err := h.policyEvaluator.Evaluate(ctx, policy.PolicyRequest{OperationID: payload.PayinID, Direction: "payin", AmountMinor: amount, Currency: currency})
+		if err != nil {
+			return fmt.Errorf("evaluate payin policy: %w", err)
+		}
+		if !decision.Approved {
+			return h.payinService.ApplyResult(ctx, tx, payload.PayinID, payload.CorrelationID, payin.ExecuteResult{Status: payin.StatusFailed, FailureReason: decision.Reason}, h.now())
+		}
+		return h.enqueuePayinReply(ctx, tx, event, payload.PayinID, payload.CorrelationID, "payin.policy.approved", "")
+	case "payin.execute":
+		if payload.PayinID == "" {
+			payload.PayinID = event.AggregateID
+		}
+		result, err := h.payinService.ExecutePayin(ctx, payload.PayinID)
+		if err != nil {
+			var providerErr *payin.ProviderError
+			if errors.As(err, &providerErr) && !providerErr.Retryable {
+				return h.payinService.ApplyResult(ctx, tx, payload.PayinID, payload.CorrelationID, payin.ExecuteResult{Status: payin.StatusFailed, FailureReason: providerErr.Message}, h.now())
+			}
+			return fmt.Errorf("execute payin: %w", err)
+		}
+		return h.payinService.ApplyResult(ctx, tx, payload.PayinID, payload.CorrelationID, result, h.now())
+	case "payin.ledger.record":
+		if payload.PayinID == "" {
+			payload.PayinID = event.AggregateID
+		}
+		return h.payinService.RecordLedger(ctx, tx, payload.PayinID, payload.CorrelationID, h.now())
 	case "policy.evaluate":
 		amount, currency, err := loadPaymentAmount(ctx, tx, payload.PaymentID)
 		if err != nil {
 			return err
 		}
-		decision, err := h.policyEvaluator.Evaluate(ctx, policy.PolicyRequest{PaymentID: payload.PaymentID, AmountMinor: amount, Currency: currency})
+		decision, err := h.policyEvaluator.Evaluate(ctx, policy.PolicyRequest{OperationID: payload.PaymentID, Direction: "payout", AmountMinor: amount, Currency: currency})
 		if err != nil {
 			return fmt.Errorf("evaluate payment policy: %w", err)
 		}
@@ -181,6 +225,18 @@ func (h *CommandHandler) Handle(ctx context.Context, tx *sql.Tx, event eventbus.
 	return h.enqueueReply(ctx, tx, event, payload, reply)
 }
 
+func (h *CommandHandler) enqueuePayinReply(ctx context.Context, tx *sql.Tx, caused eventbus.Event, payinID, correlationID, eventType, reason string) error {
+	id, err := h.newID()
+	if err != nil {
+		return err
+	}
+	now := h.now()
+	body, _ := json.Marshal(map[string]any{"correlation_id": correlationID, "payin_id": payinID, "reason": reason, "caused_by_event_id": caused.ID})
+	version := map[string]int{"payin.policy.approved": eventbus.PayinPolicyApprovedVersion}[eventType]
+	_, err = tx.ExecContext(ctx, `INSERT INTO outbox_events(id,topic,event_type,event_version,aggregate_id,aggregate_type,payload,occurred_at) VALUES($1,$2,$3,$4,$5,'payin',$6,$7)`, id, payin.EventsTopic, eventType, version, payinID, body, now)
+	return err
+}
+
 func loadPaymentAmount(ctx context.Context, tx *sql.Tx, paymentID string) (int64, string, error) {
 	var amount int64
 	var currency string
@@ -281,6 +337,15 @@ func SagaHandler(coordinator *saga.Coordinator) func(context.Context, *sql.Tx, e
 	allowed := map[string]bool{"payment.created": true, "payment.succeeded": true, "policy.approved": true, "policy.rejected": true, "ledger.reserved": true, "ledger.failed": true, "ledger.released": true, "settlement.completed": true, "settlement.failed": true, "settlement.returned": true, "settlement.on_hold": true}
 	return func(ctx context.Context, tx *sql.Tx, event eventbus.Event) error {
 		if !allowed[event.Type] {
+			return nil
+		}
+		return coordinator.Handle(ctx, tx, event)
+	}
+}
+
+func PayinSagaHandler(coordinator *payin.SagaCoordinator) func(context.Context, *sql.Tx, eventbus.Event) error {
+	return func(ctx context.Context, tx *sql.Tx, event eventbus.Event) error {
+		if event.AggregateType != "payin" {
 			return nil
 		}
 		return coordinator.Handle(ctx, tx, event)

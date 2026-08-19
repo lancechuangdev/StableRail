@@ -3,6 +3,7 @@ package blindpay
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"time"
 
@@ -42,7 +43,11 @@ func (p *Provider) CreatePayinQuote(ctx context.Context, r corepayin.QuoteReques
 func (p *Provider) ExecutePayin(ctx context.Context, r corepayin.ExecuteRequest) (corepayin.ExecuteResult, error) {
 	v, err := p.client.CreatePayin(ctx, PayinRequest{IdempotencyKey: r.IdempotencyKey, PayinQuoteID: r.QuoteID})
 	if err != nil {
-		return corepayin.ExecuteResult{}, err
+		var apiErr *APIError
+		if errors.As(err, &apiErr) {
+			return corepayin.ExecuteResult{}, &corepayin.ProviderError{Message: err.Error(), Code: apiErr.Code, Retryable: apiErr.Kind == ErrorRetryable}
+		}
+		return corepayin.ExecuteResult{}, &corepayin.ProviderError{Message: err.Error(), Retryable: true}
 	}
 	return corepayin.ExecuteResult{ProviderPayinID: v.ID, Status: mapPayinStatus(v.Status), Instructions: v.Instructions, Payload: v.RawPayload}, nil
 }

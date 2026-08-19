@@ -4,7 +4,8 @@ package policy
 import "context"
 
 type PolicyRequest struct {
-	PaymentID   string
+	OperationID string
+	Direction   string
 	AmountMinor int64
 	Currency    string
 }
@@ -26,7 +27,7 @@ type DeterministicEvaluator struct {
 }
 
 func (e DeterministicEvaluator) Evaluate(_ context.Context, request PolicyRequest) (PolicyDecision, error) {
-	if request.PaymentID == "" || request.AmountMinor <= 0 || request.Currency == "" {
+	if request.OperationID == "" || (request.Direction != "payin" && request.Direction != "payout") || request.AmountMinor <= 0 || request.Currency == "" {
 		return PolicyDecision{Approved: false, Reason: "invalid payment"}, nil
 	}
 	if e.RejectAmountMinor > 0 && request.AmountMinor == e.RejectAmountMinor {

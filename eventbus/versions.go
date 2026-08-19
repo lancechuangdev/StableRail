@@ -26,4 +26,15 @@ const (
 	SettlementFailedVersion       = 1
 	SettlementReturnedVersion     = 1
 	SettlementOnHoldVersion       = 1
+	PayinCreatedVersion           = 1
+	PayinExecuteVersion           = 1
+	PayinProcessingVersion        = 1
+	PayinOnHoldVersion            = 1
+	PayinSucceededVersion         = 1
+	PayinFailedVersion            = 1
+	PayinRefundedVersion          = 1
+	PayinPolicyEvaluateVersion    = 1
+	PayinPolicyApprovedVersion    = 1
+	PayinLedgerRecordVersion      = 1
+	PayinReceivedVersion          = 1
 )

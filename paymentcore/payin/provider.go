@@ -12,8 +12,12 @@ import (
 type PayinStatus string
 
 const (
+	StatusCreated    PayinStatus = "created"
+	StatusSubmitting PayinStatus = "submission_pending"
+	StatusUnknown    PayinStatus = "unknown"
 	StatusProcessing PayinStatus = "processing"
 	StatusOnHold     PayinStatus = "on_hold"
+	StatusReceived   PayinStatus = "received"
 	StatusSucceeded  PayinStatus = "succeeded"
 	StatusFailed     PayinStatus = "failed"
 	StatusRefunded   PayinStatus = "refunded"
@@ -37,6 +41,7 @@ type ExecuteResult struct {
 	ProviderPayinID       string
 	Status                PayinStatus
 	Instructions, Payload json.RawMessage
+	FailureReason         string
 }
 type ExecutionProvider interface {
 	Name() string
@@ -91,7 +96,7 @@ type Payin struct {
 	ID                     string          `json:"id"`
 	QuoteID                string          `json:"quote_id,omitempty"`
 	Provider               string          `json:"provider"`
-	ProviderPayinID        string          `json:"provider_payin_id"`
+	ProviderPayinID        string          `json:"provider_payin_id,omitempty"`
 	FundingMethod          string          `json:"funding_method"`
 	SourceInstrumentID     string          `json:"source_instrument_id,omitempty"`
 	DestinationAccountID   string          `json:"destination_account_id"`

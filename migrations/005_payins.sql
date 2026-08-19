@@ -36,8 +36,8 @@ CREATE TABLE payins (
     destination_amount_minor BIGINT NOT NULL CHECK (destination_amount_minor > 0),
     destination_currency TEXT NOT NULL,
     provider           TEXT NOT NULL,
-    provider_payin_id  TEXT NOT NULL,
-    status             TEXT NOT NULL CHECK (status IN ('processing','on_hold','succeeded','failed','refunded')),
+    provider_payin_id  TEXT,
+    status             TEXT NOT NULL CHECK (status IN ('created','submission_pending','unknown','processing','on_hold','received','succeeded','failed','refunded')),
     instructions       JSONB NOT NULL,
     provider_payload   JSONB NOT NULL,
     failure_reason     TEXT,
@@ -48,3 +48,14 @@ CREATE TABLE payins (
 );
 
 CREATE INDEX payins_tenant_idx ON payins (tenant_id, created_at, id);
+CREATE INDEX payins_status_idx ON payins (status, updated_at);
+
+CREATE TABLE payin_sagas (
+    id             TEXT PRIMARY KEY,
+    payin_id       TEXT NOT NULL UNIQUE REFERENCES payins(id),
+    correlation_id TEXT NOT NULL UNIQUE,
+    state          TEXT NOT NULL CHECK (state IN ('awaiting_policy','awaiting_execution','processing','on_hold','awaiting_ledger','completed','failed','refunded')),
+    failure_reason TEXT,
+    created_at     TIMESTAMPTZ NOT NULL,
+    updated_at     TIMESTAMPTZ NOT NULL
+);

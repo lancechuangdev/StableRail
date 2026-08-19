@@ -159,18 +159,23 @@ Timeout handling is conservative: settlement timeouts fail the payment but prese
 
 Pay-ins model inbound fiat independently from outbound payments. The current
 HTTP flow creates a quote with `POST /v1/payin-quotes`, then consumes it with
-`POST /v1/payins`. The quote
+`POST /v1/payins`. Creating the pay-in persists a `created` intent and a
+transactional outbox event. A dedicated pay-in saga sends `payin.execute`
+through Kafka only after `payin.policy.evaluate` is approved, and the command
+worker performs the provider call. Provider confirmation moves the pay-in to
+`received`; the saga then sends `payin.ledger.record`, and only a successful
+balanced journal advances the pay-in to `succeeded`. The quote
 selects an opaque destination account and locks the funding method, amounts,
-fees, currencies, and expiry. Creating the pay-in
-returns provider instructions such as an ACH memo, bank details, Pix code, or
-CLABE; retrieve current state with `GET /v1/payins/{id}`.
+fees, currencies, and expiry. Provider instructions such as an ACH memo, bank
+details, Pix code, or CLABE become available asynchronously; retrieve current
+state with `GET /v1/payins/{id}`.
 
-The generic `settlement.PayinProvider` boundary uses opaque source-instrument
+The generic `payin.Provider` boundary uses opaque source-instrument
 and destination-account IDs resolved through `provider_resources`; provider
 wallet and bank-account identifiers do not appear in the shared contract.
-Verified `payin.*`
-webhooks advance `processing | on_hold` to `succeeded | failed | refunded`.
-Successful inbound settlement debits `cash:operating` and credits
+Verified `payin.*` webhooks advance `processing | on_hold` to `received |
+failed | refunded`. The saga turns `received` into `succeeded` only after the
+ledger command debits `cash:operating` and credits
 `settlement:payable`; a later provider refund posts the inverse journal. Early
 webhooks are retained and reconciled after the local pay-in becomes visible.
 
@@ -219,7 +224,7 @@ schema is created before the BlindPay-specific adapter schema.
 | [002_eventing.sql](migrations/002_eventing.sql) | Transactional outbox and consumer inbox |
 | [003_payment_workflow.sql](migrations/003_payment_workflow.sql) | Payment sagas, manual review actions, and settlement submission records |
 | [004_payouts.sql](migrations/004_payouts.sql) | Provider resources, provider-neutral payout quotes, and payouts |
-| [005_payins.sql](migrations/005_payins.sql) | Provider-neutral pay-in quotes and pay-ins |
+| [005_payins.sql](migrations/005_payins.sql) | Provider-neutral pay-in quotes, pay-ins, and pay-in sagas |
 | [006_ledger.sql](migrations/006_ledger.sql) | Accounts, balanced entries, payment/pay-in journals, and payment returns |
 | [007_webhooks.sql](migrations/007_webhooks.sql) | Merchant webhook delivery and provider webhook ingestion/application tracking |
 | [008_reconciliation.sql](migrations/008_reconciliation.sql) | Reconciliation runs and discrepancies |
@@ -248,7 +253,7 @@ done
 Create Kafka topics:
 
 ```bash
-for topic in payment-events payment-commands stablerail-dead-letter; do
+for topic in payment-events payin-events payment-commands stablerail-dead-letter; do
   docker compose exec kafka /opt/kafka/bin/kafka-topics.sh \
     --bootstrap-server localhost:9092 \
     --create --if-not-exists \
@@ -303,7 +308,7 @@ Stop the environment with `docker compose down`. Add `--volumes` to permanently 
 | `POST /v1/payments/{id}/refunds` | Create a merchant-issued refund as a linked payment |
 | `POST /v1/payout-quotes` | Create a provider-neutral payout quote |
 | `POST /v1/payin-quotes` | Create a provider-neutral pay-in quote |
-| `POST /v1/payins` | Create a pay-in from a quote |
+| `POST /v1/payins` | Create an asynchronous pay-in intent from a quote |
 | `GET /v1/payins/{id}` | Read a pay-in |
 | `POST /v1/providers/blindpay/webhooks` | Receive signed BlindPay events |
 | `POST /v1/webhook-endpoints` | Register a tenant webhook |
@@ -319,11 +324,17 @@ Stop the environment with `docker compose down`. Add `--volumes` to permanently 
 
 Tenant endpoints require `Authorization: Bearer <api-key>`. Operator endpoints are available only when `STABLERAIL_OPERATOR_TOKEN` is set and require that token. Payment reads are tenant-scoped.
 
+`POST /v1/payins` returns `202 Accepted` with a `created` pay-in. Provider
+instructions and later lifecycle statuses are asynchronous; clients retrieve
+them with `GET /v1/payins/{id}`. There is no provider network call in the HTTP
+transaction.
+
 ## Settlement providers
 
-The application selects one complete `settlement.SettlementProvider`. Its
-embedded `PayoutProvider` and `PayinProvider` capabilities expose generic
-quotes and execution, while workers depend only on the capability they use.
+The application selects one complete `settlement.SettlementProvider`, which
+composes `payout.Provider` and `payin.Provider`. Those capabilities expose
+generic quotes and execution, while workers depend on the application service
+they use.
 The runtime includes a deterministic mock provider and a BlindPay adapter with
 durable payout submission, pay-ins, signed webhooks, compliance holds,
 reconciliation, and ambiguous-outcome recovery. BlindPay's provider status

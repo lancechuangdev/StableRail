@@ -18,6 +18,7 @@ import (
 	"stablerail/eventbus"
 	"stablerail/ledger"
 	"stablerail/paymentcore"
+	"stablerail/paymentcore/payin"
 )
 
 type WebhookVerifier struct {
@@ -201,6 +202,10 @@ func validProviderPayinStatus(status string) bool {
 
 func (s *WebhookService) applyPayinWebhook(ctx context.Context, tx *sql.Tx, providerID, providerStatus string, raw json.RawMessage, now time.Time) (bool, error) {
 	status := string(mapPayinStatus(providerStatus))
+	lifecycleStatus := status
+	if status == "succeeded" {
+		lifecycleStatus = "received"
+	}
 	var id, current, currency string
 	var amount int64
 	err := tx.QueryRowContext(ctx, `SELECT id,status,destination_amount_minor,destination_currency FROM payins WHERE provider='blindpay' AND provider_payin_id=$1 FOR UPDATE`, providerID).Scan(&id, &current, &amount, &currency)
@@ -210,25 +215,32 @@ func (s *WebhookService) applyPayinWebhook(ctx context.Context, tx *sql.Tx, prov
 	if err != nil {
 		return false, fmt.Errorf("lock BlindPay payin: %w", err)
 	}
-	if current == status || current == "failed" || current == "refunded" || (current == "succeeded" && status != "refunded") {
+	if current == lifecycleStatus || current == "failed" || current == "refunded" || (current == "succeeded" && lifecycleStatus != "refunded") {
 		return true, nil
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE payins SET status=$1,provider_payload=$2,instructions=$2,failure_reason=CASE WHEN $1 IN ('failed','refunded') THEN $3 ELSE NULL END,updated_at=$4 WHERE id=$5`, status, raw, providerStatus, now, id); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE payins SET status=$1,provider_payload=$2,instructions=$2,failure_reason=CASE WHEN $1 IN ('failed','refunded') THEN $3 ELSE NULL END,updated_at=$4 WHERE id=$5`, lifecycleStatus, raw, providerStatus, now, id); err != nil {
 		return false, fmt.Errorf("update BlindPay payin status: %w", err)
 	}
-	eventID := "evt_blindpay_" + providerID + "_" + status
-	eventType := "payin." + status
-	body, _ := json.Marshal(map[string]any{"id": eventID, "type": eventType, "payin_id": id, "occurred_at": now, "data": map[string]any{"status": status, "provider_status": providerStatus}})
+	var correlationID string
+	if err := tx.QueryRowContext(ctx, `SELECT correlation_id FROM payin_sagas WHERE payin_id=$1`, id).Scan(&correlationID); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return false, fmt.Errorf("load payin saga correlation: %w", err)
+	}
+	eventID := "evt_blindpay_" + providerID + "_" + lifecycleStatus
+	eventType := "payin." + lifecycleStatus
+	body, _ := json.Marshal(map[string]any{"id": eventID, "type": eventType, "payin_id": id, "correlation_id": correlationID, "reason": providerStatus, "occurred_at": now, "data": map[string]any{"status": lifecycleStatus, "provider_status": providerStatus}})
+	if correlationID != "" {
+		version := map[string]int{"processing": eventbus.PayinProcessingVersion, "on_hold": eventbus.PayinOnHoldVersion, "received": eventbus.PayinReceivedVersion, "failed": eventbus.PayinFailedVersion, "refunded": eventbus.PayinRefundedVersion}[lifecycleStatus]
+		if _, err := tx.ExecContext(ctx, `INSERT INTO outbox_events(id,topic,event_type,event_version,aggregate_id,aggregate_type,payload,occurred_at) VALUES($1,$2,$3,$4,$5,'payin',$6,$7) ON CONFLICT(id) DO NOTHING`, "evt_payin_saga_"+providerID+"_"+lifecycleStatus, payin.EventsTopic, eventType, version, id, body, now); err != nil {
+			return false, fmt.Errorf("enqueue payin saga event: %w", err)
+		}
+	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO webhook_deliveries(id,endpoint_id,event_id,payment_id,payin_id,event_type,payload,next_attempt_at,created_at) SELECT 'whd_'||md5(e.id||$1),e.id,$1,NULL,$2,$3,$4,$5,$5 FROM webhook_endpoints e JOIN payins p ON p.id=$2 WHERE e.tenant_id=p.tenant_id AND e.active ON CONFLICT(endpoint_id,event_id) DO NOTHING`, eventID, id, eventType, body, now); err != nil {
 		return false, fmt.Errorf("enqueue payin webhook: %w", err)
 	}
-	if status != "succeeded" && !(current == "succeeded" && status == "refunded") {
+	if !(current == "succeeded" && lifecycleStatus == "refunded") {
 		return true, nil
 	}
-	eventType, debit, credit := "payin.succeeded", paymentcore.CashOperatingAccount, paymentcore.SettlementAccount
-	if status == "refunded" {
-		eventType, debit, credit = "payin.refunded", paymentcore.SettlementAccount, paymentcore.CashOperatingAccount
-	}
+	eventType, debit, credit := "payin.refunded", paymentcore.SettlementAccount, paymentcore.CashOperatingAccount
 	journalID := "jrn_" + id + "_" + strings.TrimPrefix(eventType, "payin.")
 	result, err := tx.ExecContext(ctx, `INSERT INTO ledger_transactions(id,payment_id,payin_id,event_type,occurred_at) VALUES($1,NULL,$2,$3,$4) ON CONFLICT(payin_id,event_type) DO NOTHING`, journalID, id, eventType, now)
 	if err != nil {
