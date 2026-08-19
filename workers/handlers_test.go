@@ -150,3 +150,33 @@ func TestPayinPolicyApprovalEnqueuesExecutionProgress(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestLateReturnMovesFailedReservedPaymentToReturned(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	now := time.Date(2026, time.August, 18, 12, 0, 0, 0, time.UTC)
+	handler := NewCommandHandler(policy.DeterministicEvaluator{}, unusedLedgerService{}, submissionFailurePayoutService{}, unusedPayinService{})
+	handler.now = func() time.Time { return now }
+	handler.newID = func() (string, error) { return "evt_returned", nil }
+	payload, _ := json.Marshal(commandPayload{CorrelationID: "corr_1", PaymentID: "pay_1", Reason: "provider confirmed return"})
+	event := eventbus.Event{ID: "evt_return", Type: "payment.return", Version: 1, AggregateID: "pay_1", AggregateType: "payment", OccurredAt: now, Payload: payload}
+	mock.ExpectBegin()
+	mock.ExpectExec("UPDATE payments SET payment_status=.*payment_status='failed' AND funds_status='reserved'").WithArgs(paymentcore.PaymentStatusFailed, paymentcore.FundsStatusReturned, now, "pay_1").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO payment_audit_events").WithArgs("pay_1", "returned", "provider confirmed return", now).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO payment_timeline_entries").WithArgs("pay_1", paymentcore.PaymentStatusFailed, "provider confirmed return", now).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO outbox_events").WithArgs("evt_returned", paymentcore.PaymentEventsTopic, "payment.funds_returned", eventbus.PaymentFundsReturnedVersion, "pay_1", sqlmock.AnyArg(), now).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+	tx, _ := db.BeginTx(context.Background(), nil)
+	if err := handler.Handle(context.Background(), tx, event); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}

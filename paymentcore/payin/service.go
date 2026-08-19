@@ -235,7 +235,8 @@ func (s *Service) ApplyResult(ctx context.Context, tx *sql.Tx, payinID, correlat
 		instructions = json.RawMessage(`{}`)
 	}
 	var tenantID, paymentID string
-	if err := tx.QueryRowContext(ctx, `SELECT tenant_id,payment_id FROM payins WHERE id=$1 FOR UPDATE`, payinID).Scan(&tenantID, &paymentID); err != nil {
+	var currentFunds paymentcore.FundsStatus
+	if err := tx.QueryRowContext(ctx, `SELECT p.tenant_id,p.payment_id,pm.funds_status FROM payins p JOIN payments pm ON pm.id=p.payment_id WHERE p.id=$1 FOR UPDATE OF p,pm`, payinID).Scan(&tenantID, &paymentID, &currentFunds); err != nil {
 		return err
 	}
 	lifecycleStatus := result.Status
@@ -245,11 +246,14 @@ func (s *Service) ApplyResult(ctx context.Context, tx *sql.Tx, payinID, correlat
 	if _, err := tx.ExecContext(ctx, `UPDATE payins SET provider_payin_id=NULLIF($1,''),status=$2,instructions=$3,provider_payload=$4,failure_reason=NULLIF($5,''),updated_at=$6 WHERE id=$7`, result.ProviderPayinID, lifecycleStatus, instructions, payload, result.FailureReason, now, payinID); err != nil {
 		return err
 	}
-	paymentStatus, fundsStatus := paymentcore.PaymentStatusProcessing, paymentcore.FundsStatusPending
+	paymentStatus, fundsStatus := paymentcore.PaymentStatusProcessing, currentFunds
 	if lifecycleStatus == StatusReceived {
 		fundsStatus = paymentcore.FundsStatusReceived
 	}
 	if lifecycleStatus == StatusFailed {
+		paymentStatus = paymentcore.PaymentStatusFailed
+	}
+	if lifecycleStatus == StatusRefunded {
 		paymentStatus, fundsStatus = paymentcore.PaymentStatusFailed, paymentcore.FundsStatusReturned
 	}
 	eventType, eventID := "payin."+string(lifecycleStatus), "evt_"+payinID+"_"+string(lifecycleStatus)

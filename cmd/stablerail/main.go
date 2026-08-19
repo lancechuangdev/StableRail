@@ -23,10 +23,10 @@ import (
 	"stablerail/paymentcore"
 	"stablerail/paymentcore/payin"
 	"stablerail/paymentcore/payout"
+	"stablerail/paymentcore/workflow"
 	"stablerail/policy"
 	"stablerail/postgresdb"
 	"stablerail/reconciliation"
-	"stablerail/saga"
 	"stablerail/settlement"
 	"stablerail/settlement/blindpay"
 	"stablerail/workers"
@@ -74,7 +74,7 @@ func run() error {
 		return err
 	}
 
-	coordinator, err := saga.NewCoordinator(db, saga.Config{ComplianceTimeout: config.SagaComplianceTimeout})
+	payoutCoordinator, err := payout.NewSagaCoordinator(db, payout.SagaConfig{ComplianceTimeout: config.SagaComplianceTimeout})
 	if err != nil {
 		return err
 	}
@@ -90,7 +90,7 @@ func run() error {
 
 	sagaLoop := &consumer.Loop{
 		Reader:    consumer.NewKafkaReader(config.KafkaBrokers, string(paymentcore.PaymentEventsTopic), "stablerail-saga"),
-		Processor: inbox.BoundProcessor{Processor: inboxProcessor, Handler: workers.SagaHandler(coordinator)},
+		Processor: inbox.BoundProcessor{Processor: inboxProcessor, Handler: workers.PayoutSagaHandler(payoutCoordinator)},
 		Consumer:  "payment-saga",
 	}
 
@@ -212,7 +212,7 @@ func run() error {
 		Consumer:  "payin-saga",
 	}
 	commandLoop := &consumer.Loop{
-		Reader:    consumer.NewKafkaReader(config.KafkaBrokers, string(saga.CommandTopic), "stablerail-core-workers"),
+		Reader:    consumer.NewKafkaReader(config.KafkaBrokers, string(workflow.CommandTopic), "stablerail-core-workers"),
 		Processor: inbox.BoundProcessor{Processor: inboxProcessor, Handler: workers.NewCommandHandler(policy.DeterministicEvaluator{RejectAmountMinor: config.MockPolicyRejectAmount}, ledger.NewPostgresService(), payoutCreator, payins).Handle},
 		Consumer:  "core-workers",
 	}
@@ -232,7 +232,7 @@ func run() error {
 	root := http.NewServeMux()
 	root.Handle("/metrics", metrics.Handler())
 	if config.OperatorToken != "" {
-		operatorHandler, err := paymentapi.NewOperatorHandler(config.OperatorToken, coordinator)
+		operatorHandler, err := paymentapi.NewOperatorHandler(config.OperatorToken, payoutCoordinator)
 		if err != nil {
 			return err
 		}
@@ -278,7 +278,8 @@ func run() error {
 		server,
 		config.ShutdownTimeout,
 		relay.Run,
-		saga.TimeoutWorker(coordinator, config.SagaPollInterval),
+		workflow.TimeoutWorker(payoutCoordinator, config.SagaPollInterval),
+		workflow.TimeoutWorker(payinCoordinator, config.SagaPollInterval),
 		sagaLoop.Run,
 		payinSagaLoop.Run,
 		commandLoop.Run,

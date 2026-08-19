@@ -1,4 +1,4 @@
-package saga
+package payout
 
 import (
 	"context"
@@ -10,10 +10,11 @@ import (
 	"github.com/DATA-DOG/go-sqlmock"
 
 	"stablerail/eventbus"
+	"stablerail/paymentcore/workflow"
 )
 
 func TestWorkflowTransitions(t *testing.T) {
-	c := &Coordinator{ledgerTimeout: time.Minute, settlementTimeout: 10 * time.Minute, complianceTimeout: 24 * time.Hour}
+	c := &SagaCoordinator{ledgerTimeout: time.Minute, settlementTimeout: 10 * time.Minute, complianceTimeout: 24 * time.Hour}
 	tests := []struct {
 		state       State
 		event       string
@@ -57,7 +58,7 @@ func TestHandleStartsSagaAndEnqueuesPolicyCommand(t *testing.T) {
 		t.Fatalf("create SQL mock: %v", err)
 	}
 	defer db.Close()
-	c := testCoordinator(t, db)
+	c := testSagaCoordinator(t, db)
 	event := sagaEvent("payment.created", "evt-created", nil)
 	now := c.now()
 
@@ -66,7 +67,7 @@ func TestHandleStartsSagaAndEnqueuesPolicyCommand(t *testing.T) {
 		WithArgs("saga_1", "pay-1", "corr_2", StateAwaitingPolicy, now.Add(time.Minute), now).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO outbox_events").
-		WithArgs("evt_3", CommandTopic, "policy.evaluate", eventbus.PolicyEvaluateVersion, "pay-1", sqlmock.AnyArg(), now).
+		WithArgs("evt_3", workflow.CommandTopic, "policy.evaluate", eventbus.PolicyEvaluateVersion, "pay-1", sqlmock.AnyArg(), now).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 
@@ -91,7 +92,7 @@ func TestHandleRejectsMismatchedCorrelation(t *testing.T) {
 		t.Fatalf("create SQL mock: %v", err)
 	}
 	defer db.Close()
-	c := testCoordinator(t, db)
+	c := testSagaCoordinator(t, db)
 	event := sagaEvent("policy.approved", "evt-approved", map[string]string{"correlation_id": "wrong"})
 	mock.ExpectBegin()
 	mock.ExpectQuery("SELECT id, correlation_id, state FROM settlement_sagas").WithArgs("pay-1").
@@ -114,7 +115,7 @@ func TestExpireOncePreservesReservedFundsAfterSettlementTimeout(t *testing.T) {
 		t.Fatalf("create SQL mock: %v", err)
 	}
 	defer db.Close()
-	c := testCoordinator(t, db)
+	c := testSagaCoordinator(t, db)
 	now := c.now()
 	mock.ExpectBegin()
 	mock.ExpectQuery("SELECT id, payment_id, correlation_id, state").WithArgs(now, 10).
@@ -124,7 +125,7 @@ func TestExpireOncePreservesReservedFundsAfterSettlementTimeout(t *testing.T) {
 		WithArgs(StateFailed, nil, "awaiting_settlement timeout", now, "saga-1").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO outbox_events").
-		WithArgs("evt_1", CommandTopic, "payment.fail_reserved", eventbus.PaymentFailVersion, "pay-1", sqlmock.AnyArg(), now).
+		WithArgs("evt_1", workflow.CommandTopic, "payment.fail_reserved", eventbus.PaymentFailVersion, "pay-1", sqlmock.AnyArg(), now).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 	count, err := c.ExpireOnce(context.Background())
@@ -142,7 +143,7 @@ func TestExpireOnceRetriesReturnWhoseLedgerReleaseTimedOut(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	c := testCoordinator(t, db)
+	c := testSagaCoordinator(t, db)
 	now := c.now()
 	mock.ExpectBegin()
 	mock.ExpectQuery("SELECT id, payment_id, correlation_id, state").WithArgs(now, 10).
@@ -152,7 +153,7 @@ func TestExpireOnceRetriesReturnWhoseLedgerReleaseTimedOut(t *testing.T) {
 		WithArgs(StateReturning, now.Add(time.Minute), "returning timeout", now, "saga-1").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO outbox_events").
-		WithArgs("evt_1", CommandTopic, "ledger.release", eventbus.LedgerReleaseVersion, "pay-1", sqlmock.AnyArg(), now).
+		WithArgs("evt_1", workflow.CommandTopic, "ledger.release", eventbus.LedgerReleaseVersion, "pay-1", sqlmock.AnyArg(), now).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 	count, err := c.ExpireOnce(context.Background())
@@ -170,7 +171,7 @@ func TestResolveManualReviewReturnsPayment(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	c := testCoordinator(t, db)
+	c := testSagaCoordinator(t, db)
 	now := c.now()
 	mock.ExpectBegin()
 	mock.ExpectQuery("SELECT id,correlation_id,state FROM settlement_sagas").WithArgs("pay-1").
@@ -179,7 +180,7 @@ func TestResolveManualReviewReturnsPayment(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec("UPDATE settlement_sagas").WithArgs(StateReturning, now.Add(time.Minute), "provider confirmed return", now, "saga-1").
 		WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectExec("INSERT INTO outbox_events").WithArgs("evt_1", CommandTopic, "ledger.release", eventbus.LedgerReleaseVersion, "pay-1", sqlmock.AnyArg(), now).
+	mock.ExpectExec("INSERT INTO outbox_events").WithArgs("evt_1", workflow.CommandTopic, "ledger.release", eventbus.LedgerReleaseVersion, "pay-1", sqlmock.AnyArg(), now).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 	if err := c.ResolveManualReview(context.Background(), "pay-1", "return", "alice", "provider confirmed return"); err != nil {
@@ -190,11 +191,11 @@ func TestResolveManualReviewReturnsPayment(t *testing.T) {
 	}
 }
 
-func testCoordinator(t *testing.T, db *sql.DB) *Coordinator {
+func testSagaCoordinator(t *testing.T, db *sql.DB) *SagaCoordinator {
 	t.Helper()
-	c, err := NewCoordinator(db, Config{TimeoutBatchSize: 10})
+	c, err := NewSagaCoordinator(db, SagaConfig{TimeoutBatchSize: 10})
 	if err != nil {
-		t.Fatalf("NewCoordinator: %v", err)
+		t.Fatalf("NewSagaCoordinator: %v", err)
 	}
 	c.now = func() time.Time { return time.Date(2026, time.August, 9, 12, 0, 0, 0, time.UTC) }
 	n := 0

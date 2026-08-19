@@ -18,7 +18,6 @@ import (
 	"stablerail/paymentcore/payin"
 	"stablerail/paymentcore/payout"
 	"stablerail/policy"
-	"stablerail/saga"
 )
 
 type CommandHandler struct {
@@ -108,6 +107,11 @@ func (h *CommandHandler) Handle(ctx context.Context, tx *sql.Tx, event eventbus.
 			payload.PayinID = event.AggregateID
 		}
 		return h.payinService.RecordLedger(ctx, tx, payload.PayinID, payload.CorrelationID, h.now())
+	case "payin.fail":
+		if payload.PayinID == "" {
+			return consumer.Permanent(errors.New("payin ID is required"))
+		}
+		return h.payinService.ApplyResult(ctx, tx, payload.PayinID, payload.CorrelationID, payin.ExecuteResult{Status: payin.StatusFailed, FailureReason: payload.Reason}, h.now())
 	case "policy.evaluate":
 		amount, currency, err := loadPaymentAmount(ctx, tx, payload.PaymentID)
 		if err != nil {
@@ -204,9 +208,20 @@ func (h *CommandHandler) Handle(ctx context.Context, tx *sql.Tx, event eventbus.
 			}
 		}
 		now := h.now()
-		update := `UPDATE payments SET payment_status=$1, funds_status=$2, updated_at=$3 WHERE id=$4 AND payment_status NOT IN ('succeeded','failed')`
-		if _, err := tx.ExecContext(ctx, update, status, fundsStatus, now, payload.PaymentID); err != nil {
+		predicate := "payment_status NOT IN ('succeeded','failed')"
+		if event.Type == "payment.return" {
+			predicate = "payment_status='failed' AND funds_status='reserved'"
+		}
+		result, err := tx.ExecContext(ctx, `UPDATE payments SET payment_status=$1, funds_status=$2, updated_at=$3 WHERE id=$4 AND `+predicate, status, fundsStatus, now, payload.PaymentID)
+		if err != nil {
 			return fmt.Errorf("record payment outcome: %w", err)
+		}
+		rows, err := result.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("inspect payment outcome: %w", err)
+		}
+		if rows != 1 {
+			return consumer.Permanent(fmt.Errorf("payment %s is not eligible for %s", payload.PaymentID, event.Type))
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO payment_audit_events(payment_id,event,message,occurred_at) VALUES($1,$2,$3,$4)`, payload.PaymentID, eventName, message, now); err != nil {
 			return fmt.Errorf("audit payment outcome: %w", err)
@@ -333,7 +348,7 @@ func (h *CommandHandler) enqueueReply(ctx context.Context, tx *sql.Tx, caused ev
 	return nil
 }
 
-func SagaHandler(coordinator *saga.Coordinator) func(context.Context, *sql.Tx, eventbus.Event) error {
+func PayoutSagaHandler(coordinator *payout.SagaCoordinator) func(context.Context, *sql.Tx, eventbus.Event) error {
 	allowed := map[string]bool{"payment.created": true, "payment.succeeded": true, "policy.approved": true, "policy.rejected": true, "ledger.reserved": true, "ledger.failed": true, "ledger.released": true, "settlement.completed": true, "settlement.failed": true, "settlement.returned": true, "settlement.on_hold": true}
 	return func(ctx context.Context, tx *sql.Tx, event eventbus.Event) error {
 		if !allowed[event.Type] {

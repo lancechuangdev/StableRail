@@ -11,11 +11,18 @@ CREATE TABLE payments (
     created_at          TIMESTAMPTZ NOT NULL,
     updated_at          TIMESTAMPTZ NOT NULL,
     CHECK (
-        (payment_status = 'created' AND funds_status IN ('pending', 'available')) OR
-        (payment_status = 'processing' AND funds_status IN ('pending', 'received')) OR
-        (payment_status = 'processing' AND funds_status = 'reserved') OR
-        (payment_status = 'succeeded' AND funds_status IN ('received', 'consumed')) OR
-        (payment_status = 'failed' AND funds_status IN ('pending', 'available', 'reserved', 'received', 'returned'))
+        (direction = 'payout' AND (
+            (payment_status = 'created' AND funds_status = 'available') OR
+            (payment_status = 'processing' AND funds_status = 'reserved') OR
+            (payment_status = 'succeeded' AND funds_status = 'consumed') OR
+            (payment_status = 'failed' AND funds_status IN ('available', 'reserved', 'returned'))
+        )) OR
+        (direction = 'payin' AND (
+            (payment_status = 'created' AND funds_status = 'pending') OR
+            (payment_status = 'processing' AND funds_status IN ('pending', 'received')) OR
+            (payment_status = 'succeeded' AND funds_status = 'received') OR
+            (payment_status = 'failed' AND funds_status IN ('pending', 'received', 'returned'))
+        ))
     )
 );
 

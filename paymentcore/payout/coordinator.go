@@ -1,5 +1,5 @@
-// Package saga coordinates the asynchronous payment workflow.
-package saga
+// Package payout coordinates the asynchronous outbound payment workflow.
+package payout
 
 import (
 	"context"
@@ -12,9 +12,8 @@ import (
 	"time"
 
 	"stablerail/eventbus"
+	"stablerail/paymentcore/workflow"
 )
-
-const CommandTopic eventbus.Topic = "payment-commands"
 
 var (
 	ErrSagaNotFound      = errors.New("payment saga not found")
@@ -38,7 +37,7 @@ const (
 	StateReturned           State = "returned"
 )
 
-type Config struct {
+type SagaConfig struct {
 	PolicyTimeout     time.Duration
 	LedgerTimeout     time.Duration
 	SettlementTimeout time.Duration
@@ -46,7 +45,7 @@ type Config struct {
 	TimeoutBatchSize  int
 }
 
-type Coordinator struct {
+type SagaCoordinator struct {
 	db                *sql.DB
 	policyTimeout     time.Duration
 	ledgerTimeout     time.Duration
@@ -57,7 +56,7 @@ type Coordinator struct {
 	newID             func(string) (string, error)
 }
 
-func NewCoordinator(db *sql.DB, config Config) (*Coordinator, error) {
+func NewSagaCoordinator(db *sql.DB, config SagaConfig) (*SagaCoordinator, error) {
 	if db == nil {
 		return nil, errors.New("saga database is required")
 	}
@@ -79,7 +78,7 @@ func NewCoordinator(db *sql.DB, config Config) (*Coordinator, error) {
 	if config.TimeoutBatchSize == 0 {
 		config.TimeoutBatchSize = 100
 	}
-	return &Coordinator{
+	return &SagaCoordinator{
 		db: db, policyTimeout: config.PolicyTimeout, ledgerTimeout: config.LedgerTimeout,
 		settlementTimeout: config.SettlementTimeout, complianceTimeout: config.ComplianceTimeout, timeoutBatchSize: config.TimeoutBatchSize,
 		now: func() time.Time { return time.Now().UTC() },
@@ -95,7 +94,7 @@ func NewCoordinator(db *sql.DB, config Config) (*Coordinator, error) {
 
 // Handle applies a workflow event using the inbox transaction supplied by the
 // caller. Saga state and resulting outbox command therefore commit atomically.
-func (c *Coordinator) Handle(ctx context.Context, tx *sql.Tx, event eventbus.Event) error {
+func (c *SagaCoordinator) Handle(ctx context.Context, tx *sql.Tx, event eventbus.Event) error {
 	if tx == nil {
 		return errors.New("saga transaction is required")
 	}
@@ -137,7 +136,7 @@ func (c *Coordinator) Handle(ctx context.Context, tx *sql.Tx, event eventbus.Eve
 	return c.updateAndCommand(ctx, tx, sagaID, correlationID, event.AggregateID, event.ID, next, command, timeout, failure)
 }
 
-func (c *Coordinator) start(ctx context.Context, tx *sql.Tx, event eventbus.Event) error {
+func (c *SagaCoordinator) start(ctx context.Context, tx *sql.Tx, event eventbus.Event) error {
 	sagaID, err := c.newID("saga_")
 	if err != nil {
 		return fmt.Errorf("generate saga ID: %w", err)
@@ -167,7 +166,7 @@ func (c *Coordinator) start(ctx context.Context, tx *sql.Tx, event eventbus.Even
 	return c.enqueue(ctx, tx, sagaID, correlationID, event.AggregateID, event.ID, "policy.evaluate", "", now)
 }
 
-func (c *Coordinator) transition(state State, eventType, reason string) (State, string, time.Duration, string, error) {
+func (c *SagaCoordinator) transition(state State, eventType, reason string) (State, string, time.Duration, string, error) {
 	switch {
 	case state == StateAwaitingPolicy && eventType == "policy.approved":
 		return StateAwaitingLedger, "ledger.reserve", c.ledgerTimeout, "", nil
@@ -207,7 +206,7 @@ func (c *Coordinator) transition(state State, eventType, reason string) (State, 
 	}
 }
 
-func (c *Coordinator) updateAndCommand(ctx context.Context, tx *sql.Tx, sagaID, correlationID, paymentID, causedBy string, state State, command string, timeout time.Duration, failure string) error {
+func (c *SagaCoordinator) updateAndCommand(ctx context.Context, tx *sql.Tx, sagaID, correlationID, paymentID, causedBy string, state State, command string, timeout time.Duration, failure string) error {
 	now := c.now()
 	var deadline any
 	if timeout > 0 {
@@ -224,7 +223,7 @@ func (c *Coordinator) updateAndCommand(ctx context.Context, tx *sql.Tx, sagaID, 
 	return c.enqueue(ctx, tx, sagaID, correlationID, paymentID, causedBy, command, failure, now)
 }
 
-func (c *Coordinator) enqueue(ctx context.Context, tx *sql.Tx, sagaID, correlationID, paymentID, causedBy, command, reason string, now time.Time) error {
+func (c *SagaCoordinator) enqueue(ctx context.Context, tx *sql.Tx, sagaID, correlationID, paymentID, causedBy, command, reason string, now time.Time) error {
 	eventID, err := c.newID("evt_")
 	if err != nil {
 		return fmt.Errorf("generate saga command ID: %w", err)
@@ -235,7 +234,7 @@ func (c *Coordinator) enqueue(ctx context.Context, tx *sql.Tx, sagaID, correlati
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO outbox_events
 		(id, topic, event_type, event_version, aggregate_id, aggregate_type, payload, occurred_at)
-		VALUES ($1, $2, $3, $4, $5, 'payment', $6, $7)`, eventID, CommandTopic, command, sagaCommandVersion(command), paymentID, payload, now)
+		VALUES ($1, $2, $3, $4, $5, 'payment', $6, $7)`, eventID, workflow.CommandTopic, command, sagaCommandVersion(command), paymentID, payload, now)
 	if err != nil {
 		return fmt.Errorf("enqueue saga command %s: %w", command, err)
 	}
@@ -272,7 +271,7 @@ func reasonOrDefault(reason, fallback string) string {
 
 // ResolveManualReview applies an audited operator decision and atomically
 // enqueues the next workflow command when one is required.
-func (c *Coordinator) ResolveManualReview(ctx context.Context, paymentID, action, operator, note string) error {
+func (c *SagaCoordinator) ResolveManualReview(ctx context.Context, paymentID, action, operator, note string) error {
 	if paymentID == "" || operator == "" || note == "" {
 		return errors.New("payment ID, operator, and note are required")
 	}
@@ -319,7 +318,7 @@ func (c *Coordinator) ResolveManualReview(ctx context.Context, paymentID, action
 
 // ExpireOnce claims overdue active sagas and emits their failure or
 // compensation command. Multiple timeout workers may run concurrently.
-func (c *Coordinator) ExpireOnce(ctx context.Context) (int, error) {
+func (c *SagaCoordinator) ExpireOnce(ctx context.Context) (int, error) {
 	tx, err := c.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, fmt.Errorf("begin saga timeout transaction: %w", err)
@@ -327,7 +326,7 @@ func (c *Coordinator) ExpireOnce(ctx context.Context) (int, error) {
 	defer tx.Rollback()
 	now := c.now()
 	rows, err := tx.QueryContext(ctx, `SELECT id, payment_id, correlation_id, state
-		FROM settlement_sagas WHERE deadline_at <= $1
+		FROM settlement_sagas WHERE direction='payout' AND deadline_at <= $1
 		  AND state IN ('awaiting_policy', 'awaiting_ledger', 'awaiting_settlement', 'on_hold', 'releasing_ledger', 'returning', 'settling_payment')
 		ORDER BY deadline_at FOR UPDATE SKIP LOCKED LIMIT $2`, now, c.timeoutBatchSize)
 	if err != nil {

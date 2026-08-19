@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
+	"stablerail/eventbus"
+	"stablerail/paymentcore"
 )
 
 type unusedProvider struct{}
@@ -39,6 +41,34 @@ func TestRecordLedgerCompletesReceivedPayin(t *testing.T) {
 	mock.ExpectCommit()
 	tx, _ := db.BeginTx(context.Background(), nil)
 	if err := service.RecordLedger(context.Background(), tx, "pin_1", "corr_1", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestFailureBeforeReceiptPreservesPendingFunds(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	service, _ := NewService(db, unusedProvider{})
+	now := time.Date(2026, time.August, 18, 12, 0, 0, 0, time.UTC)
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT p.tenant_id,p.payment_id,pm.funds_status").WithArgs("pin_1").WillReturnRows(sqlmock.NewRows([]string{"tenant_id", "payment_id", "funds_status"}).AddRow("tenant_1", "pay_1", "pending"))
+	mock.ExpectExec("UPDATE payins SET provider_payin_id").WithArgs("", StatusFailed, sqlmock.AnyArg(), sqlmock.AnyArg(), "policy rejected", now, "pin_1").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("UPDATE payments SET payment_status").WithArgs(paymentcore.PaymentStatusFailed, paymentcore.FundsStatusPending, now, "pay_1").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO payment_timeline_entries").WithArgs("pay_1", paymentcore.PaymentStatusFailed, "payin.failed", now).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO webhook_deliveries").WithArgs("evt_pin_1_failed", "pay_1", "payin.failed", sqlmock.AnyArg(), now, "tenant_1").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO outbox_events").WithArgs("evt_pin_1_failed", EventsTopic, "payin.failed", eventbus.PayinFailedVersion, "pay_1", sqlmock.AnyArg(), now).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+	tx, _ := db.BeginTx(context.Background(), nil)
+	if err := service.ApplyResult(context.Background(), tx, "pin_1", "corr_1", ExecuteResult{Status: StatusFailed, FailureReason: "policy rejected"}, now); err != nil {
 		t.Fatal(err)
 	}
 	if err := tx.Commit(); err != nil {

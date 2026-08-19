@@ -206,9 +206,9 @@ func (s *WebhookService) applyPayinWebhook(ctx context.Context, tx *sql.Tx, prov
 	if status == "succeeded" {
 		lifecycleStatus = "received"
 	}
-	var id, paymentID, current, currency string
+	var id, paymentID, current, currency, currentFunds string
 	var amount int64
-	err := tx.QueryRowContext(ctx, `SELECT id,payment_id,status,destination_amount_minor,destination_currency FROM payins WHERE provider='blindpay' AND provider_payin_id=$1 FOR UPDATE`, providerID).Scan(&id, &paymentID, &current, &amount, &currency)
+	err := tx.QueryRowContext(ctx, `SELECT p.id,p.payment_id,p.status,p.destination_amount_minor,p.destination_currency,pm.funds_status FROM payins p JOIN payments pm ON pm.id=p.payment_id WHERE p.provider='blindpay' AND p.provider_payin_id=$1 FOR UPDATE OF p,pm`, providerID).Scan(&id, &paymentID, &current, &amount, &currency, &currentFunds)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
@@ -221,11 +221,14 @@ func (s *WebhookService) applyPayinWebhook(ctx context.Context, tx *sql.Tx, prov
 	if _, err := tx.ExecContext(ctx, `UPDATE payins SET status=$1,provider_payload=$2,instructions=$2,failure_reason=CASE WHEN $1 IN ('failed','refunded') THEN $3 ELSE NULL END,updated_at=$4 WHERE id=$5`, lifecycleStatus, raw, providerStatus, now, id); err != nil {
 		return false, fmt.Errorf("update BlindPay payin status: %w", err)
 	}
-	paymentStatus, fundsStatus := "processing", "pending"
+	paymentStatus, fundsStatus := "processing", currentFunds
 	if lifecycleStatus == "received" {
 		fundsStatus = "received"
 	}
-	if lifecycleStatus == "failed" || lifecycleStatus == "refunded" {
+	if lifecycleStatus == "failed" {
+		paymentStatus = "failed"
+	}
+	if lifecycleStatus == "refunded" {
 		paymentStatus, fundsStatus = "failed", "returned"
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE payments SET payment_status=$1,funds_status=$2,updated_at=$3 WHERE id=$4`, paymentStatus, fundsStatus, now, paymentID); err != nil {

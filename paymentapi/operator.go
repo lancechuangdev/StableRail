@@ -10,7 +10,7 @@ import (
 	"net/http"
 	"strings"
 
-	"stablerail/saga"
+	"stablerail/paymentcore/payout"
 )
 
 type ManualReviewResolver interface {
@@ -49,9 +49,9 @@ func NewOperatorHandler(token string, resolver ManualReviewResolver) (http.Handl
 		}
 		if err := resolver.ResolveManualReview(r.Context(), r.PathValue("id"), input.Action, input.Operator, input.Note); err != nil {
 			switch {
-			case errors.Is(err, saga.ErrSagaNotFound):
+			case errors.Is(err, payout.ErrSagaNotFound):
 				problem(w, http.StatusNotFound, err.Error())
-			case errors.Is(err, saga.ErrNotInManualReview):
+			case errors.Is(err, payout.ErrNotInManualReview):
 				problem(w, http.StatusConflict, err.Error())
 			default:
 				problem(w, http.StatusInternalServerError, "could not resolve manual review")

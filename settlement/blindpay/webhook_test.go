@@ -188,7 +188,7 @@ func TestPayinCompletionMovesToReceivedAndDefersLedgerToSaga(t *testing.T) {
 	body := []byte(`{"webhook_event":"payin.complete","id":"pi_test","status":"completed"}`)
 	mock.ExpectBegin()
 	mock.ExpectExec("INSERT INTO blindpay_webhook_events").WithArgs("msg_payin", "payin.complete", "pi_test", body, now).WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectQuery("SELECT id,payment_id,status,destination_amount_minor").WithArgs("pi_test").WillReturnRows(sqlmock.NewRows([]string{"id", "payment_id", "status", "amount", "currency"}).AddRow("pin_1", "pay_1", "processing", int64(9900), "USDC"))
+	mock.ExpectQuery("SELECT p.id,p.payment_id,p.status,p.destination_amount_minor").WithArgs("pi_test").WillReturnRows(sqlmock.NewRows([]string{"id", "payment_id", "status", "amount", "currency", "funds_status"}).AddRow("pin_1", "pay_1", "processing", int64(9900), "USDC", "pending"))
 	mock.ExpectExec("UPDATE payins SET status").WithArgs("received", body, "completed", now, "pin_1").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("UPDATE payments SET payment_status").WithArgs("processing", "received", now, "pay_1").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO payment_timeline_entries").WithArgs("pay_1", "processing", "payin.received", now).WillReturnResult(sqlmock.NewResult(0, 1))
