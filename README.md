@@ -52,9 +52,9 @@ Every business update and outgoing event commits in one PostgreSQL transaction. 
 | `settlement/blindpay` | BlindPay client, resource mapping, quote/execution adapters, and webhooks |
 | `workers` | Policy, ledger, and provider command execution plus runtime timeout polling for both settlement directions |
 
-`paymentcore` owns the payment and funds lifecycle. Its `payin` and `payout` subpackages each own their direction-specific statuses, quote and execution contracts, provider errors, provider interfaces, and saga coordinator. Shared event envelopes, versions, and Kafka topic names live in `eventbus`; `workers` owns runtime polling and command execution. `settlement` only composes `payin.Provider` and `payout.Provider` into the complete `SettlementProvider`; it does not redefine either domain's types.
+`paymentcore` owns the payment and funds lifecycle, with `payin` and `payout` handling their direction-specific workflows. `eventbus` defines shared events and routing, `workers` executes asynchronous work, and `settlement` provides one interface for provider pay-in and payout capabilities.
 
-`payout.Service` owns payout quote and provider-operation persistence in the shared `payment_quotes` and direction-specific `payouts` tables. `CreateQuote` enforces tenant-scoped idempotency, calls the provider, and stores normalized commercial terms plus the raw provider payload. `CreatePayout` commits a `submission_pending` attempt before calling the provider, records the returned reference and status, and retries `unknown` outcomes with the original idempotency key. Provider execution adapters resolve provider resources, call external APIs, and translate results; verified provider webhook application then advances the generic payment, operation, saga, ledger, and merchant-webhook state transactionally.
+Pay-in and payout services manage quotes, provider execution, and safe recovery from uncertain outcomes. Provider adapters translate external API responses and webhooks into consistent payment, ledger, and merchant-notification updates.
 
 ### Kafka topics
 
@@ -62,8 +62,8 @@ All application topic names are defined in `eventbus/topics.go`. Domain packages
 
 | Topic | Constant | Producers | Consumers | Purpose |
 | --- | --- | --- | --- | --- |
-| `payout-events` | `eventbus.PayoutEventsTopic` | Payment storage, payout workers, provider webhooks, and mock settlement control | Payout saga coordinator and tenant-webhook dispatcher | Payout lifecycle facts |
-| `payin-events` | `eventbus.PayinEventsTopic` | Pay-in storage, pay-in workers, and provider webhooks | Pay-in saga coordinator | Pay-in lifecycle facts |
+| `payout-events` | `eventbus.PayoutEventsTopic` | Payment storage, payout workers, and provider webhooks | Payout saga coordinator and tenant-webhook dispatcher | Payout lifecycle facts |
+| `payin-events` | `eventbus.PayinEventsTopic` | Pay-in storage, pay-in workers, and provider webhooks | Pay-in saga coordinator and tenant-webhook dispatcher | Pay-in lifecycle facts |
 | `settlement-commands` | `eventbus.SettlementCommandsTopic` | Pay-in and payout saga coordinators | Policy, ledger, and provider command workers | Durable workflow commands for both settlement directions |
 | `stablerail-dead-letter` | `eventbus.DeadLetterTopic` | Outbox relay | Operator inspection and redrive tooling | Events that exhausted outbox publication retries or exceeded the retry age |
 

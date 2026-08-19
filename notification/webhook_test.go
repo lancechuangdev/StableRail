@@ -59,6 +59,30 @@ func TestEventHandlerCreatesReturnDelivery(t *testing.T) {
 	}
 }
 
+func TestEventHandlerCreatesPayinDelivery(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	mock.ExpectBegin()
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, time.August, 19, 12, 0, 0, 0, time.UTC)
+	event := eventbus.Event{ID: "evt_payin_received", Type: "payin.received", Version: 1, AggregateID: "pay_1", AggregateType: "payment", Payload: []byte(`{"payin_id":"pin_1"}`), OccurredAt: now}
+	mock.ExpectQuery("SELECT tenant_id FROM payments").WithArgs("pay_1").WillReturnRows(sqlmock.NewRows([]string{"tenant_id"}).AddRow("cus_1"))
+	mock.ExpectExec("INSERT INTO webhook_deliveries").WithArgs("evt_payin_received", "pay_1", "payin.received", sqlmock.AnyArg(), now, "cus_1").WillReturnResult(sqlmock.NewResult(0, 1))
+
+	if err := EventHandler()(context.Background(), tx, event); err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestEventHandlerIgnoresProviderCompletionUntilPaymentSettles(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {

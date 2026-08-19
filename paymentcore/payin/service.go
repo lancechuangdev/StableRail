@@ -222,7 +222,7 @@ func (s *Service) ExecutePayin(ctx context.Context, payinID string) (ExecuteResu
 	return result, nil
 }
 
-// ApplyResult records a provider result and its accounting/merchant effects in
+// ApplyResult records a provider result and its accounting effects in
 // the inbox transaction that consumed the execution command.
 func (s *Service) ApplyResult(ctx context.Context, tx *sql.Tx, payinID, correlationID string, result ExecuteResult, now time.Time) error {
 	payload, instructions := result.Payload, result.Instructions
@@ -232,9 +232,9 @@ func (s *Service) ApplyResult(ctx context.Context, tx *sql.Tx, payinID, correlat
 	if len(instructions) == 0 {
 		instructions = json.RawMessage(`{}`)
 	}
-	var tenantID, paymentID string
+	var paymentID string
 	var currentFunds paymentcore.FundsStatus
-	if err := tx.QueryRowContext(ctx, `SELECT p.tenant_id,p.payment_id,pm.funds_status FROM payins p JOIN payments pm ON pm.id=p.payment_id WHERE p.id=$1 FOR UPDATE OF p,pm`, payinID).Scan(&tenantID, &paymentID, &currentFunds); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT p.payment_id,pm.funds_status FROM payins p JOIN payments pm ON pm.id=p.payment_id WHERE p.id=$1 FOR UPDATE OF p,pm`, payinID).Scan(&paymentID, &currentFunds); err != nil {
 		return err
 	}
 	lifecycleStatus := result.Status
@@ -262,18 +262,15 @@ func (s *Service) ApplyResult(ctx context.Context, tx *sql.Tx, payinID, correlat
 		return err
 	}
 	body, _ := json.Marshal(map[string]any{"id": eventID, "type": eventType, "payin_id": payinID, "correlation_id": correlationID, "reason": result.FailureReason, "occurred_at": now, "data": map[string]any{"status": result.Status}})
-	if _, err := tx.ExecContext(ctx, `INSERT INTO webhook_deliveries(id,endpoint_id,event_id,payment_id,event_type,payload,next_attempt_at,created_at) SELECT 'whd_'||md5(id||$1),id,$1,$2,$3,$4,$5,$5 FROM webhook_endpoints WHERE tenant_id=$6 AND active ON CONFLICT(endpoint_id,event_id) DO NOTHING`, eventID, paymentID, eventType, body, now, tenantID); err != nil {
-		return err
-	}
 	version := map[PayinStatus]int{StatusProcessing: eventbus.PayinProcessingVersion, StatusOnHold: eventbus.PayinOnHoldVersion, StatusReceived: eventbus.PayinReceivedVersion, StatusFailed: eventbus.PayinFailedVersion, StatusRefunded: eventbus.PayinRefundedVersion}[lifecycleStatus]
 	_, err := tx.ExecContext(ctx, `INSERT INTO outbox_events(id,topic,event_type,event_version,aggregate_id,aggregate_type,payload,occurred_at) VALUES($1,$2,$3,$4,$5,'payment',$6,$7) ON CONFLICT(id) DO NOTHING`, eventID, eventbus.PayinEventsTopic, eventType, version, paymentID, body, now)
 	return err
 }
 
 func (s *Service) RecordLedger(ctx context.Context, tx *sql.Tx, payinID, correlationID string, now time.Time) error {
-	var tenantID, paymentID, status, currency string
+	var paymentID, status, currency string
 	var amount int64
-	if err := tx.QueryRowContext(ctx, `SELECT tenant_id,payment_id,status,destination_amount_minor,destination_currency FROM payins WHERE id=$1 FOR UPDATE`, payinID).Scan(&tenantID, &paymentID, &status, &amount, &currency); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT payment_id,status,destination_amount_minor,destination_currency FROM payins WHERE id=$1 FOR UPDATE`, payinID).Scan(&paymentID, &status, &amount, &currency); err != nil {
 		return err
 	}
 	if status == "succeeded" {
@@ -306,9 +303,6 @@ func (s *Service) RecordLedger(ctx context.Context, tx *sql.Tx, payinID, correla
 	}
 	eventID, eventType := "evt_"+payinID+"_succeeded", "payin.succeeded"
 	body, _ := json.Marshal(map[string]any{"id": eventID, "type": eventType, "payin_id": payinID, "correlation_id": correlationID, "occurred_at": now, "data": map[string]string{"status": "succeeded"}})
-	if _, err := tx.ExecContext(ctx, `INSERT INTO webhook_deliveries(id,endpoint_id,event_id,payment_id,event_type,payload,next_attempt_at,created_at) SELECT 'whd_'||md5(id||$1),id,$1,$2,$3,$4,$5,$5 FROM webhook_endpoints WHERE tenant_id=$6 AND active ON CONFLICT(endpoint_id,event_id) DO NOTHING`, eventID, paymentID, eventType, body, now, tenantID); err != nil {
-		return err
-	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO outbox_events(id,topic,event_type,event_version,aggregate_id,aggregate_type,payload,occurred_at) VALUES($1,$2,$3,$4,$5,'payment',$6,$7) ON CONFLICT(id) DO NOTHING`, eventID, eventbus.PayinEventsTopic, eventType, eventbus.PayinSucceededVersion, paymentID, body, now)
 	return err
 }

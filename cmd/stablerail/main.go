@@ -87,20 +87,20 @@ func run() error {
 		return err
 	}
 
-	sagaLoop := &consumer.Loop{
-		Reader:    consumer.NewKafkaReader(config.KafkaBrokers, string(eventbus.PayoutEventsTopic), "stablerail-saga"),
+	payoutSagaLoop := &consumer.Loop{
+		Reader:    consumer.NewKafkaReader(config.KafkaBrokers, string(eventbus.PayoutEventsTopic), "stablerail-payout-saga"),
 		Processor: inbox.BoundProcessor{Processor: inboxProcessor, Handler: workers.PayoutSagaHandler(payoutCoordinator)},
-		Consumer:  "payment-saga",
+		Consumer:  "payout-saga",
 	}
 
 	webhookDispatcher, err := notification.NewDispatcher(db, nil, notification.Config{})
 	if err != nil {
 		return err
 	}
-	webhookLoop := &consumer.Loop{
-		Reader:    consumer.NewKafkaReader(config.KafkaBrokers, string(eventbus.PayoutEventsTopic), "stablerail-webhooks"),
+	payoutWebhookLoop := &consumer.Loop{
+		Reader:    consumer.NewKafkaReader(config.KafkaBrokers, string(eventbus.PayoutEventsTopic), "stablerail-payout-webhooks"),
 		Processor: inbox.BoundProcessor{Processor: inboxProcessor, Handler: notification.EventHandler()},
-		Consumer:  "payment-webhooks",
+		Consumer:  "payout-webhooks",
 	}
 	reconciler, err := reconciliation.New(db, reconciliation.Config{Interval: config.ReconciliationInterval}, logger)
 	if err != nil {
@@ -210,6 +210,11 @@ func run() error {
 		Processor: inbox.BoundProcessor{Processor: inboxProcessor, Handler: workers.PayinSagaHandler(payinCoordinator)},
 		Consumer:  "payin-saga",
 	}
+	payinWebhookLoop := &consumer.Loop{
+		Reader:    consumer.NewKafkaReader(config.KafkaBrokers, string(eventbus.PayinEventsTopic), "stablerail-payin-webhooks"),
+		Processor: inbox.BoundProcessor{Processor: inboxProcessor, Handler: notification.EventHandler()},
+		Consumer:  "payin-webhooks",
+	}
 	commandLoop := &consumer.Loop{
 		Reader:    consumer.NewKafkaReader(config.KafkaBrokers, string(eventbus.SettlementCommandsTopic), "stablerail-core-workers"),
 		Processor: inbox.BoundProcessor{Processor: inboxProcessor, Handler: workers.NewCommandHandler(policy.DeterministicEvaluator{RejectAmountMinor: config.MockPolicyRejectAmount}, ledger.NewPostgresService(), payoutCreator, payins).Handle},
@@ -279,10 +284,11 @@ func run() error {
 		relay.Run,
 		workers.TimeoutWorker(payoutCoordinator, config.SagaPollInterval),
 		workers.TimeoutWorker(payinCoordinator, config.SagaPollInterval),
-		sagaLoop.Run,
+		payoutSagaLoop.Run,
 		payinSagaLoop.Run,
 		commandLoop.Run,
-		webhookLoop.Run,
+		payoutWebhookLoop.Run,
+		payinWebhookLoop.Run,
 		webhookDispatcher.Run,
 		reconciler.Run,
 		webhookReconciler,
