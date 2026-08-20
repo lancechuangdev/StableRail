@@ -24,7 +24,7 @@ func (storageTestProvider) ExecutePayout(context.Context, ExecuteRequest) (Execu
 }
 
 func TestCreatePaymentRequestSupportsQuotedAndDirectModes(t *testing.T) {
-	base := CreatePaymentRequest{TenantID: "tenant-1", IdempotencyKey: "idem-1", ExternalReference: "order-1", Currency: "USD", AmountMinor: 100}
+	base := CreatePaymentRequest{TenantID: "tenant-1", IdempotencyKey: "idem-1", ExternalReference: "order-1", Currency: "USD", AmountMinor: 100, FundingMethod: "bank"}
 	tests := []struct {
 		name    string
 		request CreatePaymentRequest
@@ -87,7 +87,7 @@ func TestCreateDirectPaymentCreatesImplicitProviderResourceQuote(t *testing.T) {
 	mock.ExpectExec("INSERT INTO outbox_events").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 
-	payment, err := service.CreatePayment(context.Background(), CreatePaymentRequest{ExternalReference: "order-1", Currency: "USD", AmountMinor: 2500, TenantID: "tenant-1", IdempotencyKey: "idem-1", SourceAccountID: "account-1", DestinationInstrumentID: "instrument-1"})
+	payment, err := service.CreatePayment(context.Background(), CreatePaymentRequest{ExternalReference: "order-1", Currency: "USD", AmountMinor: 2500, TenantID: "tenant-1", IdempotencyKey: "idem-1", FundingMethod: "bank", SourceAccountID: "account-1", DestinationInstrumentID: "instrument-1"})
 	if err != nil {
 		t.Fatal(err)
 	}

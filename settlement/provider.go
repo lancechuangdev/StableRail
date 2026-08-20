@@ -78,13 +78,9 @@ func (p *MockProvider) CreatePayinQuote(_ context.Context, r payin.QuoteRequest)
 }
 
 func (p *MockProvider) ExecutePayin(_ context.Context, r payin.ExecuteRequest) (payin.ExecuteResult, error) {
-	if r.IdempotencyKey == "" || (r.QuoteID == "" && (r.SourceAmountMinor <= 0 || r.SourceCurrency == "" || r.FundingMethod == "" || r.DestinationAccountID == "")) {
-		return payin.ExecuteResult{}, errors.New("payin idempotency key and quoted or direct payment terms are required")
+	if err := r.Validate(); err != nil {
+		return payin.ExecuteResult{}, err
 	}
-	reference := r.QuoteID
-	if reference == "" {
-		reference = r.IdempotencyKey
-	}
-	instructions, _ := json.Marshal(map[string]string{"reference": "MOCK-" + reference})
-	return payin.ExecuteResult{ProviderReference: "pi_" + r.IdempotencyKey, Status: paymentcore.ExecutionSucceeded, Instructions: instructions, Payload: instructions}, nil
+	instructions, _ := json.Marshal(map[string]string{"reference": "MOCK-" + r.ProviderQuoteID})
+	return payin.ExecuteResult{ExecutionResult: paymentcore.ExecutionResult{ProviderReference: "pi_" + r.IdempotencyKey, Status: paymentcore.ExecutionSucceeded, Payload: instructions}, Instructions: instructions}, nil
 }

@@ -47,7 +47,7 @@ type recordingPayinService struct {
 
 func (s *recordingPayinService) ExecutePayin(_ context.Context, id string) (payin.ExecuteResult, error) {
 	s.executedID = id
-	return payin.ExecuteResult{ProviderReference: "pi_1", Status: paymentcore.ExecutionPending}, nil
+	return payin.ExecuteResult{ExecutionResult: paymentcore.ExecutionResult{ProviderReference: "pi_1", Status: paymentcore.ExecutionPending}}, nil
 }
 func (s *recordingPayinService) ApplyResult(_ context.Context, _ *sql.Tx, id, correlation string, _ payin.ExecuteResult, _ time.Time) error {
 	s.appliedID, s.correlation = id, correlation

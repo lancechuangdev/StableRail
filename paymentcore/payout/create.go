@@ -42,6 +42,7 @@ type CreatePaymentRequest struct {
 	TenantID                string
 	IdempotencyKey          string
 	QuoteID                 string
+	FundingMethod           string
 	SourceAccountID         string
 	DestinationInstrumentID string
 }
@@ -60,8 +61,8 @@ func (r CreatePaymentRequest) Validate() error {
 		}
 		return nil
 	}
-	if strings.TrimSpace(r.SourceAccountID) == "" || strings.TrimSpace(r.DestinationInstrumentID) == "" {
-		return errors.New("direct payout requires source_account_id and destination_instrument_id")
+	if strings.TrimSpace(r.FundingMethod) == "" || strings.TrimSpace(r.SourceAccountID) == "" || strings.TrimSpace(r.DestinationInstrumentID) == "" {
+		return errors.New("direct payout requires funding_method, source_account_id, and destination_instrument_id")
 	}
 	return nil
 }
@@ -80,14 +81,10 @@ func (s *Service) createPayout(ctx context.Context, request CreatePaymentRequest
 	tenantID, idempotencyKey, payoutQuoteID := request.TenantID, request.IdempotencyKey, request.QuoteID
 	if payoutQuoteID == "" {
 		quote, err := s.CreateQuote(ctx, QuoteRequest{
-			IdempotencyKey:          idempotencyKey + ":implicit-quote",
-			TenantID:                tenantID,
+			QuoteRequest:            paymentcore.QuoteRequest{IdempotencyKey: idempotencyKey + ":implicit-quote", TenantID: tenantID, SourceCurrency: currency, DestinationCurrency: currency, CurrencyType: "sender", AmountMinor: amountMinor},
+			FundingMethod:           request.FundingMethod,
 			SourceAccountID:         request.SourceAccountID,
 			DestinationInstrumentID: request.DestinationInstrumentID,
-			SourceCurrency:          currency,
-			DestinationCurrency:     currency,
-			CurrencyType:            "sender",
-			AmountMinor:             amountMinor,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("create implicit payout quote: %w", err)

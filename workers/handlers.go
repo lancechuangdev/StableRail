@@ -86,7 +86,7 @@ func (h *CommandHandler) Handle(ctx context.Context, tx *sql.Tx, event eventbus.
 			return fmt.Errorf("evaluate payin policy: %w", err)
 		}
 		if !decision.Approved {
-			return h.payinService.ApplyResult(ctx, tx, payload.PayinID, payload.CorrelationID, payin.ExecuteResult{Status: paymentcore.ExecutionFailed, FailureMessage: decision.Reason}, h.now())
+			return h.payinService.ApplyResult(ctx, tx, payload.PayinID, payload.CorrelationID, payin.ExecuteResult{ExecutionResult: paymentcore.ExecutionResult{Status: paymentcore.ExecutionFailed, FailureMessage: decision.Reason}}, h.now())
 		}
 		return h.enqueuePayinReply(ctx, tx, event, payload.PayinID, payload.CorrelationID, "payin.policy.approved", "")
 	case "payin.execute":
@@ -97,7 +97,7 @@ func (h *CommandHandler) Handle(ctx context.Context, tx *sql.Tx, event eventbus.
 		if err != nil {
 			var providerErr *payin.ProviderError
 			if errors.As(err, &providerErr) && !providerErr.Retryable {
-				return h.payinService.ApplyResult(ctx, tx, payload.PayinID, payload.CorrelationID, payin.ExecuteResult{Status: paymentcore.ExecutionFailed, FailureCode: providerErr.Code, FailureMessage: providerErr.Message}, h.now())
+				return h.payinService.ApplyResult(ctx, tx, payload.PayinID, payload.CorrelationID, payin.ExecuteResult{ExecutionResult: paymentcore.ExecutionResult{Status: paymentcore.ExecutionFailed, FailureCode: providerErr.Code, FailureMessage: providerErr.Message}}, h.now())
 			}
 			return fmt.Errorf("execute payin: %w", err)
 		}
@@ -111,7 +111,7 @@ func (h *CommandHandler) Handle(ctx context.Context, tx *sql.Tx, event eventbus.
 		if payload.PayinID == "" {
 			return consumer.Permanent(errors.New("payin ID is required"))
 		}
-		return h.payinService.ApplyResult(ctx, tx, payload.PayinID, payload.CorrelationID, payin.ExecuteResult{Status: paymentcore.ExecutionFailed, FailureMessage: payload.Reason}, h.now())
+		return h.payinService.ApplyResult(ctx, tx, payload.PayinID, payload.CorrelationID, payin.ExecuteResult{ExecutionResult: paymentcore.ExecutionResult{Status: paymentcore.ExecutionFailed, FailureMessage: payload.Reason}}, h.now())
 	case "policy.evaluate":
 		amount, currency, err := loadPaymentAmount(ctx, tx, payload.PaymentID)
 		if err != nil {

@@ -13,6 +13,7 @@ type PayoutQuoteRequest struct {
 	IdempotencyKey                           string
 	TenantID, BankAccountID, ManagedWalletID string
 	SourceAccountID, DestinationInstrumentID string
+	FundingMethod                            string
 	DestinationCurrency                      string
 	CurrencyType                             string
 	CoverFees                                bool

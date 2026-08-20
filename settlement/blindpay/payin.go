@@ -42,15 +42,10 @@ func (p *Provider) CreatePayinQuote(ctx context.Context, r corepayin.QuoteReques
 	return corepayin.ProviderQuote{ProviderQuoteID: q.ID, SourceCurrency: source, DestinationCurrency: strings.ToUpper(r.DestinationCurrency), SenderAmountMinor: q.SenderAmount, ReceiverAmountMinor: q.ReceiverAmount, ExpiresAt: time.UnixMilli(q.ExpiresAt).UTC(), Payload: q.RawPayload}, nil
 }
 func (p *Provider) ExecutePayin(ctx context.Context, r corepayin.ExecuteRequest) (corepayin.ExecuteResult, error) {
-	providerQuoteID := r.QuoteID
-	if providerQuoteID == "" {
-		q, err := p.CreatePayinQuote(ctx, corepayin.QuoteRequest{IdempotencyKey: r.IdempotencyKey + ":quote", TenantID: r.TenantID, FundingMethod: r.FundingMethod, CurrencyType: "sender", SourceInstrumentID: r.SourceInstrumentID, DestinationAccountID: r.DestinationAccountID, SourceCurrency: r.SourceCurrency, DestinationCurrency: r.DestinationCurrency, AmountMinor: r.SourceAmountMinor})
-		if err != nil {
-			return corepayin.ExecuteResult{}, err
-		}
-		providerQuoteID = q.ProviderQuoteID
+	if err := r.Validate(); err != nil {
+		return corepayin.ExecuteResult{}, err
 	}
-	v, err := p.client.CreatePayin(ctx, PayinRequest{IdempotencyKey: r.IdempotencyKey, PayinQuoteID: providerQuoteID})
+	v, err := p.client.CreatePayin(ctx, PayinRequest{IdempotencyKey: r.IdempotencyKey, PayinQuoteID: r.ProviderQuoteID})
 	if err != nil {
 		var apiErr *APIError
 		if errors.As(err, &apiErr) {
@@ -59,9 +54,9 @@ func (p *Provider) ExecutePayin(ctx context.Context, r corepayin.ExecuteRequest)
 		return corepayin.ExecuteResult{}, &corepayin.ProviderError{Message: err.Error(), Retryable: true}
 	}
 	status := mapPayinStatus(v.Status)
-	result := corepayin.ExecuteResult{ProviderReference: v.ID, Status: status, Instructions: v.Instructions, Payload: v.RawPayload}
-	if v.Status == "refunded" {
-		result.FailureCode = "refunded"
+	result := corepayin.ExecuteResult{ExecutionResult: paymentcore.ExecutionResult{ProviderReference: v.ID, Status: status, Payload: v.RawPayload}, Instructions: v.Instructions}
+	if status == paymentcore.ExecutionFailed {
+		result.FailureCode = v.Status
 	}
 	return result, nil
 }

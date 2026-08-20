@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+
+	"stablerail/paymentcore"
 )
 
 // ExecutePayin is called by the Kafka command worker. The durable pay-in row
@@ -34,7 +36,7 @@ func (s *Service) ExecutePayin(ctx context.Context, payinID string) (ExecuteResu
 		if err := tx.Commit(); err != nil {
 			return ExecuteResult{}, err
 		}
-		return ExecuteResult{ProviderReference: providerID.String, Status: executionStatusFromPayin(PayinStatus(status)), Instructions: instructions, Payload: payload}, nil
+		return ExecuteResult{ExecutionResult: paymentcore.ExecutionResult{ProviderReference: providerID.String, Status: executionStatusFromPayin(PayinStatus(status)), Payload: payload}, Instructions: instructions}, nil
 	}
 	if status != "created" && status != "submission_pending" && status != "unknown" {
 		return ExecuteResult{}, fmt.Errorf("payin cannot execute from status %s", status)
@@ -45,7 +47,7 @@ func (s *Service) ExecutePayin(ctx context.Context, payinID string) (ExecuteResu
 	if err := tx.Commit(); err != nil {
 		return ExecuteResult{}, err
 	}
-	request := ExecuteRequest{IdempotencyKey: key, QuoteID: providerQuote, TenantID: tenantID, FundingMethod: fundingMethod, SourceInstrumentID: sourceInstrumentID, DestinationAccountID: destinationAccountID, SourceAmountMinor: sourceAmountMinor, SourceCurrency: sourceCurrency, DestinationAmountMinor: destinationAmountMinor, DestinationCurrency: destinationCurrency}
+	request := ExecuteRequest{IdempotencyKey: key, ProviderQuoteID: providerQuote}
 	if err := request.Validate(); err != nil {
 		return ExecuteResult{}, err
 	}

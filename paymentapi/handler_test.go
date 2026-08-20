@@ -117,7 +117,7 @@ func (f *fakePayoutQuoteService) CreateQuote(_ context.Context, request payout.Q
 func TestCreatePayment(t *testing.T) {
 	store := &fakeStore{payment: &paymentcore.Payment{ID: "pay_1", PaymentStatus: paymentcore.PaymentStatusCreated}}
 	h, _ := NewHandler(store, store, nil, fakeHealth{})
-	req := httptest.NewRequest(http.MethodPost, "/v1/payments", strings.NewReader(`{"direction":"payout","external_reference":"order-1","source_account_id":"account-1","destination_instrument_id":"instrument-1","currency":"usd","amount_minor":1250,"tenant_id":"cus-1"}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/payments", strings.NewReader(`{"direction":"payout","external_reference":"order-1","funding_method":"bank","source_account_id":"account-1","destination_instrument_id":"instrument-1","currency":"usd","amount_minor":1250,"tenant_id":"cus-1"}`))
 	req.Header.Set("Idempotency-Key", "request-1")
 	res := httptest.NewRecorder()
 	h.ServeHTTP(res, req)
@@ -172,7 +172,7 @@ func TestCreateBlindPayPayoutQuote(t *testing.T) {
 	quotes := &fakePayoutQuoteService{}
 	payouts := &fakePayoutService{fakeStore: &fakeStore{}, quotes: quotes}
 	h, _ := NewHandler(payouts, payouts, nil, fakeHealth{})
-	req := httptest.NewRequest(http.MethodPost, "/v1/payment-quotes", strings.NewReader(`{"direction":"payout","tenant_id":"tenant-1","source_account_id":"acct_test","destination_instrument_id":"instrument_test","source_currency":"USDC","destination_currency":"BRL","currency_type":"sender","cover_fees":true,"request_amount_minor":2500}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/payment-quotes", strings.NewReader(`{"direction":"payout","funding_method":"bank","tenant_id":"tenant-1","source_account_id":"acct_test","destination_instrument_id":"instrument_test","source_currency":"USDC","destination_currency":"BRL","currency_type":"sender","cover_fees":true,"request_amount_minor":2500}`))
 	req.Header.Set("Idempotency-Key", "quote-request-1")
 	res := httptest.NewRecorder()
 	h.ServeHTTP(res, req)

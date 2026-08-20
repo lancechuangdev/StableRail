@@ -195,6 +195,7 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 			QuoteID:                 input.QuoteID,
 			AmountMinor:             input.AmountMinor,
 			Currency:                input.Currency,
+			FundingMethod:           strings.TrimSpace(input.FundingMethod),
 			SourceAccountID:         strings.TrimSpace(input.SourceAccountID),
 			DestinationInstrumentID: strings.TrimSpace(input.DestinationInstrumentID),
 		}
@@ -279,7 +280,7 @@ func (h *Handler) createPayinQuote(w http.ResponseWriter, r *http.Request) {
 	if decodePayin(w, r, &in) != nil {
 		return
 	}
-	q, err := h.payins.CreateQuote(r.Context(), payin.QuoteRequest{IdempotencyKey: key, TenantID: tenant, FundingMethod: in.FundingMethod, CurrencyType: in.CurrencyType, SourceInstrumentID: in.SourceInstrumentID, DestinationAccountID: in.DestinationAccountID, SourceCurrency: in.SourceCurrency, DestinationCurrency: in.DestinationCurrency, AmountMinor: in.AmountMinor, CoverFees: in.CoverFees})
+	q, err := h.payins.CreateQuote(r.Context(), payin.QuoteRequest{QuoteRequest: paymentcore.QuoteRequest{IdempotencyKey: key, TenantID: tenant, CurrencyType: in.CurrencyType, SourceCurrency: in.SourceCurrency, DestinationCurrency: in.DestinationCurrency, AmountMinor: in.AmountMinor, CoverFees: in.CoverFees}, FundingMethod: in.FundingMethod, SourceInstrumentID: in.SourceInstrumentID, DestinationAccountID: in.DestinationAccountID})
 	if err != nil {
 		problem(w, http.StatusBadRequest, err.Error())
 		return
@@ -328,7 +329,7 @@ func (h *Handler) createPayoutQuote(w http.ResponseWriter, r *http.Request) {
 		}
 		tenantID = authenticated
 	}
-	q, err := h.payouts.CreateQuote(r.Context(), payout.QuoteRequest{IdempotencyKey: key, TenantID: tenantID, SourceAccountID: input.SourceAccountID, DestinationInstrumentID: input.DestinationInstrumentID, SourceCurrency: input.SourceCurrency, DestinationCurrency: input.DestinationCurrency, CurrencyType: input.CurrencyType, CoverFees: input.CoverFees, AmountMinor: input.AmountMinor})
+	q, err := h.payouts.CreateQuote(r.Context(), payout.QuoteRequest{QuoteRequest: paymentcore.QuoteRequest{IdempotencyKey: key, TenantID: tenantID, SourceCurrency: input.SourceCurrency, DestinationCurrency: input.DestinationCurrency, CurrencyType: input.CurrencyType, CoverFees: input.CoverFees, AmountMinor: input.AmountMinor}, FundingMethod: strings.TrimSpace(input.FundingMethod), SourceAccountID: input.SourceAccountID, DestinationInstrumentID: input.DestinationInstrumentID})
 	if err != nil {
 		problem(w, http.StatusBadRequest, err.Error())
 		return

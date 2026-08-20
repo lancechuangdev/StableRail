@@ -181,9 +181,9 @@ func TestServiceCreatesAndPersistsPayoutQuote(t *testing.T) {
 	service, _ := NewService(db, provider, provider)
 	service.now = func() time.Time { return now }
 	service.newID = func(string) (string, error) { return "pqi_test", nil }
-	request := QuoteRequest{IdempotencyKey: "idem_quote", TenantID: "tenant_test", SourceAccountID: "account_test", DestinationInstrumentID: "instrument_test", SourceCurrency: "USDB", DestinationCurrency: "USD", CurrencyType: "sender", AmountMinor: 100}
+	request := QuoteRequest{QuoteRequest: paymentcore.QuoteRequest{IdempotencyKey: "idem_quote", TenantID: "tenant_test", SourceCurrency: "USDB", DestinationCurrency: "USD", CurrencyType: "sender", AmountMinor: 100}, FundingMethod: "bank", SourceAccountID: "account_test", DestinationInstrumentID: "instrument_test"}
 	mock.ExpectQuery("SELECT id,provider,provider_quote_id").WithArgs("tenant_test", "idem_quote").WillReturnError(sql.ErrNoRows)
-	mock.ExpectExec("INSERT INTO payment_quotes").WithArgs("pqi_test", "blindpay", "qu_provider", "tenant_test", "idem_quote", "account_test", "instrument_test", "USDB", "USD", "sender", false, int64(100), int64(100), int64(95), "0.95", "0.96", int64(1), int64(0), nil, expires, []byte(`{"id":"qu_provider"}`), now).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO payment_quotes").WithArgs("pqi_test", "blindpay", "qu_provider", "tenant_test", "idem_quote", "account_test", "instrument_test", "bank", "USDB", "USD", "sender", false, int64(100), int64(100), int64(95), "0.95", "0.96", int64(1), int64(0), nil, expires, []byte(`{"id":"qu_provider"}`), now).WillReturnResult(sqlmock.NewResult(0, 1))
 
 	quote, err := service.CreateQuote(context.Background(), request)
 	if err != nil {

@@ -44,6 +44,7 @@ func (p *Provider) CreatePayoutQuote(ctx context.Context, request payout.QuoteRe
 		IdempotencyKey: request.IdempotencyKey, TenantID: request.TenantID,
 		BankAccountID: destination.ProviderReference, ManagedWalletID: source.ProviderReference,
 		SourceAccountID: request.SourceAccountID, DestinationInstrumentID: request.DestinationInstrumentID,
+		FundingMethod:       request.FundingMethod,
 		DestinationCurrency: request.DestinationCurrency, CurrencyType: request.CurrencyType,
 		CoverFees: request.CoverFees, AmountMinor: request.AmountMinor,
 	})
