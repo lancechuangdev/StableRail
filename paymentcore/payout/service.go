@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"stablerail/paymentcore"
 )
 
 var ErrSubmissionUnknown = errors.New("payout submission outcome is unknown")
@@ -35,8 +37,6 @@ func NewService(db *sql.DB, provider Provider) (*Service, error) {
 	}}, nil
 }
 
-func (s *Service) Name() string { return s.provider.Name() }
-
 type attempt struct {
 	request           Request
 	providerReference string
@@ -44,8 +44,32 @@ type attempt struct {
 	new               bool
 }
 
-// ExecutePayout durably records and submits the provider payout operation.
-func (s *Service) ExecutePayout(ctx context.Context, request Request) (Result, error) {
+// ExecutePayout loads the persisted payment route and durably submits it to the provider.
+func (s *Service) ExecutePayout(ctx context.Context, paymentID, idempotencyKey string) (Result, error) {
+	request, err := s.loadExecutionRequest(ctx, paymentID, idempotencyKey)
+	if err != nil {
+		return Result{}, err
+	}
+	return s.executePayout(ctx, request)
+}
+
+func (s *Service) loadExecutionRequest(ctx context.Context, paymentID, idempotencyKey string) (Request, error) {
+	request := Request{PaymentID: paymentID, IdempotencyKey: idempotencyKey}
+	var destinationType, chain, address string
+	err := s.db.QueryRowContext(ctx, `SELECT p.amount_minor,p.currency,COALESCE(d.kind,''),COALESCE(d.chain,''),COALESCE(d.address,'') FROM payments p LEFT JOIN payment_destinations d ON d.payment_id=p.id WHERE p.id=$1 AND p.direction='payout'`, paymentID).Scan(&request.AmountMinor, &request.Currency, &destinationType, &chain, &address)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Request{}, fmt.Errorf("payout payment %s not found", paymentID)
+	}
+	if err != nil {
+		return Request{}, fmt.Errorf("load payout execution request: %w", err)
+	}
+	if destinationType != "" {
+		request.Destination = &Destination{Type: destinationType, Chain: chain, Address: address}
+	}
+	return request, nil
+}
+
+func (s *Service) executePayout(ctx context.Context, request Request) (Result, error) {
 	if err := request.Validate(); err != nil {
 		return Result{}, err
 	}
@@ -96,6 +120,71 @@ func (s *Service) ExecutePayout(ctx context.Context, request Request) (Result, e
 		return Result{}, err
 	}
 	return result, nil
+}
+
+// ApplyResult persists a normalized provider outcome, applies its immediate
+// payment effects, and publishes the next saga event in the inbox transaction.
+func (s *Service) ApplyResult(ctx context.Context, tx *sql.Tx, paymentID, commandEventID, correlationID string, result Result, now time.Time) error {
+	if tx == nil {
+		return errors.New("payout result transaction is required")
+	}
+	if paymentID == "" || commandEventID == "" || correlationID == "" {
+		return errors.New("payout payment, command event, and correlation IDs are required")
+	}
+	_, err := tx.ExecContext(ctx, `INSERT INTO settlement_submissions
+		(payment_id,command_event_id,provider,provider_reference,status,failure_code,failure_message,created_at,updated_at)
+		VALUES($1,$2,$3,NULLIF($4,''),$5,NULLIF($6,''),NULLIF($7,''),$8,$8)
+		ON CONFLICT(command_event_id) DO UPDATE SET status=EXCLUDED.status,failure_code=EXCLUDED.failure_code,failure_message=EXCLUDED.failure_message,updated_at=EXCLUDED.updated_at`, paymentID, commandEventID, s.provider.Name(), result.ProviderReference, result.Status, result.FailureCode, result.FailureMessage, now)
+	if err != nil {
+		return fmt.Errorf("persist payout submission: %w", err)
+	}
+	if result.Status == StatusPending {
+		return nil
+	}
+	eventType, reason := "", result.FailureMessage
+	switch result.Status {
+	case StatusOnHold:
+		eventType = "payout.on_hold"
+	case StatusFailed:
+		if reason == "" {
+			reason = result.FailureCode
+		}
+		if result.FailureCode == "refunded" {
+			eventType = "payout.provider_returned"
+		} else {
+			eventType = "payout.provider_failed"
+		}
+	case StatusSucceeded:
+		if err := s.completePayment(ctx, tx, paymentID, now); err != nil {
+			return err
+		}
+		eventType = "payout.provider_completed"
+	default:
+		return fmt.Errorf("unsupported payout result status %q", result.Status)
+	}
+	return enqueueProviderResult(ctx, tx, paymentID, commandEventID, correlationID, eventType, reason, now)
+}
+
+func (s *Service) completePayment(ctx context.Context, tx *sql.Tx, paymentID string, now time.Time) error {
+	var status paymentcore.PaymentStatus
+	var amount int64
+	var currency string
+	if err := tx.QueryRowContext(ctx, `SELECT payment_status,amount_minor,currency FROM payments WHERE id=$1 FOR UPDATE`, paymentID).Scan(&status, &amount, &currency); err != nil {
+		return fmt.Errorf("lock completed payout payment: %w", err)
+	}
+	if status == paymentcore.PaymentStatusSucceeded {
+		return nil
+	}
+	if status != paymentcore.PaymentStatusProcessing {
+		return fmt.Errorf("payment %s cannot complete from %s", paymentID, status)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE payments SET payment_status='succeeded',funds_status='consumed',updated_at=$1 WHERE id=$2`, now, paymentID); err != nil {
+		return fmt.Errorf("complete payout payment: %w", err)
+	}
+	if err := s.insertJournal(ctx, tx, paymentID, "payment.succeeded", paymentcore.SettlementAccount, paymentcore.CashOperatingAccount, amount, currency, now); err != nil {
+		return err
+	}
+	return insertHistory(ctx, tx, paymentID, "succeeded", "payment succeeded", paymentcore.PaymentStatusSucceeded, "payment succeeded", now)
 }
 
 func (s *Service) prepare(ctx context.Context, request Request) (attempt, error) {
@@ -164,7 +253,7 @@ func (s *Service) RecoverUnknownOnce(ctx context.Context) (int, error) {
 		return 0, err
 	}
 	for i, r := range requests {
-		if _, err := s.ExecutePayout(ctx, r); err != nil {
+		if _, err := s.executePayout(ctx, r); err != nil {
 			return i, err
 		}
 	}

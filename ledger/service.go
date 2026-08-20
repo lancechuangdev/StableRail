@@ -4,10 +4,12 @@ package ledger
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
 
+	"stablerail/eventbus"
 	"stablerail/paymentcore"
 )
 
@@ -21,6 +23,11 @@ type ReleaseRequest struct {
 	PaymentID string
 	At        time.Time
 }
+type PayinReceiptRequest struct {
+	PayinID       string
+	CorrelationID string
+	At            time.Time
+}
 type ReturnRequest struct {
 	ID, PaymentID, Provider, ProviderEventID, Reason string
 	At                                               time.Time
@@ -29,6 +36,7 @@ type ReturnRequest struct {
 type LedgerService interface {
 	Reserve(context.Context, *sql.Tx, ReservationRequest) error
 	Release(context.Context, *sql.Tx, ReleaseRequest) error
+	RecordPayin(context.Context, *sql.Tx, PayinReceiptRequest) error
 	RecordReturn(context.Context, *sql.Tx, ReturnRequest) error
 }
 
@@ -46,6 +54,62 @@ func (*PostgresService) Release(ctx context.Context, tx *sql.Tx, request Release
 	return post(ctx, tx, request.PaymentID, paymentcore.PaymentStatusProcessing, paymentcore.PaymentStatusProcessing,
 		"payment.released", "released", paymentcore.SettlementAccount, paymentcore.CashOperatingAccount,
 		"ledger reservation released", "ledger reservation released", request.At, false)
+}
+
+// RecordPayin recognizes provider-confirmed inbound funds and completes the
+// pay-in and its public payment in the caller's inbox transaction.
+func (*PostgresService) RecordPayin(ctx context.Context, tx *sql.Tx, request PayinReceiptRequest) error {
+	if tx == nil {
+		return errors.New("ledger transaction is required")
+	}
+	if request.PayinID == "" || request.CorrelationID == "" {
+		return errors.New("payin ID and correlation ID are required")
+	}
+	var paymentID, status, currency string
+	var amount int64
+	if err := tx.QueryRowContext(ctx, `SELECT payment_id,status,destination_amount_minor,destination_currency FROM payins WHERE id=$1 FOR UPDATE`, request.PayinID).Scan(&paymentID, &status, &amount, &currency); err != nil {
+		return fmt.Errorf("lock received payin: %w", err)
+	}
+	if status == "succeeded" {
+		return nil
+	}
+	if status != "received" {
+		return fmt.Errorf("%w: payin %s cannot record ledger from status %s", ErrInvalidPaymentStatus, request.PayinID, status)
+	}
+	journalID := "jrn_" + request.PayinID + "_succeeded"
+	result, err := tx.ExecContext(ctx, `INSERT INTO ledger_transactions(id,payment_id,event_type,occurred_at) VALUES($1,$2,'payin.succeeded',$3) ON CONFLICT(payment_id,event_type) DO NOTHING`, journalID, paymentID, request.At)
+	if err != nil {
+		return fmt.Errorf("insert payin journal: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("inspect payin journal: %w", err)
+	}
+	if rows == 1 {
+		for _, line := range []struct{ suffix, account, side string }{{"debit", paymentcore.CashOperatingAccount, "debit"}, {"credit", paymentcore.SettlementAccount, "credit"}} {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO ledger_entries(id,transaction_id,account_code,side,amount_minor,currency) VALUES($1,$2,$3,$4,$5,$6)`, journalID+":"+line.suffix, journalID, line.account, line.side, amount, currency); err != nil {
+				return fmt.Errorf("insert payin ledger entry: %w", err)
+			}
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE payins SET status='succeeded',updated_at=$1 WHERE id=$2`, request.At, request.PayinID); err != nil {
+		return fmt.Errorf("complete payin: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE payments SET payment_status='succeeded',funds_status='received',updated_at=$1 WHERE id=$2`, request.At, paymentID); err != nil {
+		return fmt.Errorf("complete payin payment: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO payment_timeline_entries(payment_id,payment_status,note,occurred_at) VALUES($1,'succeeded','payin ledger recorded',$2)`, paymentID, request.At); err != nil {
+		return fmt.Errorf("insert payin timeline: %w", err)
+	}
+	eventID, eventType := "evt_"+request.PayinID+"_succeeded", "payin.succeeded"
+	body, _ := json.Marshal(map[string]any{"id": eventID, "type": eventType, "payin_id": request.PayinID, "correlation_id": request.CorrelationID, "occurred_at": request.At, "data": map[string]string{"status": "succeeded"}})
+	if _, err = tx.ExecContext(ctx, `INSERT INTO outbox_events(id,topic,event_type,event_version,aggregate_id,aggregate_type,payload,occurred_at) VALUES($1,$2,$3,$4,$5,'payin',$6,$7) ON CONFLICT(id) DO NOTHING`, eventID, eventbus.PayinEventsTopic, eventType, eventbus.PayinSucceededVersion, paymentID, body, request.At); err != nil {
+		return fmt.Errorf("enqueue payin succeeded: %w", err)
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO outbox_events(id,topic,event_type,event_version,aggregate_id,aggregate_type,payload,occurred_at) VALUES($1,$2,'payment.succeeded',$3,$4,'payment',$5,$6) ON CONFLICT(id) DO NOTHING`, eventID+"_payment", eventbus.PaymentEventsTopic, eventbus.PaymentSucceededVersion, paymentID, body, request.At); err != nil {
+		return fmt.Errorf("enqueue payment succeeded: %w", err)
+	}
+	return nil
 }
 
 // RecordReturn records funds received back after a payout succeeded without

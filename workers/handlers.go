@@ -31,14 +31,13 @@ type CommandHandler struct {
 }
 
 type payoutCommandService interface {
-	Name() string
-	ExecutePayout(context.Context, payout.Request) (payout.Result, error)
+	ExecutePayout(context.Context, string, string) (payout.Result, error)
+	ApplyResult(context.Context, *sql.Tx, string, string, string, payout.Result, time.Time) error
 }
 
 type payinCommandService interface {
 	ExecutePayin(context.Context, string) (payin.ExecuteResult, error)
 	ApplyResult(context.Context, *sql.Tx, string, string, payin.ExecuteResult, time.Time) error
-	RecordLedger(context.Context, *sql.Tx, string, string, time.Time) error
 }
 
 func NewCommandHandler(evaluator policy.PolicyEvaluator, ledgerService ledger.LedgerService, payouts payoutCommandService, payins payinCommandService) *CommandHandler {
@@ -107,7 +106,7 @@ func (h *CommandHandler) Handle(ctx context.Context, tx *sql.Tx, event eventbus.
 		if payload.PayinID == "" {
 			payload.PayinID = event.AggregateID
 		}
-		return h.payinService.RecordLedger(ctx, tx, payload.PayinID, payload.CorrelationID, h.now())
+		return h.ledgerService.RecordPayin(ctx, tx, ledger.PayinReceiptRequest{PayinID: payload.PayinID, CorrelationID: payload.CorrelationID, At: h.now()})
 	case "payin.fail":
 		if payload.PayinID == "" {
 			return consumer.Permanent(errors.New("payin ID is required"))
@@ -136,55 +135,18 @@ func (h *CommandHandler) Handle(ctx context.Context, tx *sql.Tx, event eventbus.
 		}
 		reply = "payout.funds_reserved"
 	case "settlement.execute":
-		amount, currency, err := loadPaymentAmount(ctx, tx, payload.PaymentID)
-		if err != nil {
-			return err
-		}
-		destination, err := loadDestination(ctx, tx, payload.PaymentID)
-		if err != nil {
-			return err
-		}
-		result, err := h.payoutService.ExecutePayout(ctx, payout.Request{IdempotencyKey: event.ID, PaymentID: payload.PaymentID, AmountMinor: amount, Currency: currency, Destination: destination})
+		result, err := h.payoutService.ExecutePayout(ctx, payload.PaymentID, event.ID)
 		if err != nil {
 			var providerErr *payout.ProviderError
 			if errors.As(err, &providerErr) && !providerErr.Retryable {
 				if providerErr.Code == "submission_failed" {
-					payload.Reason = providerErr.Code
-					return h.enqueueReply(ctx, tx, event, payload, "payout.provider_failed")
+					return h.payoutService.ApplyResult(ctx, tx, payload.PaymentID, event.ID, payload.CorrelationID, payout.Result{Status: payout.StatusFailed, FailureCode: providerErr.Code, FailureMessage: providerErr.Message}, h.now())
 				}
 				return consumer.Permanent(err)
 			}
 			return fmt.Errorf("submit settlement: %w", err)
 		}
-		now := h.now()
-		_, err = tx.ExecContext(ctx, `INSERT INTO settlement_submissions
-			(payment_id,command_event_id,provider,provider_reference,status,failure_code,failure_message,created_at,updated_at)
-			VALUES($1,$2,$3,$4,$5,NULLIF($6,''),NULLIF($7,''),$8,$8)
-			ON CONFLICT(command_event_id) DO UPDATE SET status=EXCLUDED.status,failure_code=EXCLUDED.failure_code,failure_message=EXCLUDED.failure_message,updated_at=EXCLUDED.updated_at`,
-			payload.PaymentID, event.ID, h.payoutService.Name(), result.ProviderReference, result.Status, result.FailureCode, result.FailureMessage, now)
-		if err != nil {
-			return fmt.Errorf("persist settlement submission: %w", err)
-		}
-		if result.Status == payout.StatusPending {
-			return nil
-		}
-		if result.Status == payout.StatusOnHold {
-			return h.enqueueReply(ctx, tx, event, payload, "payout.on_hold")
-		}
-		if result.Status == payout.StatusFailed {
-			payload.Reason = result.FailureMessage
-			if payload.Reason == "" {
-				payload.Reason = result.FailureCode
-			}
-			if result.FailureCode == "refunded" {
-				return h.enqueueReply(ctx, tx, event, payload, "payout.provider_returned")
-			}
-			return h.enqueueReply(ctx, tx, event, payload, "payout.provider_failed")
-		}
-		if err := transitionPayment(ctx, tx, payload.PaymentID, paymentcore.PaymentStatusProcessing, paymentcore.PaymentStatusSucceeded, h.now()); err != nil {
-			return err
-		}
-		reply = "payout.provider_completed"
+		return h.payoutService.ApplyResult(ctx, tx, payload.PaymentID, event.ID, payload.CorrelationID, result, h.now())
 	case "ledger.release":
 		if err := h.ledgerService.Release(ctx, tx, ledger.ReleaseRequest{PaymentID: payload.PaymentID, At: h.now()}); err != nil {
 			if errors.Is(err, ledger.ErrInvalidPaymentStatus) {
@@ -260,18 +222,6 @@ func loadPaymentAmount(ctx context.Context, tx *sql.Tx, paymentID string) (int64
 		return 0, "", fmt.Errorf("load payment: %w", err)
 	}
 	return amount, currency, nil
-}
-
-func loadDestination(ctx context.Context, tx *sql.Tx, paymentID string) (*payout.Destination, error) {
-	var d payout.Destination
-	err := tx.QueryRowContext(ctx, `SELECT kind,COALESCE(chain,''),COALESCE(address,'') FROM payment_destinations WHERE payment_id=$1`, paymentID).Scan(&d.Type, &d.Chain, &d.Address)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("load payment destination: %w", err)
-	}
-	return &d, nil
 }
 
 func transitionPayment(ctx context.Context, tx *sql.Tx, id string, from, to paymentcore.PaymentStatus, now time.Time) error {

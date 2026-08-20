@@ -41,9 +41,9 @@ Every business update and outgoing event commits in one PostgreSQL transaction. 
 | --- | --- |
 | `paymentapi` | HTTP transport, authentication, and tenant/operator endpoints |
 | `paymentcore` | Shared payment, funds, refund, ledger, and destination models, plus direction-neutral payment queries |
-| `paymentcore/payin` | Inbound quote and operation model, saga coordinator, provider-result persistence, ledger completion, and recovery |
+| `paymentcore/payin` | Inbound quote and operation model, saga coordinator, provider-result persistence, and recovery |
 | `paymentcore/payout` | Outbound payment creation, refunds, quotes, saga coordination, provider execution, payout persistence, and recovery |
-| `ledger` | Transactional double-entry reservations, releases, and provider-return journals |
+| `ledger` | Transactional double-entry payout reservations and releases, inbound pay-in receipts, and provider-return journals |
 | `policy` | Payment policy evaluation contracts |
 | `reconciliation` | Comparison of payment, ledger, and provider records plus discrepancy resolution |
 | `eventbus` | Shared event envelopes, topic and version contracts, and Kafka producer/consumer adapters |

@@ -3,6 +3,7 @@ package payout
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -55,4 +56,25 @@ func payoutEventVersion(eventType string) int {
 	default:
 		panic("unknown payout event type: " + eventType)
 	}
+}
+
+func enqueueProviderResult(ctx context.Context, tx *sql.Tx, paymentID, commandEventID, correlationID, eventType, reason string, now time.Time) error {
+	version := map[string]int{
+		"payout.provider_completed": eventbus.PayoutProviderCompletedVersion,
+		"payout.provider_failed":    eventbus.PayoutProviderFailedVersion,
+		"payout.provider_returned":  eventbus.PayoutProviderReturnedVersion,
+		"payout.on_hold":            eventbus.PayoutOnHoldVersion,
+	}[eventType]
+	if version == 0 {
+		return fmt.Errorf("unsupported payout provider event %q", eventType)
+	}
+	eventID := commandEventID + ":result"
+	body, err := json.Marshal(map[string]string{"correlation_id": correlationID, "caused_by_event_id": commandEventID, "reason": reason})
+	if err != nil {
+		return fmt.Errorf("marshal payout provider result: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO outbox_events(id,topic,event_type,event_version,aggregate_id,aggregate_type,payload,occurred_at) VALUES($1,$2,$3,$4,$5,'payout',$6,$7) ON CONFLICT(id) DO NOTHING`, eventID, eventbus.PayoutEventsTopic, eventType, version, paymentID, body, now); err != nil {
+		return fmt.Errorf("enqueue payout provider result: %w", err)
+	}
+	return nil
 }

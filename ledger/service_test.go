@@ -8,7 +8,39 @@ import (
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
+
+	"stablerail/eventbus"
 )
+
+func TestRecordPayinCompletesReceivedPayin(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	now := time.Date(2026, time.August, 18, 12, 0, 0, 0, time.UTC)
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT payment_id,status,destination_amount_minor").WithArgs("pin_1").WillReturnRows(sqlmock.NewRows([]string{"payment_id", "status", "amount", "currency"}).AddRow("pay_1", "received", int64(9900), "USDC"))
+	mock.ExpectExec("INSERT INTO ledger_transactions").WithArgs("jrn_pin_1_succeeded", "pay_1", now).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO ledger_entries").WithArgs("jrn_pin_1_succeeded:debit", "jrn_pin_1_succeeded", "cash:operating", "debit", int64(9900), "USDC").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO ledger_entries").WithArgs("jrn_pin_1_succeeded:credit", "jrn_pin_1_succeeded", "settlement:payable", "credit", int64(9900), "USDC").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("UPDATE payins SET status='succeeded'").WithArgs(now, "pin_1").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("UPDATE payments SET payment_status='succeeded'").WithArgs(now, "pay_1").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO payment_timeline_entries").WithArgs("pay_1", now).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO outbox_events").WithArgs("evt_pin_1_succeeded", eventbus.PayinEventsTopic, "payin.succeeded", eventbus.PayinSucceededVersion, "pay_1", sqlmock.AnyArg(), now).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO outbox_events").WithArgs("evt_pin_1_succeeded_payment", eventbus.PaymentEventsTopic, eventbus.PaymentSucceededVersion, "pay_1", sqlmock.AnyArg(), now).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+	tx, _ := db.BeginTx(context.Background(), nil)
+	if err := NewPostgresService().RecordPayin(context.Background(), tx, PayinReceiptRequest{PayinID: "pin_1", CorrelationID: "corr_1", At: now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestReleaseWritesReversingJournal(t *testing.T) {
 	db, mock, err := sqlmock.New()

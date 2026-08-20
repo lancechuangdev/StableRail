@@ -35,7 +35,7 @@ CREATE TABLE settlement_submissions (
     payment_id         TEXT NOT NULL REFERENCES payments(id),
     command_event_id   TEXT NOT NULL UNIQUE,
     provider           TEXT NOT NULL,
-    provider_reference TEXT NOT NULL UNIQUE,
+    provider_reference TEXT UNIQUE,
     status             TEXT NOT NULL CHECK (status IN ('pending', 'on_hold', 'succeeded', 'failed')),
     failure_code       TEXT,
     failure_message    TEXT,

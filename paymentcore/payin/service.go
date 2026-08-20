@@ -285,48 +285,6 @@ func (s *Service) ApplyResult(ctx context.Context, tx *sql.Tx, payinID, correlat
 	return nil
 }
 
-func (s *Service) RecordLedger(ctx context.Context, tx *sql.Tx, payinID, correlationID string, now time.Time) error {
-	var paymentID, status, currency string
-	var amount int64
-	if err := tx.QueryRowContext(ctx, `SELECT payment_id,status,destination_amount_minor,destination_currency FROM payins WHERE id=$1 FOR UPDATE`, payinID).Scan(&paymentID, &status, &amount, &currency); err != nil {
-		return err
-	}
-	if status == "succeeded" {
-		return nil
-	}
-	if status != "received" {
-		return fmt.Errorf("payin %s cannot record ledger from status %s", payinID, status)
-	}
-	journalID := "jrn_" + payinID + "_succeeded"
-	res, err := tx.ExecContext(ctx, `INSERT INTO ledger_transactions(id,payment_id,event_type,occurred_at) VALUES($1,$2,'payin.succeeded',$3) ON CONFLICT(payment_id,event_type) DO NOTHING`, journalID, paymentID, now)
-	if err != nil {
-		return err
-	}
-	rows, _ := res.RowsAffected()
-	if rows == 1 {
-		for _, line := range []struct{ suffix, account, side string }{{"debit", "cash:operating", "debit"}, {"credit", "settlement:payable", "credit"}} {
-			if _, err := tx.ExecContext(ctx, `INSERT INTO ledger_entries(id,transaction_id,account_code,side,amount_minor,currency) VALUES($1,$2,$3,$4,$5,$6)`, journalID+":"+line.suffix, journalID, line.account, line.side, amount, currency); err != nil {
-				return err
-			}
-		}
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE payins SET status='succeeded',updated_at=$1 WHERE id=$2`, now, payinID); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE payments SET payment_status='succeeded',funds_status='received',updated_at=$1 WHERE id=$2`, now, paymentID); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO payment_timeline_entries(payment_id,payment_status,note,occurred_at) VALUES($1,'succeeded','payin ledger recorded',$2)`, paymentID, now); err != nil {
-		return err
-	}
-	eventID, eventType := "evt_"+payinID+"_succeeded", "payin.succeeded"
-	body, _ := json.Marshal(map[string]any{"id": eventID, "type": eventType, "payin_id": payinID, "correlation_id": correlationID, "occurred_at": now, "data": map[string]string{"status": "succeeded"}})
-	if _, err = tx.ExecContext(ctx, `INSERT INTO outbox_events(id,topic,event_type,event_version,aggregate_id,aggregate_type,payload,occurred_at) VALUES($1,$2,$3,$4,$5,'payin',$6,$7) ON CONFLICT(id) DO NOTHING`, eventID, eventbus.PayinEventsTopic, eventType, eventbus.PayinSucceededVersion, paymentID, body, now); err != nil {
-		return err
-	}
-	return enqueuePublicPaymentEvent(ctx, tx, eventID+"_payment", paymentID, "payment.succeeded", eventbus.PaymentSucceededVersion, body, now)
-}
-
 func enqueuePublicPaymentEvent(ctx context.Context, tx *sql.Tx, eventID, paymentID, eventType string, version int, payload []byte, now time.Time) error {
 	if eventType == "" || version == 0 {
 		return fmt.Errorf("invalid public payment event %q", eventType)
