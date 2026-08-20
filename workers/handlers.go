@@ -31,8 +31,8 @@ type CommandHandler struct {
 }
 
 type payoutCommandService interface {
-	ExecutePayout(context.Context, string, string) (payout.ExecutionResult, error)
-	ApplyResult(context.Context, *sql.Tx, string, string, string, payout.ExecutionResult, time.Time) error
+	ExecutePayout(context.Context, string, string) (paymentcore.ExecutionResult, error)
+	ApplyResult(context.Context, *sql.Tx, string, string, string, paymentcore.ExecutionResult, time.Time) error
 }
 
 type payinCommandService interface {
@@ -95,7 +95,7 @@ func (h *CommandHandler) Handle(ctx context.Context, tx *sql.Tx, event eventbus.
 		}
 		result, err := h.payinService.ExecutePayin(ctx, payload.PayinID)
 		if err != nil {
-			var providerErr *payin.ProviderError
+			var providerErr *paymentcore.ProviderError
 			if errors.As(err, &providerErr) && !providerErr.Retryable {
 				return h.payinService.ApplyResult(ctx, tx, payload.PayinID, payload.CorrelationID, payin.ExecuteResult{ExecutionResult: paymentcore.ExecutionResult{Status: paymentcore.ExecutionFailed, FailureCode: providerErr.Code, FailureMessage: providerErr.Message}}, h.now())
 			}
@@ -137,10 +137,10 @@ func (h *CommandHandler) Handle(ctx context.Context, tx *sql.Tx, event eventbus.
 	case "settlement.execute":
 		result, err := h.payoutService.ExecutePayout(ctx, payload.PaymentID, event.ID)
 		if err != nil {
-			var providerErr *payout.ProviderError
+			var providerErr *paymentcore.ProviderError
 			if errors.As(err, &providerErr) && !providerErr.Retryable {
 				if providerErr.Code == "submission_failed" {
-					return h.payoutService.ApplyResult(ctx, tx, payload.PaymentID, event.ID, payload.CorrelationID, payout.ExecutionResult{Status: paymentcore.ExecutionFailed, FailureCode: providerErr.Code, FailureMessage: providerErr.Message}, h.now())
+					return h.payoutService.ApplyResult(ctx, tx, payload.PaymentID, event.ID, payload.CorrelationID, paymentcore.ExecutionResult{Status: paymentcore.ExecutionFailed, FailureCode: providerErr.Code, FailureMessage: providerErr.Message}, h.now())
 				}
 				return consumer.Permanent(err)
 			}

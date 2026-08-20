@@ -6,15 +6,15 @@ import (
 )
 
 func (s *Service) RecoverUnknownOnce(ctx context.Context) (int, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT o.payment_id,o.idempotency_key,p.amount_minor,p.currency FROM payouts o JOIN payments p ON p.id=o.payment_id WHERE o.provider=$1 AND o.provider_status='unknown' ORDER BY o.updated_at LIMIT 100`, s.executionProvider.Name())
+	rows, err := s.db.QueryContext(ctx, `SELECT payment_id,idempotency_key FROM payouts WHERE provider=$1 AND provider_status='unknown' ORDER BY updated_at LIMIT 100`, s.executionProvider.Name())
 	if err != nil {
 		return 0, err
 	}
 	defer rows.Close()
-	var requests []ExecuteRequest
+	var requests []executionRequest
 	for rows.Next() {
-		var request ExecuteRequest
-		if err := rows.Scan(&request.PaymentID, &request.IdempotencyKey, &request.AmountMinor, &request.Currency); err != nil {
+		var request executionRequest
+		if err := rows.Scan(&request.paymentID, &request.idempotencyKey); err != nil {
 			return 0, err
 		}
 		requests = append(requests, request)

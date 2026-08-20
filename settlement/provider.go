@@ -24,24 +24,25 @@ type SettlementProvider interface {
 // By default every new request succeeds; Result can be set to exercise other outcomes.
 type MockProvider struct {
 	mu              sync.Mutex
-	Result          payout.ExecutionResult
-	ResultsByAmount map[int64]payout.ExecutionResult
-	seen            map[string]payout.ExecutionResult
+	Result          paymentcore.ExecutionResult
+	ResultsByAmount map[int64]paymentcore.ExecutionResult
+	amountsByQuote  map[string]int64
+	seen            map[string]paymentcore.ExecutionResult
 	now             func() time.Time
 }
 
-func NewMockProvider(result payout.ExecutionResult) *MockProvider {
+func NewMockProvider(result paymentcore.ExecutionResult) *MockProvider {
 	if result.Status == "" {
-		result = payout.ExecutionResult{Status: paymentcore.ExecutionSucceeded}
+		result = paymentcore.ExecutionResult{Status: paymentcore.ExecutionSucceeded}
 	}
-	return &MockProvider{Result: result, seen: make(map[string]payout.ExecutionResult), now: time.Now}
+	return &MockProvider{Result: result, seen: make(map[string]paymentcore.ExecutionResult), amountsByQuote: make(map[string]int64), now: time.Now}
 }
 
 func (*MockProvider) Name() string { return "mock" }
 
-func (p *MockProvider) ExecutePayout(_ context.Context, request payout.ExecuteRequest) (payout.ExecutionResult, error) {
+func (p *MockProvider) ExecutePayout(_ context.Context, request paymentcore.ExecuteRequest) (paymentcore.ExecutionResult, error) {
 	if err := request.Validate(); err != nil {
-		return payout.ExecutionResult{}, err
+		return paymentcore.ExecutionResult{}, err
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -49,35 +50,39 @@ func (p *MockProvider) ExecutePayout(_ context.Context, request payout.ExecuteRe
 		return result, nil
 	}
 	result := p.Result
-	if configured, ok := p.ResultsByAmount[request.AmountMinor]; ok {
+	if configured, ok := p.ResultsByAmount[p.amountsByQuote[request.ProviderQuoteID]]; ok {
 		result = configured
 	}
 	if result.ProviderReference == "" {
 		result.ProviderReference = "mock_" + request.IdempotencyKey
 	}
 	if err := result.Validate(); err != nil {
-		return payout.ExecutionResult{}, err
+		return paymentcore.ExecutionResult{}, err
 	}
 	p.seen[request.IdempotencyKey] = result
 	return result, nil
 }
 
-func (p *MockProvider) CreatePayoutQuote(_ context.Context, r payout.QuoteRequest) (payout.ProviderQuote, error) {
+func (p *MockProvider) CreatePayoutQuote(_ context.Context, r payout.QuoteRequest) (paymentcore.ProviderQuote, error) {
 	if r.IdempotencyKey == "" || r.AmountMinor <= 0 {
-		return payout.ProviderQuote{}, errors.New("invalid payout quote request")
+		return paymentcore.ProviderQuote{}, errors.New("invalid payout quote request")
 	}
-	return payout.ProviderQuote{ProviderQuoteID: "qu_" + r.IdempotencyKey, SourceCurrency: r.SourceCurrency, DestinationCurrency: r.DestinationCurrency, SenderAmountMinor: r.AmountMinor, ReceiverAmountMinor: r.AmountMinor, CommercialRate: "1", ProviderRate: "1", ExpiresAt: p.now().Add(5 * time.Minute)}, nil
+	providerQuoteID := "qu_" + r.IdempotencyKey
+	p.mu.Lock()
+	p.amountsByQuote[providerQuoteID] = r.AmountMinor
+	p.mu.Unlock()
+	return paymentcore.ProviderQuote{ProviderQuoteID: providerQuoteID, SourceCurrency: r.SourceCurrency, DestinationCurrency: r.DestinationCurrency, SenderAmountMinor: r.AmountMinor, ReceiverAmountMinor: r.AmountMinor, CommercialRate: "1", ProviderRate: "1", ExpiresAt: p.now().Add(5 * time.Minute)}, nil
 }
 
-func (p *MockProvider) CreatePayinQuote(_ context.Context, r payin.QuoteRequest) (payin.ProviderQuote, error) {
+func (p *MockProvider) CreatePayinQuote(_ context.Context, r payin.QuoteRequest) (paymentcore.ProviderQuote, error) {
 	if err := r.Validate(); err != nil {
-		return payin.ProviderQuote{}, err
+		return paymentcore.ProviderQuote{}, err
 	}
 	payload, _ := json.Marshal(map[string]any{"mock": true})
-	return payin.ProviderQuote{ProviderQuoteID: "pq_" + r.IdempotencyKey, SourceCurrency: r.SourceCurrency, DestinationCurrency: r.DestinationCurrency, SenderAmountMinor: r.AmountMinor, ReceiverAmountMinor: r.AmountMinor, ExpiresAt: p.now().Add(5 * time.Minute), Payload: payload}, nil
+	return paymentcore.ProviderQuote{ProviderQuoteID: "pq_" + r.IdempotencyKey, SourceCurrency: r.SourceCurrency, DestinationCurrency: r.DestinationCurrency, SenderAmountMinor: r.AmountMinor, ReceiverAmountMinor: r.AmountMinor, ExpiresAt: p.now().Add(5 * time.Minute), Payload: payload}, nil
 }
 
-func (p *MockProvider) ExecutePayin(_ context.Context, r payin.ExecuteRequest) (payin.ExecuteResult, error) {
+func (p *MockProvider) ExecutePayin(_ context.Context, r paymentcore.ExecuteRequest) (payin.ExecuteResult, error) {
 	if err := r.Validate(); err != nil {
 		return payin.ExecuteResult{}, err
 	}

@@ -14,23 +14,23 @@ import (
 )
 
 type serviceProvider struct {
-	request      ExecuteRequest
-	result       ExecutionResult
+	request      paymentcore.ExecuteRequest
+	result       paymentcore.ExecutionResult
 	err          error
 	quoteRequest QuoteRequest
-	quoteResult  ProviderQuote
+	quoteResult  paymentcore.ProviderQuote
 	quoteCalls   int
 }
 
 func (*serviceProvider) Name() string { return "blindpay" }
-func (p *serviceProvider) CreatePayoutQuote(_ context.Context, r QuoteRequest) (ProviderQuote, error) {
+func (p *serviceProvider) CreatePayoutQuote(_ context.Context, r QuoteRequest) (paymentcore.ProviderQuote, error) {
 	p.quoteRequest, p.quoteCalls = r, p.quoteCalls+1
 	if p.quoteResult.ProviderQuoteID != "" {
 		return p.quoteResult, nil
 	}
-	return ProviderQuote{ProviderQuoteID: "qu_provider", SourceCurrency: r.SourceCurrency, DestinationCurrency: r.DestinationCurrency, SenderAmountMinor: r.AmountMinor, ReceiverAmountMinor: r.AmountMinor, CommercialRate: "1", ProviderRate: "1", ExpiresAt: time.Now().Add(time.Minute)}, nil
+	return paymentcore.ProviderQuote{ProviderQuoteID: "qu_provider", SourceCurrency: r.SourceCurrency, DestinationCurrency: r.DestinationCurrency, SenderAmountMinor: r.AmountMinor, ReceiverAmountMinor: r.AmountMinor, CommercialRate: "1", ProviderRate: "1", ExpiresAt: time.Now().Add(time.Minute)}, nil
 }
-func (p *serviceProvider) ExecutePayout(_ context.Context, r ExecuteRequest) (ExecutionResult, error) {
+func (p *serviceProvider) ExecutePayout(_ context.Context, r paymentcore.ExecuteRequest) (paymentcore.ExecutionResult, error) {
 	p.request = r
 	return p.result, p.err
 }
@@ -42,10 +42,10 @@ func TestServiceCommitsAttemptBeforeProviderExecution(t *testing.T) {
 	}
 	defer db.Close()
 	now := time.Date(2026, time.August, 18, 12, 0, 0, 0, time.UTC)
-	provider := &serviceProvider{result: ExecutionResult{ProviderReference: "po_test", Status: paymentcore.ExecutionPending, Payload: []byte(`{"id":"po_test"}`)}}
+	provider := &serviceProvider{result: paymentcore.ExecutionResult{ProviderReference: "po_test", Status: paymentcore.ExecutionPending, Payload: []byte(`{"id":"po_test"}`)}}
 	service, _ := NewService(db, provider, provider)
 	service.now = func() time.Time { return now }
-	mock.ExpectQuery("SELECT p.amount_minor,p.currency").WithArgs("pay_test").WillReturnRows(sqlmock.NewRows([]string{"amount_minor", "currency"}).AddRow(int64(100), "USDB"))
+	mock.ExpectQuery("SELECT EXISTS").WithArgs("pay_test").WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
 	mock.ExpectBegin()
 	mock.ExpectQuery("SELECT q.id,q.provider_quote_id").WithArgs("pay_test", "blindpay").WillReturnRows(quoteRows())
 	mock.ExpectExec("INSERT INTO payouts").WithArgs("pay_test", "quote_test", "tenant_test", "account_test", "instrument_test", "ach", int64(100), "USDB", int64(90), "USD", "blindpay", "idem_test", now).WillReturnResult(sqlmock.NewResult(0, 1))
@@ -57,7 +57,7 @@ func TestServiceCommitsAttemptBeforeProviderExecution(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if provider.request.ProviderQuoteID != "qu_provider" || provider.request.SourceAccountID != "account_test" || provider.request.TenantID != "tenant_test" {
+	if provider.request.ProviderQuoteID != "qu_provider" || provider.request.IdempotencyKey != "idem_test" {
 		t.Fatalf("provider request=%+v", provider.request)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -81,7 +81,7 @@ func TestServiceAppliesPayoutResultInInboxTransaction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := service.ApplyResult(context.Background(), tx, "pay_test", "evt_test", "corr_test", ExecutionResult{ProviderReference: "po_test", Status: paymentcore.ExecutionPending}, now); err != nil {
+	if err := service.ApplyResult(context.Background(), tx, "pay_test", "evt_test", "corr_test", paymentcore.ExecutionResult{ProviderReference: "po_test", Status: paymentcore.ExecutionPending}, now); err != nil {
 		t.Fatal(err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -106,7 +106,7 @@ func TestServiceAppliesFailedPayoutAndPublishesSagaEvent(t *testing.T) {
 	mock.ExpectExec("INSERT INTO outbox_events").WithArgs("evt_test:result", eventbus.PayoutEventsTopic, "payout.provider_failed", eventbus.PayoutProviderFailedVersion, "pay_test", sqlmock.AnyArg(), now).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 	tx, _ := db.BeginTx(context.Background(), nil)
-	result := ExecutionResult{Status: paymentcore.ExecutionFailed, FailureCode: "submission_failed", FailureMessage: "insufficient balance"}
+	result := paymentcore.ExecutionResult{Status: paymentcore.ExecutionFailed, FailureCode: "submission_failed", FailureMessage: "insufficient balance"}
 	if err := service.ApplyResult(context.Background(), tx, "pay_test", "evt_test", "corr_test", result, now); err != nil {
 		t.Fatal(err)
 	}
@@ -125,14 +125,14 @@ func TestServiceRejectsPayoutWithoutProviderResourceQuote(t *testing.T) {
 	}
 	defer db.Close()
 	now := time.Date(2026, time.August, 18, 12, 0, 0, 0, time.UTC)
-	provider := &serviceProvider{result: ExecutionResult{ProviderReference: "po_test", Status: paymentcore.ExecutionPending}}
+	provider := &serviceProvider{result: paymentcore.ExecutionResult{ProviderReference: "po_test", Status: paymentcore.ExecutionPending}}
 	service, _ := NewService(db, provider, provider)
 	service.now = func() time.Time { return now }
 	mock.ExpectBegin()
 	mock.ExpectQuery("SELECT q.id,q.provider_quote_id").WithArgs("pay_test", "blindpay").WillReturnError(sql.ErrNoRows)
 	mock.ExpectRollback()
 
-	if _, err := service.executePayout(context.Background(), ExecuteRequest{PaymentID: "pay_test", IdempotencyKey: "idem_test", AmountMinor: 100, Currency: "USD"}); err == nil {
+	if _, err := service.executePayout(context.Background(), executionRequest{paymentID: "pay_test", idempotencyKey: "idem_test"}); err == nil {
 		t.Fatal("expected missing route error")
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -147,7 +147,7 @@ func TestServiceRecordsAmbiguousProviderOutcome(t *testing.T) {
 	}
 	defer db.Close()
 	now := time.Date(2026, time.August, 18, 12, 0, 0, 0, time.UTC)
-	provider := &serviceProvider{err: &ProviderError{Message: "connection reset", Retryable: true}}
+	provider := &serviceProvider{err: &paymentcore.ProviderError{Message: "connection reset", Retryable: true}}
 	service, _ := NewService(db, provider, provider)
 	service.now = func() time.Time { return now }
 	mock.ExpectBegin()
@@ -156,7 +156,7 @@ func TestServiceRecordsAmbiguousProviderOutcome(t *testing.T) {
 	mock.ExpectCommit()
 	mock.ExpectExec("UPDATE payouts SET provider_status").WithArgs("unknown", "connection reset", now, "pay_test").WillReturnResult(sqlmock.NewResult(0, 1))
 
-	_, err = service.executePayout(context.Background(), ExecuteRequest{PaymentID: "pay_test", IdempotencyKey: "idem_test", AmountMinor: 100, Currency: "USDB"})
+	_, err = service.executePayout(context.Background(), executionRequest{paymentID: "pay_test", idempotencyKey: "idem_test"})
 	if !errors.Is(err, ErrSubmissionUnknown) {
 		t.Fatalf("error=%v", err)
 	}
@@ -177,13 +177,13 @@ func TestServiceCreatesAndPersistsPayoutQuote(t *testing.T) {
 	defer db.Close()
 	now := time.Date(2026, time.August, 18, 12, 0, 0, 0, time.UTC)
 	expires := now.Add(5 * time.Minute)
-	provider := &serviceProvider{quoteResult: ProviderQuote{ProviderQuoteID: "qu_provider", SourceCurrency: "USDB", DestinationCurrency: "USD", SenderAmountMinor: 100, ReceiverAmountMinor: 95, CommercialRate: "0.95", ProviderRate: "0.96", FlatFeeMinor: 1, ExpiresAt: expires, Payload: []byte(`{"id":"qu_provider"}`)}}
+	provider := &serviceProvider{quoteResult: paymentcore.ProviderQuote{ProviderQuoteID: "qu_provider", SourceCurrency: "USDB", DestinationCurrency: "USD", SenderAmountMinor: 100, ReceiverAmountMinor: 95, CommercialRate: "0.95", ProviderRate: "0.96", FlatFeeMinor: 1, ExpiresAt: expires, Payload: []byte(`{"id":"qu_provider"}`)}}
 	service, _ := NewService(db, provider, provider)
 	service.now = func() time.Time { return now }
 	service.newID = func(string) (string, error) { return "pqi_test", nil }
-	request := QuoteRequest{QuoteRequest: paymentcore.QuoteRequest{IdempotencyKey: "idem_quote", TenantID: "tenant_test", SourceCurrency: "USDB", DestinationCurrency: "USD", CurrencyType: "sender", AmountMinor: 100}, FundingMethod: "bank", SourceAccountID: "account_test", DestinationInstrumentID: "instrument_test"}
+	request := QuoteRequest{QuoteRequest: paymentcore.QuoteRequest{IdempotencyKey: "idem_quote", TenantID: "tenant_test", FundingMethod: "bank", SourceCurrency: "USDB", DestinationCurrency: "USD", CurrencyType: "sender", AmountMinor: 100}, SourceAccountID: "account_test", DestinationInstrumentID: "instrument_test"}
 	mock.ExpectQuery("SELECT id,provider,provider_quote_id").WithArgs("tenant_test", "idem_quote").WillReturnError(sql.ErrNoRows)
-	mock.ExpectExec("INSERT INTO payment_quotes").WithArgs("pqi_test", "blindpay", "qu_provider", "tenant_test", "idem_quote", "account_test", "instrument_test", "bank", "USDB", "USD", "sender", false, int64(100), int64(100), int64(95), "0.95", "0.96", int64(1), int64(0), nil, expires, []byte(`{"id":"qu_provider"}`), now).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO payment_quotes").WithArgs("pqi_test", "blindpay", "qu_provider", "tenant_test", "idem_quote", "account_test", "instrument_test", "bank", "USDB", "USD", "sender", false, int64(100), int64(100), int64(95), "0.95", "0.96", int64(1), int64(0), nil, expires, []byte(`{"id":"qu_provider"}`), []byte(`{}`), now).WillReturnResult(sqlmock.NewResult(0, 1))
 
 	quote, err := service.CreateQuote(context.Background(), request)
 	if err != nil {

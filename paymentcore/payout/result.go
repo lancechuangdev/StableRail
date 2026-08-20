@@ -13,7 +13,7 @@ import (
 
 // ApplyResult persists a normalized provider outcome, applies its immediate
 // payment effects, and publishes the next saga event in the inbox transaction.
-func (s *Service) ApplyResult(ctx context.Context, tx *sql.Tx, paymentID, commandEventID, correlationID string, result ExecutionResult, now time.Time) error {
+func (s *Service) ApplyResult(ctx context.Context, tx *sql.Tx, paymentID, commandEventID, correlationID string, result paymentcore.ExecutionResult, now time.Time) error {
 	if tx == nil {
 		return errors.New("payout result transaction is required")
 	}
@@ -81,7 +81,7 @@ func (s *Service) recordError(ctx context.Context, paymentID, status string, cau
 	return err
 }
 
-func persistedStatus(result ExecutionResult) string {
+func persistedStatus(result paymentcore.ExecutionResult) string {
 	switch result.Status {
 	case paymentcore.ExecutionSucceeded:
 		return "completed"
@@ -97,8 +97,8 @@ func persistedStatus(result ExecutionResult) string {
 	}
 }
 
-func mapPersistedResult(reference, status string) (ExecutionResult, error) {
-	result := ExecutionResult{ProviderReference: reference}
+func mapPersistedResult(reference, status string) (paymentcore.ExecutionResult, error) {
+	result := paymentcore.ExecutionResult{ProviderReference: reference}
 	switch status {
 	case "completed":
 		result.Status = paymentcore.ExecutionSucceeded
@@ -109,7 +109,7 @@ func mapPersistedResult(reference, status string) (ExecutionResult, error) {
 	case "failed", "refunded", "submission_failed":
 		result.Status, result.FailureCode = paymentcore.ExecutionFailed, status
 	default:
-		return ExecutionResult{}, fmt.Errorf("unsupported payout status %q", status)
+		return paymentcore.ExecutionResult{}, fmt.Errorf("unsupported payout status %q", status)
 	}
 	return result, result.Validate()
 }

@@ -21,6 +21,10 @@ type PayoutQuoteRequest struct {
 	PartnerFeeID                             string
 }
 
+type payoutExecutionContext struct {
+	SenderWalletAddress string `json:"address"`
+}
+
 type PayoutQuote struct {
 	ID                      string          `json:"id"`
 	Provider                string          `json:"provider"`

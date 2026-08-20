@@ -6,20 +6,19 @@ import (
 
 	"stablerail/paymentcore"
 	"stablerail/paymentcore/payin"
-	"stablerail/paymentcore/payout"
 	"stablerail/settlement"
 )
 
 func TestMockProviderCreatesQuoteAndCompletesPayin(t *testing.T) {
-	p := settlement.NewMockProvider(payout.ExecutionResult{})
-	q, err := p.CreatePayinQuote(context.Background(), payin.QuoteRequest{QuoteRequest: paymentcore.QuoteRequest{IdempotencyKey: "quote-1", TenantID: "tenant-1", CurrencyType: "sender", DestinationCurrency: "USDB", SourceCurrency: "USD", AmountMinor: 1000}, FundingMethod: "ach", DestinationAccountID: "acct_1"})
+	p := settlement.NewMockProvider(paymentcore.ExecutionResult{})
+	q, err := p.CreatePayinQuote(context.Background(), payin.QuoteRequest{QuoteRequest: paymentcore.QuoteRequest{IdempotencyKey: "quote-1", TenantID: "tenant-1", FundingMethod: "ach", CurrencyType: "sender", DestinationCurrency: "USDB", SourceCurrency: "USD", AmountMinor: 1000}, DestinationAccountID: "acct_1"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if q.ProviderQuoteID == "" || q.SenderAmountMinor != 1000 || q.ExpiresAt.IsZero() {
 		t.Fatalf("quote=%+v", q)
 	}
-	r, err := p.ExecutePayin(context.Background(), payin.ExecuteRequest{IdempotencyKey: "payin-1", ProviderQuoteID: q.ProviderQuoteID})
+	r, err := p.ExecutePayin(context.Background(), paymentcore.ExecuteRequest{IdempotencyKey: "payin-1", ProviderQuoteID: q.ProviderQuoteID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -29,7 +28,7 @@ func TestMockProviderCreatesQuoteAndCompletesPayin(t *testing.T) {
 }
 
 func TestQuoteRequiresDestinationAccount(t *testing.T) {
-	r := payin.QuoteRequest{QuoteRequest: paymentcore.QuoteRequest{IdempotencyKey: "q", TenantID: "t", CurrencyType: "sender", DestinationCurrency: "USDC", SourceCurrency: "USD", AmountMinor: 1}, FundingMethod: "ach"}
+	r := payin.QuoteRequest{QuoteRequest: paymentcore.QuoteRequest{IdempotencyKey: "q", TenantID: "t", FundingMethod: "ach", CurrencyType: "sender", DestinationCurrency: "USDC", SourceCurrency: "USD", AmountMinor: 1}}
 	if err := r.Validate(); err == nil {
 		t.Fatal("expected destination validation error")
 	}

@@ -14,19 +14,18 @@ import (
 	"stablerail/ledger"
 	"stablerail/paymentcore"
 	"stablerail/paymentcore/payin"
-	"stablerail/paymentcore/payout"
 	"stablerail/policy"
 )
 
 type submissionFailurePayoutService struct {
 	appliedPaymentID, appliedCommandID, appliedCorrelationID string
-	appliedResult                                            payout.ExecutionResult
+	appliedResult                                            paymentcore.ExecutionResult
 }
 
-func (submissionFailurePayoutService) ExecutePayout(context.Context, string, string) (payout.ExecutionResult, error) {
-	return payout.ExecutionResult{}, &payout.ProviderError{Message: "insufficient balance", Code: "submission_failed", Retryable: false}
+func (submissionFailurePayoutService) ExecutePayout(context.Context, string, string) (paymentcore.ExecutionResult, error) {
+	return paymentcore.ExecutionResult{}, &paymentcore.ProviderError{Message: "insufficient balance", Code: "submission_failed", Retryable: false}
 }
-func (s *submissionFailurePayoutService) ApplyResult(_ context.Context, _ *sql.Tx, paymentID, commandID, correlationID string, result payout.ExecutionResult, _ time.Time) error {
+func (s *submissionFailurePayoutService) ApplyResult(_ context.Context, _ *sql.Tx, paymentID, commandID, correlationID string, result paymentcore.ExecutionResult, _ time.Time) error {
 	s.appliedPaymentID, s.appliedCommandID, s.appliedCorrelationID, s.appliedResult = paymentID, commandID, correlationID, result
 	return nil
 }

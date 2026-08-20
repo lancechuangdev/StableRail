@@ -16,11 +16,11 @@ import (
 type storageTestProvider struct{}
 
 func (storageTestProvider) Name() string { return "test" }
-func (storageTestProvider) CreatePayoutQuote(_ context.Context, request QuoteRequest) (ProviderQuote, error) {
-	return ProviderQuote{ProviderQuoteID: "provider_quote_test", SourceCurrency: request.SourceCurrency, DestinationCurrency: request.DestinationCurrency, SenderAmountMinor: request.AmountMinor, ReceiverAmountMinor: request.AmountMinor, ExpiresAt: time.Date(2026, time.August, 7, 12, 1, 0, 0, time.UTC)}, nil
+func (storageTestProvider) CreatePayoutQuote(_ context.Context, request QuoteRequest) (paymentcore.ProviderQuote, error) {
+	return paymentcore.ProviderQuote{ProviderQuoteID: "provider_quote_test", SourceCurrency: request.SourceCurrency, DestinationCurrency: request.DestinationCurrency, SenderAmountMinor: request.AmountMinor, ReceiverAmountMinor: request.AmountMinor, ExpiresAt: time.Date(2026, time.August, 7, 12, 1, 0, 0, time.UTC)}, nil
 }
-func (storageTestProvider) ExecutePayout(context.Context, ExecuteRequest) (ExecutionResult, error) {
-	return ExecutionResult{}, nil
+func (storageTestProvider) ExecutePayout(context.Context, paymentcore.ExecuteRequest) (paymentcore.ExecutionResult, error) {
+	return paymentcore.ExecutionResult{}, nil
 }
 
 func TestCreatePaymentRequestSupportsQuotedAndDirectModes(t *testing.T) {

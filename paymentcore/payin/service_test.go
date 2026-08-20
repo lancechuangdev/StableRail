@@ -13,10 +13,10 @@ import (
 type unusedProvider struct{}
 
 func (unusedProvider) Name() string { return "test" }
-func (unusedProvider) CreatePayinQuote(context.Context, QuoteRequest) (ProviderQuote, error) {
-	return ProviderQuote{}, nil
+func (unusedProvider) CreatePayinQuote(context.Context, QuoteRequest) (paymentcore.ProviderQuote, error) {
+	return paymentcore.ProviderQuote{}, nil
 }
-func (unusedProvider) ExecutePayin(context.Context, ExecuteRequest) (ExecuteResult, error) {
+func (unusedProvider) ExecutePayin(context.Context, paymentcore.ExecuteRequest) (ExecuteResult, error) {
 	return ExecuteResult{}, nil
 }
 

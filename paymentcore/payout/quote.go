@@ -44,8 +44,12 @@ func (s *Service) CreateQuote(ctx context.Context, request QuoteRequest) (Quote,
 	if len(payload) == 0 {
 		payload, _ = json.Marshal(result)
 	}
+	executionContext := result.ExecutionContext
+	if len(executionContext) == 0 {
+		executionContext = json.RawMessage(`{}`)
+	}
 	now := s.now()
-	_, err = s.db.ExecContext(ctx, `INSERT INTO payment_quotes(id,direction,provider,provider_quote_id,tenant_id,idempotency_key,source_resource_id,destination_resource_id,payment_method,source_currency,destination_currency,currency_type,cover_fees,request_amount_minor,sender_amount_minor,receiver_amount_minor,commercial_rate,provider_rate,flat_fee_minor,partner_fee_minor,billing_fee_minor,status,expires_at,provider_payload,created_at,updated_at) VALUES($1,'payout',$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,'open',$21,$22,$23,$23)`, id, s.quoteProvider.Name(), result.ProviderQuoteID, request.TenantID, request.IdempotencyKey, request.SourceAccountID, request.DestinationInstrumentID, request.FundingMethod, result.SourceCurrency, result.DestinationCurrency, request.CurrencyType, request.CoverFees, request.AmountMinor, result.SenderAmountMinor, result.ReceiverAmountMinor, result.CommercialRate, result.ProviderRate, result.FlatFeeMinor, result.PartnerFeeMinor, result.BillingFeeMinor, result.ExpiresAt, payload, now)
+	_, err = s.db.ExecContext(ctx, `INSERT INTO payment_quotes(id,direction,provider,provider_quote_id,tenant_id,idempotency_key,source_resource_id,destination_resource_id,payment_method,source_currency,destination_currency,currency_type,cover_fees,request_amount_minor,sender_amount_minor,receiver_amount_minor,commercial_rate,provider_rate,flat_fee_minor,partner_fee_minor,billing_fee_minor,status,expires_at,provider_payload,provider_execution_context,created_at,updated_at) VALUES($1,'payout',$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,'open',$21,$22,$23,$24,$24)`, id, s.quoteProvider.Name(), result.ProviderQuoteID, request.TenantID, request.IdempotencyKey, request.SourceAccountID, request.DestinationInstrumentID, request.FundingMethod, result.SourceCurrency, result.DestinationCurrency, request.CurrencyType, request.CoverFees, request.AmountMinor, result.SenderAmountMinor, result.ReceiverAmountMinor, result.CommercialRate, result.ProviderRate, result.FlatFeeMinor, result.PartnerFeeMinor, result.BillingFeeMinor, result.ExpiresAt, payload, executionContext, now)
 	if err != nil {
 		return Quote{}, fmt.Errorf("store payout quote: %w", err)
 	}

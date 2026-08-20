@@ -68,6 +68,7 @@ CREATE TABLE payment_quotes (
     status                    TEXT NOT NULL CHECK (status IN ('open', 'accepted', 'expired')),
     expires_at                TIMESTAMPTZ NOT NULL,
     provider_payload          JSONB NOT NULL,
+    provider_execution_context JSONB NOT NULL DEFAULT '{}'::jsonb,
     payment_id                TEXT UNIQUE REFERENCES payments(id),
     created_at                TIMESTAMPTZ NOT NULL,
     updated_at                TIMESTAMPTZ NOT NULL,

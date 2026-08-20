@@ -47,14 +47,14 @@ func (s *Service) ExecutePayin(ctx context.Context, payinID string) (ExecuteResu
 	if err := tx.Commit(); err != nil {
 		return ExecuteResult{}, err
 	}
-	request := ExecuteRequest{IdempotencyKey: key, ProviderQuoteID: providerQuote}
+	request := paymentcore.ExecuteRequest{IdempotencyKey: key, ProviderQuoteID: providerQuote}
 	if err := request.Validate(); err != nil {
 		return ExecuteResult{}, err
 	}
 	result, err := s.executionProvider.ExecutePayin(ctx, request)
 	if err != nil {
 		state := "unknown"
-		var providerErr *ProviderError
+		var providerErr *paymentcore.ProviderError
 		if errors.As(err, &providerErr) && !providerErr.Retryable {
 			state = "failed"
 		}

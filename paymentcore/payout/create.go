@@ -81,8 +81,7 @@ func (s *Service) createPayout(ctx context.Context, request CreatePaymentRequest
 	tenantID, idempotencyKey, payoutQuoteID := request.TenantID, request.IdempotencyKey, request.QuoteID
 	if payoutQuoteID == "" {
 		quote, err := s.CreateQuote(ctx, QuoteRequest{
-			QuoteRequest:            paymentcore.QuoteRequest{IdempotencyKey: idempotencyKey + ":implicit-quote", TenantID: tenantID, SourceCurrency: currency, DestinationCurrency: currency, CurrencyType: "sender", AmountMinor: amountMinor},
-			FundingMethod:           request.FundingMethod,
+			QuoteRequest:            paymentcore.QuoteRequest{IdempotencyKey: idempotencyKey + ":implicit-quote", TenantID: tenantID, FundingMethod: request.FundingMethod, SourceCurrency: currency, DestinationCurrency: currency, CurrencyType: "sender", AmountMinor: amountMinor},
 			SourceAccountID:         request.SourceAccountID,
 			DestinationInstrumentID: request.DestinationInstrumentID,
 		})

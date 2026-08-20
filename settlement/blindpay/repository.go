@@ -123,6 +123,18 @@ type ProviderResource struct {
 	Metadata          json.RawMessage
 }
 
+func (r *Repository) LoadPayoutExecutionContext(ctx context.Context, providerQuoteID string) (json.RawMessage, error) {
+	var executionContext json.RawMessage
+	err := r.db.QueryRowContext(ctx, `SELECT provider_execution_context FROM payment_quotes WHERE direction='payout' AND provider='blindpay' AND provider_quote_id=$1`, providerQuoteID).Scan(&executionContext)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrReferenceNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("load BlindPay payout execution context: %w", err)
+	}
+	return executionContext, nil
+}
+
 func (r *Repository) ResolveProviderResource(ctx context.Context, tenantID, id, resourceType string) (ProviderResource, error) {
 	var resource ProviderResource
 	err := r.db.QueryRowContext(ctx, `SELECT provider_reference,metadata FROM provider_resources WHERE id=$1 AND tenant_id=$2 AND provider='blindpay' AND resource_type=$3`, id, tenantID, resourceType).Scan(&resource.ProviderReference, &resource.Metadata)

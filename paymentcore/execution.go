@@ -19,7 +19,9 @@ const (
 	ExecutionFailed    ExecutionStatus = "failed"
 )
 
+// ProviderQuote is the provider-neutral result returned after StableRail asks a provider to create a quote.
 type ProviderQuote struct {
+	// Normalized quote data
 	ProviderQuoteID                        string
 	SourceCurrency, DestinationCurrency    string
 	SenderAmountMinor, ReceiverAmountMinor int64
@@ -27,12 +29,28 @@ type ProviderQuote struct {
 	FlatFeeMinor, PartnerFeeMinor          int64
 	BillingFeeMinor                        *int64
 	ExpiresAt                              time.Time
-	Payload                                json.RawMessage
+	// The original provider response, retained for auditing and troubleshooting
+	Payload json.RawMessage
+	// provider-owned information required later to execute the quote
+	ExecutionContext json.RawMessage
+}
+
+type ExecuteRequest struct {
+	IdempotencyKey  string
+	ProviderQuoteID string
+}
+
+func (r ExecuteRequest) Validate() error {
+	if r.IdempotencyKey == "" || r.ProviderQuoteID == "" {
+		return errors.New("execution idempotency key and provider quote ID are required")
+	}
+	return nil
 }
 
 type QuoteRequest struct {
 	IdempotencyKey      string
 	TenantID            string
+	FundingMethod       string
 	SourceCurrency      string
 	DestinationCurrency string
 	CurrencyType        string
@@ -47,6 +65,13 @@ type ExecutionResult struct {
 	FailureMessage    string
 	Payload           json.RawMessage
 }
+
+type ProviderError struct {
+	Message, Code string
+	Retryable     bool
+}
+
+func (e *ProviderError) Error() string { return e.Message }
 
 func (r ExecutionResult) Validate() error {
 	if r.ProviderReference == "" {

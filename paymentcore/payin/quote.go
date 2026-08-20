@@ -40,7 +40,11 @@ func (s *Service) CreateQuote(ctx context.Context, request QuoteRequest) (Quote,
 	if len(payload) == 0 {
 		payload = json.RawMessage(`{}`)
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO payment_quotes(id,direction,provider,provider_quote_id,tenant_id,idempotency_key,payment_method,currency_type,cover_fees,request_amount_minor,source_resource_id,destination_resource_id,source_currency,destination_currency,sender_amount_minor,receiver_amount_minor,status,expires_at,provider_payload,created_at,updated_at) VALUES($1,'payin',$2,$3,$4,$5,$6,$7,$8,$9,NULLIF($10,''),$11,$12,$13,$14,$15,'open',$16,$17,$18,$18)`, id, s.quoteProvider.Name(), result.ProviderQuoteID, request.TenantID, request.IdempotencyKey, request.FundingMethod, request.CurrencyType, request.CoverFees, request.AmountMinor, request.SourceInstrumentID, request.DestinationAccountID, result.SourceCurrency, result.DestinationCurrency, result.SenderAmountMinor, result.ReceiverAmountMinor, result.ExpiresAt, payload, now)
+	executionContext := result.ExecutionContext
+	if len(executionContext) == 0 {
+		executionContext = json.RawMessage(`{}`)
+	}
+	_, err = s.db.ExecContext(ctx, `INSERT INTO payment_quotes(id,direction,provider,provider_quote_id,tenant_id,idempotency_key,payment_method,currency_type,cover_fees,request_amount_minor,source_resource_id,destination_resource_id,source_currency,destination_currency,sender_amount_minor,receiver_amount_minor,status,expires_at,provider_payload,provider_execution_context,created_at,updated_at) VALUES($1,'payin',$2,$3,$4,$5,$6,$7,$8,$9,NULLIF($10,''),$11,$12,$13,$14,$15,'open',$16,$17,$18,$19,$19)`, id, s.quoteProvider.Name(), result.ProviderQuoteID, request.TenantID, request.IdempotencyKey, request.FundingMethod, request.CurrencyType, request.CoverFees, request.AmountMinor, request.SourceInstrumentID, request.DestinationAccountID, result.SourceCurrency, result.DestinationCurrency, result.SenderAmountMinor, result.ReceiverAmountMinor, result.ExpiresAt, payload, executionContext, now)
 	if err != nil {
 		return Quote{}, fmt.Errorf("store payin quote: %w", err)
 	}

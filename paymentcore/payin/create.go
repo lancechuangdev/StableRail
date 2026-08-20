@@ -51,8 +51,7 @@ func (s *Service) CreatePayment(ctx context.Context, request CreatePaymentReques
 	request.Currency = strings.ToUpper(strings.TrimSpace(request.Currency))
 	if request.QuoteID == "" {
 		quote, err := s.CreateQuote(ctx, QuoteRequest{
-			QuoteRequest:         paymentcore.QuoteRequest{IdempotencyKey: request.IdempotencyKey + ":implicit-quote", TenantID: request.TenantID, CurrencyType: "sender", SourceCurrency: request.Currency, DestinationCurrency: request.Currency, AmountMinor: request.AmountMinor},
-			FundingMethod:        request.FundingMethod,
+			QuoteRequest:         paymentcore.QuoteRequest{IdempotencyKey: request.IdempotencyKey + ":implicit-quote", TenantID: request.TenantID, FundingMethod: request.FundingMethod, CurrencyType: "sender", SourceCurrency: request.Currency, DestinationCurrency: request.Currency, AmountMinor: request.AmountMinor},
 			SourceInstrumentID:   request.SourceInstrumentID,
 			DestinationAccountID: request.DestinationAccountID,
 		})

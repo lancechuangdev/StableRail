@@ -6,17 +6,16 @@ import (
 	"testing"
 
 	"stablerail/paymentcore"
-	"stablerail/paymentcore/payout"
 )
 
 func TestMockProviderIsIdempotent(t *testing.T) {
-	p := NewMockProvider(payout.ExecutionResult{})
-	r := payout.ExecuteRequest{IdempotencyKey: "command-1", PaymentID: "payment-1", AmountMinor: 1250, Currency: "USD"}
+	p := NewMockProvider(paymentcore.ExecutionResult{})
+	r := paymentcore.ExecuteRequest{IdempotencyKey: "command-1", ProviderQuoteID: "quote-1"}
 	first, err := p.ExecutePayout(context.Background(), r)
 	if err != nil {
 		t.Fatal(err)
 	}
-	p.Result = payout.ExecutionResult{Status: paymentcore.ExecutionFailed, FailureCode: "declined"}
+	p.Result = paymentcore.ExecutionResult{Status: paymentcore.ExecutionFailed, FailureCode: "declined"}
 	second, err := p.ExecutePayout(context.Background(), r)
 	if err != nil {
 		t.Fatal(err)
@@ -27,8 +26,8 @@ func TestMockProviderIsIdempotent(t *testing.T) {
 }
 
 func TestFailedResultRequiresCode(t *testing.T) {
-	p := NewMockProvider(payout.ExecutionResult{Status: paymentcore.ExecutionFailed})
-	_, err := p.ExecutePayout(context.Background(), payout.ExecuteRequest{IdempotencyKey: "x", PaymentID: "p", AmountMinor: 1, Currency: "USD"})
+	p := NewMockProvider(paymentcore.ExecutionResult{Status: paymentcore.ExecutionFailed})
+	_, err := p.ExecutePayout(context.Background(), paymentcore.ExecuteRequest{IdempotencyKey: "x", ProviderQuoteID: "quote-1"})
 	if err == nil {
 		t.Fatal("expected invalid result")
 	}
