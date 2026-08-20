@@ -106,16 +106,16 @@ func run() error {
 	}
 	switch config.SettlementProvider {
 	case "mock":
-		mockProvider := settlement.NewMockProvider(payout.Result{})
-		mockProvider.ResultsByAmount = map[int64]payout.Result{}
+		mockProvider := settlement.NewMockProvider(payout.ExecutionResult{})
+		mockProvider.ResultsByAmount = map[int64]payout.ExecutionResult{}
 		if config.MockSettlementFailAmount > 0 {
-			mockProvider.ResultsByAmount[config.MockSettlementFailAmount] = payout.Result{Status: payout.StatusFailed, FailureCode: "local_failure", FailureMessage: "local settlement failed"}
+			mockProvider.ResultsByAmount[config.MockSettlementFailAmount] = payout.ExecutionResult{Status: paymentcore.ExecutionFailed, FailureCode: "local_failure", FailureMessage: "local settlement failed"}
 		}
 		if config.MockSettlementHoldAmount > 0 {
-			mockProvider.ResultsByAmount[config.MockSettlementHoldAmount] = payout.Result{Status: payout.StatusOnHold}
+			mockProvider.ResultsByAmount[config.MockSettlementHoldAmount] = payout.ExecutionResult{Status: paymentcore.ExecutionOnHold}
 		}
 		if config.MockSettlementPendingAmount > 0 {
-			mockProvider.ResultsByAmount[config.MockSettlementPendingAmount] = payout.Result{Status: payout.StatusPending}
+			mockProvider.ResultsByAmount[config.MockSettlementPendingAmount] = payout.ExecutionResult{Status: paymentcore.ExecutionPending}
 		}
 		provider = mockProvider
 	case "blindpay":
@@ -157,11 +157,11 @@ func run() error {
 	default:
 		return fmt.Errorf("unsupported settlement provider %q", config.SettlementProvider)
 	}
-	payouts, err := payout.NewService(db, provider)
+	payouts, err := payout.NewService(db, provider, provider)
 	if err != nil {
 		return err
 	}
-	payins, err := payin.NewService(db, provider)
+	payins, err := payin.NewService(db, provider, provider)
 	if err != nil {
 		return err
 	}

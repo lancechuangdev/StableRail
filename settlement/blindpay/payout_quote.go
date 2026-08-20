@@ -16,7 +16,7 @@ type PayoutQuoteRequest struct {
 	DestinationCurrency                      string
 	CurrencyType                             string
 	CoverFees                                bool
-	RequestAmountMinor                       int64
+	AmountMinor                              int64
 	PartnerFeeID                             string
 }
 
@@ -65,7 +65,7 @@ func NewQuoteService(client quoteClient, repo *Repository, network, token string
 
 func (s *QuoteService) Create(ctx context.Context, r PayoutQuoteRequest) (*PayoutQuote, error) {
 	r.DestinationCurrency = strings.ToUpper(strings.TrimSpace(r.DestinationCurrency))
-	if r.IdempotencyKey == "" || r.TenantID == "" || !strings.HasPrefix(r.BankAccountID, "ba_") || !strings.HasPrefix(r.ManagedWalletID, "bl_") || len(r.DestinationCurrency) != 3 || r.RequestAmountMinor <= 0 || (r.CurrencyType != "sender" && r.CurrencyType != "receiver") {
+	if r.IdempotencyKey == "" || r.TenantID == "" || !strings.HasPrefix(r.BankAccountID, "ba_") || !strings.HasPrefix(r.ManagedWalletID, "bl_") || len(r.DestinationCurrency) != 3 || r.AmountMinor <= 0 || (r.CurrencyType != "sender" && r.CurrencyType != "receiver") {
 		return nil, errors.New("invalid BlindPay payout quote request")
 	}
 	profile, err := s.repo.GetApprovedPayoutProfile(ctx, r.TenantID, r.BankAccountID, r.ManagedWalletID)
@@ -75,7 +75,7 @@ func (s *QuoteService) Create(ctx context.Context, r PayoutQuoteRequest) (*Payou
 	if profile.ManagedWallet.Network != s.network {
 		return nil, fmt.Errorf("managed wallet network %q does not match configured BlindPay network %q", profile.ManagedWallet.Network, s.network)
 	}
-	providerQuote, err := s.client.CreateQuote(ctx, QuoteRequest{IdempotencyKey: r.IdempotencyKey, BankAccountID: r.BankAccountID, CurrencyType: r.CurrencyType, CoverFees: r.CoverFees, RequestAmount: r.RequestAmountMinor, Network: s.network, Token: s.token, PartnerFeeID: r.PartnerFeeID})
+	providerQuote, err := s.client.CreateQuote(ctx, QuoteRequest{IdempotencyKey: r.IdempotencyKey, BankAccountID: r.BankAccountID, CurrencyType: r.CurrencyType, CoverFees: r.CoverFees, RequestAmount: r.AmountMinor, Network: s.network, Token: s.token, PartnerFeeID: r.PartnerFeeID})
 	if err != nil {
 		return nil, fmt.Errorf("create BlindPay payout quote: %w", err)
 	}

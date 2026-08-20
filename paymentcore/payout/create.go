@@ -6,13 +6,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"stablerail/paymentcore"
 )
 
 type Payment = paymentcore.Payment
-type PaymentDestination = paymentcore.Destination
 type PaymentStatus = paymentcore.PaymentStatus
 type FundsStatus = paymentcore.FundsStatus
 type AuditEvent = paymentcore.AuditEvent
@@ -36,29 +36,63 @@ var (
 )
 
 type CreatePaymentRequest struct {
-	ExternalReference string
-	Currency          string
-	AmountMinor       int64
-	TenantID          string
-	IdempotencyKey    string
-	QuoteID           string
-	Destination       *paymentcore.Destination
+	ExternalReference       string
+	Currency                string
+	AmountMinor             int64
+	TenantID                string
+	IdempotencyKey          string
+	QuoteID                 string
+	SourceAccountID         string
+	DestinationInstrumentID string
+}
+
+func (r CreatePaymentRequest) Validate() error {
+	if strings.TrimSpace(r.TenantID) == "" || strings.TrimSpace(r.IdempotencyKey) == "" || strings.TrimSpace(r.ExternalReference) == "" {
+		return errors.New("tenant, idempotency key, and external reference are required")
+	}
+	if len(strings.TrimSpace(r.Currency)) < 3 || len(strings.TrimSpace(r.Currency)) > 10 || r.AmountMinor <= 0 {
+		return errors.New("payout payments require currency and positive amount_minor")
+	}
+	direct := strings.TrimSpace(r.SourceAccountID) != "" || strings.TrimSpace(r.DestinationInstrumentID) != ""
+	if strings.TrimSpace(r.QuoteID) != "" {
+		if direct {
+			return errors.New("payout quote and direct resource IDs cannot be combined")
+		}
+		return nil
+	}
+	if strings.TrimSpace(r.SourceAccountID) == "" || strings.TrimSpace(r.DestinationInstrumentID) == "" {
+		return errors.New("direct payout requires source_account_id and destination_instrument_id")
+	}
+	return nil
 }
 
 func (s *Service) CreatePayment(ctx context.Context, request CreatePaymentRequest) (*Payment, error) {
-	if request.Destination != nil {
-		if err := request.Destination.Validate(); err != nil {
-			return nil, err
-		}
-		if request.QuoteID != "" {
-			return nil, errors.New("payout quote and destination cannot be combined")
-		}
+	if err := request.Validate(); err != nil {
+		return nil, err
 	}
+	return s.createPayout(ctx, request)
+}
+
+// createPayout creates the shared payment aggregate and binds its outbound
+// provider-resource route atomically. Provider submission happens asynchronously.
+func (s *Service) createPayout(ctx context.Context, request CreatePaymentRequest) (*Payment, error) {
 	externalRef, currency, amountMinor := request.ExternalReference, request.Currency, request.AmountMinor
 	tenantID, idempotencyKey, payoutQuoteID := request.TenantID, request.IdempotencyKey, request.QuoteID
-	destination := request.Destination
-	if externalRef == "" || currency == "" || amountMinor <= 0 || tenantID == "" || idempotencyKey == "" {
-		return nil, errors.New("invalid payment payload")
+	if payoutQuoteID == "" {
+		quote, err := s.CreateQuote(ctx, QuoteRequest{
+			IdempotencyKey:          idempotencyKey + ":implicit-quote",
+			TenantID:                tenantID,
+			SourceAccountID:         request.SourceAccountID,
+			DestinationInstrumentID: request.DestinationInstrumentID,
+			SourceCurrency:          currency,
+			DestinationCurrency:     currency,
+			CurrencyType:            "sender",
+			AmountMinor:             amountMinor,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("create implicit payout quote: %w", err)
+		}
+		payoutQuoteID = quote.ID
 	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -76,48 +110,45 @@ func (s *Service) CreatePayment(ctx context.Context, request CreatePaymentReques
 		ID: paymentID, Direction: PaymentDirectionPayout, ExternalReference: externalRef, Currency: currency,
 		AmountMinor: amountMinor, TenantID: tenantID, PaymentStatus: PaymentStatusCreated, FundsStatus: FundsStatusAvailable,
 		IdempotencyKey: idempotencyKey, QuoteID: payoutQuoteID, CreatedAt: now, UpdatedAt: now,
-		Destination: destination,
 	}
-	if payoutQuoteID != "" {
-		var quoteTenant, quoteCurrency string
-		var quoteAmount int64
-		var quoteStatus string
-		var expiresAt time.Time
-		err := tx.QueryRowContext(ctx, `SELECT tenant_id,source_currency,sender_amount_minor,status,expires_at FROM payment_quotes WHERE direction='payout' AND id=$1 FOR UPDATE`, payoutQuoteID).Scan(&quoteTenant, &quoteCurrency, &quoteAmount, &quoteStatus, &expiresAt)
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, errors.New("payout quote not found")
-		}
-		if err != nil {
-			return nil, fmt.Errorf("lock payout quote: %w", err)
-		}
-		if quoteStatus == "accepted" {
-			existing, lookupErr := getPaymentByIdempotencyKey(ctx, tx, idempotencyKey)
-			if lookupErr == nil {
-				if !paymentRequestMatches(existing, externalRef, currency, amountMinor, tenantID, payoutQuoteID, destination) {
-					return nil, ErrIdempotencyConflict
-				}
-				if err := tx.Commit(); err != nil {
-					return nil, fmt.Errorf("commit idempotent payout payment lookup: %w", err)
-				}
-				return existing, nil
-			}
-			if !errors.Is(lookupErr, sql.ErrNoRows) {
-				return nil, lookupErr
-			}
-			return nil, errors.New("payout quote already accepted")
-		}
-		if quoteStatus != "open" || !expiresAt.After(now) {
-			if _, err := tx.ExecContext(ctx, `UPDATE payment_quotes SET status='expired',updated_at=$1 WHERE id=$2 AND status='open'`, now, payoutQuoteID); err != nil {
-				return nil, fmt.Errorf("expire payout quote: %w", err)
+	var quoteTenant, quoteCurrency string
+	var quoteAmount int64
+	var quoteStatus string
+	var expiresAt time.Time
+	err = tx.QueryRowContext(ctx, `SELECT tenant_id,source_currency,sender_amount_minor,status,expires_at FROM payment_quotes WHERE direction='payout' AND id=$1 FOR UPDATE`, payoutQuoteID).Scan(&quoteTenant, &quoteCurrency, &quoteAmount, &quoteStatus, &expiresAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, errors.New("payout quote not found")
+	}
+	if err != nil {
+		return nil, fmt.Errorf("lock payout quote: %w", err)
+	}
+	if quoteStatus == "accepted" {
+		existing, lookupErr := getPaymentByIdempotencyKey(ctx, tx, idempotencyKey)
+		if lookupErr == nil {
+			if !paymentRequestMatches(existing, externalRef, currency, amountMinor, tenantID, payoutQuoteID) {
+				return nil, ErrIdempotencyConflict
 			}
 			if err := tx.Commit(); err != nil {
-				return nil, fmt.Errorf("commit payout quote expiration: %w", err)
+				return nil, fmt.Errorf("commit idempotent payout payment lookup: %w", err)
 			}
-			return nil, errors.New("payout quote expired")
+			return existing, nil
 		}
-		if quoteTenant != tenantID || quoteCurrency != currency || quoteAmount != amountMinor {
-			return nil, errors.New("payment tenant, amount, or currency does not match payout quote")
+		if !errors.Is(lookupErr, sql.ErrNoRows) {
+			return nil, lookupErr
 		}
+		return nil, errors.New("payout quote already accepted")
+	}
+	if quoteStatus != "open" || !expiresAt.After(now) {
+		if _, err := tx.ExecContext(ctx, `UPDATE payment_quotes SET status='expired',updated_at=$1 WHERE id=$2 AND status='open'`, now, payoutQuoteID); err != nil {
+			return nil, fmt.Errorf("expire payout quote: %w", err)
+		}
+		if err := tx.Commit(); err != nil {
+			return nil, fmt.Errorf("commit payout quote expiration: %w", err)
+		}
+		return nil, errors.New("payout quote expired")
+	}
+	if quoteTenant != tenantID || quoteCurrency != currency || quoteAmount != amountMinor {
+		return nil, errors.New("payment tenant, amount, or currency does not match payout quote")
 	}
 
 	result, err := tx.ExecContext(ctx, `
@@ -141,7 +172,7 @@ func (s *Service) CreatePayment(ctx context.Context, request CreatePaymentReques
 		if err != nil {
 			return nil, err
 		}
-		if !paymentRequestMatches(existing, externalRef, currency, amountMinor, tenantID, payoutQuoteID, destination) {
+		if !paymentRequestMatches(existing, externalRef, currency, amountMinor, tenantID, payoutQuoteID) {
 			return nil, ErrIdempotencyConflict
 		}
 		if err := tx.Commit(); err != nil {
@@ -149,19 +180,12 @@ func (s *Service) CreatePayment(ctx context.Context, request CreatePaymentReques
 		}
 		return existing, nil
 	}
-	if destination != nil {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO payment_destinations(payment_id,kind,chain,address,created_at) VALUES($1,$2,NULLIF($3,''),NULLIF($4,''),$5)`, payment.ID, destination.Type, destination.Chain, destination.Address, now); err != nil {
-			return nil, fmt.Errorf("insert payment destination: %w", err)
-		}
+	result, err = tx.ExecContext(ctx, `UPDATE payment_quotes SET status='accepted',payment_id=$1,updated_at=$2 WHERE id=$3 AND status='open'`, payment.ID, now, payoutQuoteID)
+	if err != nil {
+		return nil, fmt.Errorf("accept payout quote: %w", err)
 	}
-	if payoutQuoteID != "" {
-		result, err := tx.ExecContext(ctx, `UPDATE payment_quotes SET status='accepted',payment_id=$1,updated_at=$2 WHERE id=$3 AND status='open'`, payment.ID, now, payoutQuoteID)
-		if err != nil {
-			return nil, fmt.Errorf("accept payout quote: %w", err)
-		}
-		if rows, err := result.RowsAffected(); err != nil || rows != 1 {
-			return nil, errors.New("payout quote already accepted")
-		}
+	if rows, err := result.RowsAffected(); err != nil || rows != 1 {
+		return nil, errors.New("payout quote already accepted")
 	}
 	if err := insertHistory(ctx, tx, payment.ID, "created", "payment intent created", PaymentStatusCreated, "payment created", now); err != nil {
 		return nil, err
@@ -207,23 +231,11 @@ func getPaymentByIdempotencyKey(ctx context.Context, tx *sql.Tx, key string) (*P
 	if err := tx.QueryRowContext(ctx, `SELECT id FROM payment_quotes WHERE payment_id=$1`, payment.ID).Scan(&payment.QuoteID); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("get idempotent payment payout quote: %w", err)
 	}
-	var destination PaymentDestination
-	if err := tx.QueryRowContext(ctx, `SELECT kind,COALESCE(chain,''),COALESCE(address,'') FROM payment_destinations WHERE payment_id=$1`, payment.ID).Scan(&destination.Type, &destination.Chain, &destination.Address); err == nil {
-		payment.Destination = &destination
-	} else if !errors.Is(err, sql.ErrNoRows) {
-		return nil, fmt.Errorf("get idempotent payment destination: %w", err)
-	}
 	return payment, nil
 }
 
-func paymentRequestMatches(payment *Payment, externalRef, currency string, amountMinor int64, tenantID, payoutQuoteID string, destination *PaymentDestination) bool {
-	if payment.ExternalReference != externalRef || payment.Currency != currency || payment.AmountMinor != amountMinor || payment.TenantID != tenantID || payment.QuoteID != payoutQuoteID {
-		return false
-	}
-	if payment.Destination == nil || destination == nil {
-		return payment.Destination == nil && destination == nil
-	}
-	return *payment.Destination == *destination
+func paymentRequestMatches(payment *Payment, externalRef, currency string, amountMinor int64, tenantID, payoutQuoteID string) bool {
+	return payment.ExternalReference == externalRef && payment.Currency == currency && payment.AmountMinor == amountMinor && payment.TenantID == tenantID && payment.QuoteID == payoutQuoteID
 }
 
 func clonePayment(payment *Payment) *Payment {

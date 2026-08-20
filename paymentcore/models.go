@@ -58,7 +58,6 @@ type Payment struct {
 	UpdatedAt         time.Time            `json:"updated_at"`
 	IdempotencyKey    string               `json:"-"`
 	QuoteID           string               `json:"quote_id,omitempty"`
-	Destination       *Destination         `json:"destination,omitempty"`
 	Settlement        *SettlementOperation `json:"settlement,omitempty"`
 }
 
@@ -80,25 +79,6 @@ type SettlementOperation struct {
 	ProviderReference string `json:"provider_reference,omitempty"`
 	Status            string `json:"status"`
 	Instructions      any    `json:"instructions,omitempty"`
-}
-
-// Destination is immutable settlement routing selected when a payment is created.
-type Destination struct {
-	Type    string `json:"type"`
-	Chain   string `json:"chain,omitempty"`
-	Address string `json:"address,omitempty"`
-}
-
-func (d Destination) Validate() error {
-	switch d.Type {
-	case "blockchain_address":
-		if d.Chain == "" || d.Address == "" {
-			return errors.New("blockchain_address destination requires chain and address")
-		}
-	default:
-		return errors.New("unsupported payment destination")
-	}
-	return nil
 }
 
 type AccountType string

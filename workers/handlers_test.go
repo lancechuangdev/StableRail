@@ -20,13 +20,13 @@ import (
 
 type submissionFailurePayoutService struct {
 	appliedPaymentID, appliedCommandID, appliedCorrelationID string
-	appliedResult                                            payout.Result
+	appliedResult                                            payout.ExecutionResult
 }
 
-func (submissionFailurePayoutService) ExecutePayout(context.Context, string, string) (payout.Result, error) {
-	return payout.Result{}, &payout.ProviderError{Message: "insufficient balance", Code: "submission_failed", Retryable: false}
+func (submissionFailurePayoutService) ExecutePayout(context.Context, string, string) (payout.ExecutionResult, error) {
+	return payout.ExecutionResult{}, &payout.ProviderError{Message: "insufficient balance", Code: "submission_failed", Retryable: false}
 }
-func (s *submissionFailurePayoutService) ApplyResult(_ context.Context, _ *sql.Tx, paymentID, commandID, correlationID string, result payout.Result, _ time.Time) error {
+func (s *submissionFailurePayoutService) ApplyResult(_ context.Context, _ *sql.Tx, paymentID, commandID, correlationID string, result payout.ExecutionResult, _ time.Time) error {
 	s.appliedPaymentID, s.appliedCommandID, s.appliedCorrelationID, s.appliedResult = paymentID, commandID, correlationID, result
 	return nil
 }
@@ -47,7 +47,7 @@ type recordingPayinService struct {
 
 func (s *recordingPayinService) ExecutePayin(_ context.Context, id string) (payin.ExecuteResult, error) {
 	s.executedID = id
-	return payin.ExecuteResult{ProviderPayinID: "pi_1", Status: payin.StatusProcessing}, nil
+	return payin.ExecuteResult{ProviderReference: "pi_1", Status: paymentcore.ExecutionPending}, nil
 }
 func (s *recordingPayinService) ApplyResult(_ context.Context, _ *sql.Tx, id, correlation string, _ payin.ExecuteResult, _ time.Time) error {
 	s.appliedID, s.correlation = id, correlation
@@ -92,7 +92,7 @@ func TestSettlementSubmissionFailureDelegatesResultApplication(t *testing.T) {
 	if err := tx.Commit(); err != nil {
 		t.Fatal(err)
 	}
-	if payouts.appliedPaymentID != "pay_1" || payouts.appliedCommandID != "evt_command" || payouts.appliedCorrelationID != "corr_1" || payouts.appliedResult.Status != payout.StatusFailed || payouts.appliedResult.FailureCode != "submission_failed" {
+	if payouts.appliedPaymentID != "pay_1" || payouts.appliedCommandID != "evt_command" || payouts.appliedCorrelationID != "corr_1" || payouts.appliedResult.Status != paymentcore.ExecutionFailed || payouts.appliedResult.FailureCode != "submission_failed" {
 		t.Fatalf("applied payout result = %+v", payouts)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {

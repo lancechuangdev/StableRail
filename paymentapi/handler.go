@@ -17,7 +17,7 @@ import (
 
 type PayoutService interface {
 	CreatePayment(context.Context, payout.CreatePaymentRequest) (*paymentcore.Payment, error)
-	CreateQuote(context.Context, payout.QuoteRequest) (payout.QuoteResult, error)
+	CreateQuote(context.Context, payout.QuoteRequest) (payout.Quote, error)
 	CreateRefund(context.Context, string, string, string, int64, string, string) (*paymentcore.Refund, error)
 }
 type PaymentReader interface {
@@ -105,17 +105,18 @@ func (h *Handler) createRefund(w http.ResponseWriter, r *http.Request) {
 }
 
 type createRequest struct {
-	Direction            paymentcore.PaymentDirection `json:"direction"`
-	ExternalReference    string                       `json:"external_reference"`
-	Currency             string                       `json:"currency"`
-	AmountMinor          int64                        `json:"amount_minor"`
-	TenantID             string                       `json:"tenant_id"`
-	Destination          *paymentcore.Destination     `json:"destination,omitempty"`
-	QuoteID              string                       `json:"quote_id,omitempty"`
-	PayoutQuoteID        string                       `json:"payout_quote_id,omitempty"` // deprecated input alias
-	FundingMethod        string                       `json:"funding_method,omitempty"`
-	SourceInstrumentID   string                       `json:"source_instrument_id,omitempty"`
-	DestinationAccountID string                       `json:"destination_account_id,omitempty"`
+	Direction               paymentcore.PaymentDirection `json:"direction"`
+	ExternalReference       string                       `json:"external_reference"`
+	Currency                string                       `json:"currency"`
+	AmountMinor             int64                        `json:"amount_minor"`
+	TenantID                string                       `json:"tenant_id"`
+	QuoteID                 string                       `json:"quote_id,omitempty"`
+	PayoutQuoteID           string                       `json:"payout_quote_id,omitempty"` // deprecated input alias
+	FundingMethod           string                       `json:"funding_method,omitempty"`
+	SourceAccountID         string                       `json:"source_account_id,omitempty"`
+	DestinationInstrumentID string                       `json:"destination_instrument_id,omitempty"`
+	SourceInstrumentID      string                       `json:"source_instrument_id,omitempty"`
+	DestinationAccountID    string                       `json:"destination_account_id,omitempty"`
 }
 
 func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
@@ -168,10 +169,6 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 			problem(w, http.StatusNotImplemented, "payin payments are not configured")
 			return
 		}
-		if input.Destination != nil {
-			problem(w, http.StatusBadRequest, "payin payments do not accept a payout destination")
-			return
-		}
 		request := payin.CreatePaymentRequest{
 			TenantID:             tenantID,
 			IdempotencyKey:       key,
@@ -191,35 +188,27 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 		successStatus = http.StatusAccepted
 
 	case paymentcore.PaymentDirectionPayout:
-		if len(input.Currency) < 3 || len(input.Currency) > 10 || input.AmountMinor <= 0 {
-			problem(w, http.StatusBadRequest, "payout payments require currency and positive amount_minor")
+		request := payout.CreatePaymentRequest{
+			TenantID:                tenantID,
+			IdempotencyKey:          key,
+			ExternalReference:       input.ExternalReference,
+			QuoteID:                 input.QuoteID,
+			AmountMinor:             input.AmountMinor,
+			Currency:                input.Currency,
+			SourceAccountID:         strings.TrimSpace(input.SourceAccountID),
+			DestinationInstrumentID: strings.TrimSpace(input.DestinationInstrumentID),
+		}
+		if err := request.Validate(); err != nil {
+			problem(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		if input.Destination != nil {
-			if err := input.Destination.Validate(); err != nil {
-				problem(w, http.StatusBadRequest, err.Error())
-				return
-			}
-		}
-		if input.Destination != nil && input.QuoteID != "" {
-			problem(w, http.StatusBadRequest, "payout quote and destination cannot be combined")
-			return
-		}
-		payment, err = h.payouts.CreatePayment(r.Context(), payout.CreatePaymentRequest{
-			TenantID:          tenantID,
-			IdempotencyKey:    key,
-			ExternalReference: input.ExternalReference,
-			QuoteID:           input.QuoteID,
-			AmountMinor:       input.AmountMinor,
-			Currency:          input.Currency,
-			Destination:       input.Destination,
-		})
-		successStatus = http.StatusCreated
+		payment, err = h.payouts.CreatePayment(r.Context(), request)
+		successStatus = http.StatusAccepted
 	}
 
 	if err != nil {
 		switch {
-		case errors.Is(err, paymentcore.ErrIdempotencyConflict), errors.Is(err, payin.ErrIdempotencyConflict):
+		case errors.Is(err, paymentcore.ErrIdempotencyConflict), errors.Is(err, payout.ErrQuoteIdempotencyConflict), errors.Is(err, payin.ErrIdempotencyConflict):
 			problem(w, http.StatusConflict, err.Error())
 		case input.Direction == paymentcore.PaymentDirectionPayin:
 			problem(w, http.StatusBadRequest, err.Error())
@@ -241,7 +230,7 @@ type createPayoutQuoteRequest struct {
 	DestinationCurrency     string                       `json:"destination_currency"`
 	CurrencyType            string                       `json:"currency_type"`
 	CoverFees               bool                         `json:"cover_fees"`
-	RequestAmountMinor      int64                        `json:"request_amount_minor"`
+	AmountMinor             int64                        `json:"request_amount_minor"`
 }
 
 func (h *Handler) createPaymentQuote(w http.ResponseWriter, r *http.Request) {
@@ -339,7 +328,7 @@ func (h *Handler) createPayoutQuote(w http.ResponseWriter, r *http.Request) {
 		}
 		tenantID = authenticated
 	}
-	q, err := h.payouts.CreateQuote(r.Context(), payout.QuoteRequest{IdempotencyKey: key, TenantID: tenantID, SourceAccountID: input.SourceAccountID, DestinationInstrumentID: input.DestinationInstrumentID, SourceCurrency: input.SourceCurrency, DestinationCurrency: input.DestinationCurrency, CurrencyType: input.CurrencyType, CoverFees: input.CoverFees, RequestAmountMinor: input.RequestAmountMinor})
+	q, err := h.payouts.CreateQuote(r.Context(), payout.QuoteRequest{IdempotencyKey: key, TenantID: tenantID, SourceAccountID: input.SourceAccountID, DestinationInstrumentID: input.DestinationInstrumentID, SourceCurrency: input.SourceCurrency, DestinationCurrency: input.DestinationCurrency, CurrencyType: input.CurrencyType, CoverFees: input.CoverFees, AmountMinor: input.AmountMinor})
 	if err != nil {
 		problem(w, http.StatusBadRequest, err.Error())
 		return

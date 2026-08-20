@@ -2,14 +2,16 @@ package payin_test
 
 import (
 	"context"
+	"testing"
+
+	"stablerail/paymentcore"
 	"stablerail/paymentcore/payin"
 	"stablerail/paymentcore/payout"
 	"stablerail/settlement"
-	"testing"
 )
 
 func TestMockProviderCreatesQuoteAndCompletesPayin(t *testing.T) {
-	p := settlement.NewMockProvider(payout.Result{})
+	p := settlement.NewMockProvider(payout.ExecutionResult{})
 	q, err := p.CreatePayinQuote(context.Background(), payin.QuoteRequest{IdempotencyKey: "quote-1", TenantID: "tenant-1", FundingMethod: "ach", CurrencyType: "sender", DestinationAccountID: "acct_1", DestinationCurrency: "USDB", SourceCurrency: "USD", AmountMinor: 1000})
 	if err != nil {
 		t.Fatal(err)
@@ -21,7 +23,7 @@ func TestMockProviderCreatesQuoteAndCompletesPayin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.Status != payin.StatusSucceeded || r.ProviderPayinID == "" || len(r.Instructions) == 0 {
+	if r.Status != paymentcore.ExecutionSucceeded || r.ProviderReference == "" || len(r.Instructions) == 0 {
 		t.Fatalf("payin=%+v", r)
 	}
 }

@@ -7,22 +7,23 @@ import (
 	"strings"
 	"time"
 
+	"stablerail/paymentcore"
 	corepayin "stablerail/paymentcore/payin"
 )
 
-func (p *Provider) CreatePayinQuote(ctx context.Context, r corepayin.QuoteRequest) (corepayin.QuoteResult, error) {
+func (p *Provider) CreatePayinQuote(ctx context.Context, r corepayin.QuoteRequest) (corepayin.ProviderQuote, error) {
 	if err := r.Validate(); err != nil {
-		return corepayin.QuoteResult{}, err
+		return corepayin.ProviderQuote{}, err
 	}
 	destination, err := p.quotes.repo.ResolveProviderResource(ctx, r.TenantID, r.DestinationAccountID, "account")
 	if err != nil {
-		return corepayin.QuoteResult{}, err
+		return corepayin.ProviderQuote{}, err
 	}
 	var metadata struct {
 		Kind string `json:"kind"`
 	}
 	if err := json.Unmarshal(destination.Metadata, &metadata); err != nil {
-		return corepayin.QuoteResult{}, err
+		return corepayin.ProviderQuote{}, err
 	}
 	walletID, blockchainWalletID := "", ""
 	if metadata.Kind == "managed_wallet" {
@@ -32,13 +33,13 @@ func (p *Provider) CreatePayinQuote(ctx context.Context, r corepayin.QuoteReques
 	}
 	q, err := p.client.CreatePayinQuote(ctx, PayinQuoteRequest{IdempotencyKey: r.IdempotencyKey, WalletID: walletID, BlockchainWalletID: blockchainWalletID, CurrencyType: r.CurrencyType, CoverFees: r.CoverFees, RequestAmount: r.AmountMinor, PaymentMethod: r.FundingMethod, Token: r.DestinationCurrency})
 	if err != nil {
-		return corepayin.QuoteResult{}, err
+		return corepayin.ProviderQuote{}, err
 	}
 	source := strings.ToUpper(r.SourceCurrency)
 	if source == "" {
 		source = payinCurrency(r.FundingMethod)
 	}
-	return corepayin.QuoteResult{ProviderQuoteID: q.ID, SourceCurrency: source, DestinationCurrency: strings.ToUpper(r.DestinationCurrency), SenderAmountMinor: q.SenderAmount, ReceiverAmountMinor: q.ReceiverAmount, ExpiresAt: time.UnixMilli(q.ExpiresAt).UTC(), Payload: q.RawPayload}, nil
+	return corepayin.ProviderQuote{ProviderQuoteID: q.ID, SourceCurrency: source, DestinationCurrency: strings.ToUpper(r.DestinationCurrency), SenderAmountMinor: q.SenderAmount, ReceiverAmountMinor: q.ReceiverAmount, ExpiresAt: time.UnixMilli(q.ExpiresAt).UTC(), Payload: q.RawPayload}, nil
 }
 func (p *Provider) ExecutePayin(ctx context.Context, r corepayin.ExecuteRequest) (corepayin.ExecuteResult, error) {
 	providerQuoteID := r.QuoteID
@@ -57,20 +58,25 @@ func (p *Provider) ExecutePayin(ctx context.Context, r corepayin.ExecuteRequest)
 		}
 		return corepayin.ExecuteResult{}, &corepayin.ProviderError{Message: err.Error(), Retryable: true}
 	}
-	return corepayin.ExecuteResult{ProviderPayinID: v.ID, Status: mapPayinStatus(v.Status), Instructions: v.Instructions, Payload: v.RawPayload}, nil
+	status := mapPayinStatus(v.Status)
+	result := corepayin.ExecuteResult{ProviderReference: v.ID, Status: status, Instructions: v.Instructions, Payload: v.RawPayload}
+	if v.Status == "refunded" {
+		result.FailureCode = "refunded"
+	}
+	return result, nil
 }
-func mapPayinStatus(v string) corepayin.PayinStatus {
+func mapPayinStatus(v string) paymentcore.ExecutionStatus {
 	switch v {
 	case "completed":
-		return corepayin.StatusSucceeded
+		return paymentcore.ExecutionSucceeded
 	case "failed":
-		return corepayin.StatusFailed
+		return paymentcore.ExecutionFailed
 	case "refunded":
-		return corepayin.StatusRefunded
+		return paymentcore.ExecutionFailed
 	case "on_hold":
-		return corepayin.StatusOnHold
+		return paymentcore.ExecutionOnHold
 	default:
-		return corepayin.StatusProcessing
+		return paymentcore.ExecutionPending
 	}
 }
 func payinCurrency(method string) string {

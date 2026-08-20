@@ -29,7 +29,8 @@ func TestPostgresPaymentHTTPIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	payouts, err := payout.NewService(db, settlement.NewMockProvider(payout.Result{}))
+	provider := settlement.NewMockProvider(payout.ExecutionResult{})
+	payouts, err := payout.NewService(db, provider, provider)
 	if err != nil {
 		t.Fatal(err)
 	}

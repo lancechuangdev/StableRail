@@ -13,8 +13,8 @@ import (
 type unusedProvider struct{}
 
 func (unusedProvider) Name() string { return "test" }
-func (unusedProvider) CreatePayinQuote(context.Context, QuoteRequest) (QuoteResult, error) {
-	return QuoteResult{}, nil
+func (unusedProvider) CreatePayinQuote(context.Context, QuoteRequest) (ProviderQuote, error) {
+	return ProviderQuote{}, nil
 }
 func (unusedProvider) ExecutePayin(context.Context, ExecuteRequest) (ExecuteResult, error) {
 	return ExecuteResult{}, nil
@@ -26,7 +26,8 @@ func TestFailureBeforeReceiptPreservesPendingFunds(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	service, _ := NewService(db, unusedProvider{})
+	provider := unusedProvider{}
+	service, _ := NewService(db, provider, provider)
 	now := time.Date(2026, time.August, 18, 12, 0, 0, 0, time.UTC)
 	mock.ExpectBegin()
 	mock.ExpectQuery("SELECT p.payment_id,pm.funds_status").WithArgs("pin_1").WillReturnRows(sqlmock.NewRows([]string{"payment_id", "funds_status"}).AddRow("pay_1", "pending"))
@@ -37,7 +38,7 @@ func TestFailureBeforeReceiptPreservesPendingFunds(t *testing.T) {
 	mock.ExpectExec("INSERT INTO outbox_events").WithArgs("evt_pin_1_failed_payment", eventbus.PaymentEventsTopic, "payment.failed", eventbus.PaymentFailedVersion, "pay_1", sqlmock.AnyArg(), now).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 	tx, _ := db.BeginTx(context.Background(), nil)
-	if err := service.ApplyResult(context.Background(), tx, "pin_1", "corr_1", ExecuteResult{Status: StatusFailed, FailureReason: "policy rejected"}, now); err != nil {
+	if err := service.ApplyResult(context.Background(), tx, "pin_1", "corr_1", ExecuteResult{Status: paymentcore.ExecutionFailed, FailureMessage: "policy rejected"}, now); err != nil {
 		t.Fatal(err)
 	}
 	if err := tx.Commit(); err != nil {

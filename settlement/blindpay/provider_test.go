@@ -7,6 +7,7 @@ import (
 
 	"github.com/DATA-DOG/go-sqlmock"
 
+	"stablerail/paymentcore"
 	"stablerail/paymentcore/payout"
 )
 
@@ -31,11 +32,11 @@ func TestProviderMapsProcessingPayoutToPendingSettlement(t *testing.T) {
 	provider := &Provider{payoutClient: client, repo: &Repository{db: db}}
 	mock.ExpectQuery("SELECT provider_reference,metadata FROM provider_resources").WithArgs("acct_test", "tenant_test", "account").WillReturnRows(sqlmock.NewRows([]string{"provider_reference", "metadata"}).AddRow("bl_test", []byte(`{"address":"0xabc"}`)))
 
-	result, err := provider.ExecutePayout(context.Background(), payout.Request{IdempotencyKey: "idem-1", PaymentID: "pay_test", TenantID: "tenant_test", SourceAccountID: "acct_test", ProviderQuoteID: "qu_test", AmountMinor: 1, Currency: "USDB"})
+	result, err := provider.ExecutePayout(context.Background(), payout.ExecuteRequest{IdempotencyKey: "idem-1", PaymentID: "pay_test", TenantID: "tenant_test", SourceAccountID: "acct_test", ProviderQuoteID: "qu_test", AmountMinor: 1, Currency: "USDB"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.ProviderReference != "po_test" || result.Status != payout.StatusPending {
+	if result.ProviderReference != "po_test" || result.Status != paymentcore.ExecutionPending {
 		t.Fatalf("result=%+v", result)
 	}
 }
@@ -50,7 +51,7 @@ func TestProviderClassifiesPermanentAPIErrorAsSubmissionFailure(t *testing.T) {
 	provider := &Provider{payoutClient: client, repo: &Repository{db: db}}
 	mock.ExpectQuery("SELECT provider_reference,metadata FROM provider_resources").WillReturnRows(sqlmock.NewRows([]string{"provider_reference", "metadata"}).AddRow("bl_test", []byte(`{"address":"0xabc"}`)))
 
-	_, err = provider.ExecutePayout(context.Background(), payout.Request{IdempotencyKey: "idem-1", PaymentID: "pay_test", TenantID: "tenant_test", SourceAccountID: "acct_test", ProviderQuoteID: "qu_test", AmountMinor: 1, Currency: "USDB"})
+	_, err = provider.ExecutePayout(context.Background(), payout.ExecuteRequest{IdempotencyKey: "idem-1", PaymentID: "pay_test", TenantID: "tenant_test", SourceAccountID: "acct_test", ProviderQuoteID: "qu_test", AmountMinor: 1, Currency: "USDB"})
 	var providerErr *payout.ProviderError
 	if !errors.As(err, &providerErr) || providerErr.Retryable || providerErr.Code != "submission_failed" {
 		t.Fatalf("error=%v, want non-retryable submission_failed", err)

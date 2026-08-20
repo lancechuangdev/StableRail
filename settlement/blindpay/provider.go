@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 
+	"stablerail/paymentcore"
 	"stablerail/paymentcore/payout"
 )
 
@@ -30,26 +31,26 @@ func NewProvider(quotes *QuoteService, client *Client, repo *Repository) (*Provi
 
 func (*Provider) Name() string { return "blindpay" }
 
-func (p *Provider) CreatePayoutQuote(ctx context.Context, request payout.QuoteRequest) (payout.QuoteResult, error) {
+func (p *Provider) CreatePayoutQuote(ctx context.Context, request payout.QuoteRequest) (payout.ProviderQuote, error) {
 	source, err := p.quotes.repo.ResolveProviderResource(ctx, request.TenantID, request.SourceAccountID, "account")
 	if err != nil {
-		return payout.QuoteResult{}, err
+		return payout.ProviderQuote{}, err
 	}
 	destination, err := p.quotes.repo.ResolveProviderResource(ctx, request.TenantID, request.DestinationInstrumentID, "payment_instrument")
 	if err != nil {
-		return payout.QuoteResult{}, err
+		return payout.ProviderQuote{}, err
 	}
 	quote, err := p.quotes.Create(ctx, PayoutQuoteRequest{
 		IdempotencyKey: request.IdempotencyKey, TenantID: request.TenantID,
 		BankAccountID: destination.ProviderReference, ManagedWalletID: source.ProviderReference,
 		SourceAccountID: request.SourceAccountID, DestinationInstrumentID: request.DestinationInstrumentID,
 		DestinationCurrency: request.DestinationCurrency, CurrencyType: request.CurrencyType,
-		CoverFees: request.CoverFees, RequestAmountMinor: request.RequestAmountMinor,
+		CoverFees: request.CoverFees, AmountMinor: request.AmountMinor,
 	})
 	if err != nil {
-		return payout.QuoteResult{}, err
+		return payout.ProviderQuote{}, err
 	}
-	return payout.QuoteResult{
+	return payout.ProviderQuote{
 		ProviderQuoteID: quote.ProviderQuoteID,
 		SourceCurrency:  quote.SourceCurrency, DestinationCurrency: quote.DestinationCurrency,
 		SenderAmountMinor: quote.SenderAmountMinor, ReceiverAmountMinor: quote.ReceiverAmountMinor,
@@ -59,19 +60,19 @@ func (p *Provider) CreatePayoutQuote(ctx context.Context, request payout.QuoteRe
 	}, nil
 }
 
-func (p *Provider) ExecutePayout(ctx context.Context, request payout.Request) (payout.Result, error) {
+func (p *Provider) ExecutePayout(ctx context.Context, request payout.ExecuteRequest) (payout.ExecutionResult, error) {
 	if err := request.Validate(); err != nil {
-		return payout.Result{}, err
+		return payout.ExecutionResult{}, err
 	}
 	resource, err := p.repo.ResolveProviderResource(ctx, request.TenantID, request.SourceAccountID, "account")
 	if err != nil {
-		return payout.Result{}, err
+		return payout.ExecutionResult{}, err
 	}
 	var metadata struct {
 		Address string `json:"address"`
 	}
 	if err := json.Unmarshal(resource.Metadata, &metadata); err != nil || metadata.Address == "" {
-		return payout.Result{}, errors.New("BlindPay payout source account has no wallet address")
+		return payout.ExecutionResult{}, errors.New("BlindPay payout source account has no wallet address")
 	}
 	providerPayout, err := p.payoutClient.CreateEVMPayout(ctx, PayoutRequest{IdempotencyKey: request.IdempotencyKey, QuoteID: request.ProviderQuoteID, SenderWalletAddress: metadata.Address})
 	if err != nil {
@@ -83,26 +84,26 @@ func (p *Provider) ExecutePayout(ctx context.Context, request payout.Request) (p
 			if !retryable {
 				code = "submission_failed"
 			}
-			return payout.Result{}, &payout.ProviderError{Message: err.Error(), Code: code, Retryable: retryable}
+			return payout.ExecutionResult{}, &payout.ProviderError{Message: err.Error(), Code: code, Retryable: retryable}
 		default:
-			return payout.Result{}, err
+			return payout.ExecutionResult{}, err
 		}
 	}
-	result := payout.Result{ProviderReference: providerPayout.ID, Payload: providerPayout.RawPayload}
+	result := payout.ExecutionResult{ProviderReference: providerPayout.ID, Payload: providerPayout.RawPayload}
 	switch providerPayout.Status {
 	case "completed":
-		result.Status = payout.StatusSucceeded
+		result.Status = paymentcore.ExecutionSucceeded
 	case "processing", "submission_pending", "unknown":
-		result.Status = payout.StatusPending
+		result.Status = paymentcore.ExecutionPending
 	case "on_hold":
-		result.Status = payout.StatusOnHold
+		result.Status = paymentcore.ExecutionOnHold
 	case "failed", "refunded", "submission_failed":
-		result.Status, result.FailureCode = payout.StatusFailed, providerPayout.Status
+		result.Status, result.FailureCode = paymentcore.ExecutionFailed, providerPayout.Status
 	default:
-		return payout.Result{}, fmt.Errorf("unsupported BlindPay payout status %q", providerPayout.Status)
+		return payout.ExecutionResult{}, fmt.Errorf("unsupported BlindPay payout status %q", providerPayout.Status)
 	}
 	if err := result.Validate(); err != nil {
-		return payout.Result{}, err
+		return payout.ExecutionResult{}, err
 	}
 	return result, nil
 }

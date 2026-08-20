@@ -33,13 +33,6 @@ func (r *Repository) GetPayment(ctx context.Context, paymentID string) (*Payment
 	if err != nil {
 		return nil, fmt.Errorf("get payment: %w", err)
 	}
-	var destination Destination
-	err = r.db.QueryRowContext(ctx, `SELECT kind,COALESCE(chain,''),COALESCE(address,'') FROM payment_destinations WHERE payment_id=$1`, paymentID).Scan(&destination.Type, &destination.Chain, &destination.Address)
-	if err == nil {
-		p.Destination = &destination
-	} else if !errors.Is(err, sql.ErrNoRows) {
-		return nil, fmt.Errorf("get payment destination: %w", err)
-	}
 	if err := r.db.QueryRowContext(ctx, `SELECT id FROM payment_quotes WHERE payment_id=$1`, paymentID).Scan(&p.QuoteID); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("get payment quote: %w", err)
 	}

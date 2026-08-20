@@ -7,20 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"stablerail/paymentcore"
 )
 
-type PayoutStatus string
-
-const (
-	StatusPending   PayoutStatus = "pending"
-	StatusOnHold    PayoutStatus = "on_hold"
-	StatusSucceeded PayoutStatus = "succeeded"
-	StatusFailed    PayoutStatus = "failed"
-)
-
-type Destination struct{ Type, Chain, Address string }
-
-type Request struct {
+type ExecuteRequest struct {
 	IdempotencyKey  string
 	PaymentID       string
 	TenantID        string
@@ -29,25 +20,24 @@ type Request struct {
 	SourceAccountID string
 	AmountMinor     int64
 	Currency        string
-	Destination     *Destination
 }
 
-type Result struct {
+type ExecutionResult struct {
 	ProviderReference string
-	Status            PayoutStatus
+	Status            paymentcore.ExecutionStatus
 	FailureCode       string
 	FailureMessage    string
 	Payload           json.RawMessage
 }
 
-type ExecutionProvider interface {
+type QuoteProvider interface {
 	Name() string
-	ExecutePayout(context.Context, Request) (Result, error)
+	CreatePayoutQuote(context.Context, QuoteRequest) (ProviderQuote, error)
 }
 
-type Provider interface {
-	ExecutionProvider
-	CreatePayoutQuote(context.Context, QuoteRequest) (QuoteResult, error)
+type ExecutionProvider interface {
+	Name() string
+	ExecutePayout(context.Context, ExecuteRequest) (ExecutionResult, error)
 }
 
 type ProviderError struct {
@@ -63,12 +53,11 @@ type QuoteRequest struct {
 	SourceAccountID, DestinationInstrumentID          string
 	SourceCurrency, DestinationCurrency, CurrencyType string
 	CoverFees                                         bool
-	RequestAmountMinor                                int64
+	AmountMinor                                       int64
 }
 
-type QuoteResult struct {
-	Direction                              string `json:"direction"`
-	ID, Provider, ProviderQuoteID, Status  string
+type ProviderQuote struct {
+	ProviderQuoteID                        string
 	SourceCurrency, DestinationCurrency    string
 	SenderAmountMinor, ReceiverAmountMinor int64
 	CommercialRate, ProviderRate           string
@@ -79,27 +68,27 @@ type QuoteResult struct {
 }
 
 func (r QuoteRequest) Validate() error {
-	if r.IdempotencyKey == "" || r.TenantID == "" || r.SourceAccountID == "" || r.DestinationInstrumentID == "" || r.SourceCurrency == "" || r.DestinationCurrency == "" || r.RequestAmountMinor <= 0 || (r.CurrencyType != "sender" && r.CurrencyType != "receiver") {
+	if r.IdempotencyKey == "" || r.TenantID == "" || r.SourceAccountID == "" || r.DestinationInstrumentID == "" || r.SourceCurrency == "" || r.DestinationCurrency == "" || r.AmountMinor <= 0 || (r.CurrencyType != "sender" && r.CurrencyType != "receiver") {
 		return errors.New("payout quote identity, route, currencies, positive amount, and valid currency type are required")
 	}
 	return nil
 }
 
-func (r Request) Validate() error {
+func (r ExecuteRequest) Validate() error {
 	if r.IdempotencyKey == "" || r.PaymentID == "" || r.Currency == "" || r.AmountMinor <= 0 {
 		return errors.New("payout identity, positive amount, and currency are required")
 	}
 	return nil
 }
 
-func (r Result) Validate() error {
+func (r ExecutionResult) Validate() error {
 	if r.ProviderReference == "" {
 		return errors.New("provider reference is required")
 	}
 	switch r.Status {
-	case StatusPending, StatusOnHold, StatusSucceeded:
+	case paymentcore.ExecutionPending, paymentcore.ExecutionOnHold, paymentcore.ExecutionSucceeded:
 		return nil
-	case StatusFailed:
+	case paymentcore.ExecutionFailed:
 		if r.FailureCode == "" {
 			return errors.New("failed payout requires a failure code")
 		}
@@ -107,23 +96,4 @@ func (r Result) Validate() error {
 	default:
 		return fmt.Errorf("invalid payout status %q", r.Status)
 	}
-}
-
-// Operation is the provider-neutral persisted payout snapshot.
-type Operation struct {
-	PaymentID               string
-	QuoteID                 string
-	TenantID                string
-	SourceAccountID         string
-	DestinationInstrumentID string
-	Method                  string
-	SourceAmountMinor       int64
-	SourceCurrency          string
-	DestinationAmountMinor  int64
-	DestinationCurrency     string
-	Provider                string
-	ProviderReference       string
-	Status                  string
-	CreatedAt               time.Time
-	UpdatedAt               time.Time
 }
