@@ -63,7 +63,7 @@ func (tenant *Tenant) CreatePaymentWithQuote(t *testing.T, key, reference string
 
 func (tenant *Tenant) CreatePaymentWithQuoteAmount(t *testing.T, key, reference string, quote PayoutQuote, amount int64) (*Payment, int) {
 	t.Helper()
-	body := map[string]any{"external_reference": reference, "currency": "USDB", "amount_minor": amount, "payout_quote_id": quote.ID}
+	body := map[string]any{"direction": "payout", "external_reference": reference, "currency": "USDB", "amount_minor": amount, "payout_quote_id": quote.ID}
 	response := tenant.Env.request(t, http.MethodPost, "/v1/payments", tenant.APIKey, key, body)
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusCreated {

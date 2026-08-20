@@ -37,7 +37,7 @@ func (f *fakeStore) CreateRefund(_ context.Context, paymentID, tenantID, key str
 func TestCreatePaymentDerivesAuthenticatedTenant(t *testing.T) {
 	store := &fakeStore{payment: &paymentcore.Payment{ID: "pay_1", PaymentStatus: paymentcore.PaymentStatusCreated}}
 	h, _ := NewHandler(store, fakeHealth{}, nil)
-	req := httptest.NewRequest(http.MethodPost, "/v1/payments", strings.NewReader(`{"external_reference":"order-1","currency":"USD","amount_minor":1250}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/payments", strings.NewReader(`{"direction":"payout","external_reference":"order-1","currency":"USD","amount_minor":1250}`))
 	req = req.WithContext(context.WithValue(req.Context(), tenantContextKey{}, "tenant-authenticated"))
 	req.Header.Set("Idempotency-Key", "request-1")
 	res := httptest.NewRecorder()
@@ -104,7 +104,7 @@ func (f *fakePayoutQuoteService) CreateQuote(_ context.Context, request payout.Q
 func TestCreatePayment(t *testing.T) {
 	store := &fakeStore{payment: &paymentcore.Payment{ID: "pay_1", PaymentStatus: paymentcore.PaymentStatusCreated}}
 	h, _ := NewHandler(store, fakeHealth{}, nil)
-	req := httptest.NewRequest(http.MethodPost, "/v1/payments", strings.NewReader(`{"external_reference":"order-1","currency":"usd","amount_minor":1250,"tenant_id":"cus-1"}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/payments", strings.NewReader(`{"direction":"payout","external_reference":"order-1","currency":"usd","amount_minor":1250,"tenant_id":"cus-1"}`))
 	req.Header.Set("Idempotency-Key", "request-1")
 	res := httptest.NewRecorder()
 	h.ServeHTTP(res, req)
@@ -126,10 +126,27 @@ func TestCreatePaymentValidation(t *testing.T) {
 	}
 }
 
+func TestCreatePaymentRequiresExplicitDirection(t *testing.T) {
+	store := &fakeStore{}
+	h, _ := NewHandler(store, fakeHealth{}, nil)
+	for _, body := range []string{
+		`{"external_reference":"order-1","currency":"USD","amount_minor":1250,"tenant_id":"cus-1"}`,
+		`{"direction":"transfer","external_reference":"order-1","currency":"USD","amount_minor":1250,"tenant_id":"cus-1"}`,
+	} {
+		req := httptest.NewRequest(http.MethodPost, "/v1/payments", strings.NewReader(body))
+		req.Header.Set("Idempotency-Key", "request-1")
+		res := httptest.NewRecorder()
+		h.ServeHTTP(res, req)
+		if res.Code != http.StatusBadRequest || !strings.Contains(res.Body.String(), "direction must be payin or payout") {
+			t.Fatalf("body=%s: status=%d response=%s", body, res.Code, res.Body.String())
+		}
+	}
+}
+
 func TestCreatePaymentRejectsDifferentRequestForIdempotencyKey(t *testing.T) {
 	store := &fakeStore{err: paymentcore.ErrIdempotencyConflict}
 	h, _ := NewHandler(store, fakeHealth{}, nil)
-	req := httptest.NewRequest(http.MethodPost, "/v1/payments", strings.NewReader(`{"external_reference":"different","currency":"USD","amount_minor":1250,"tenant_id":"cus-1"}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/payments", strings.NewReader(`{"direction":"payout","external_reference":"different","currency":"USD","amount_minor":1250,"tenant_id":"cus-1"}`))
 	req.Header.Set("Idempotency-Key", "request-1")
 	res := httptest.NewRecorder()
 	h.ServeHTTP(res, req)

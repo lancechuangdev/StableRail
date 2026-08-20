@@ -83,7 +83,7 @@ func (e *Environment) NewTenant(t *testing.T) *Tenant {
 
 func (tenant *Tenant) CreatePayment(t *testing.T, key, reference string, amount int64) (*Payment, int) {
 	t.Helper()
-	body := map[string]any{"external_reference": reference, "currency": "USD", "amount_minor": amount}
+	body := map[string]any{"direction": "payout", "external_reference": reference, "currency": "USD", "amount_minor": amount}
 	response := tenant.Env.request(t, http.MethodPost, "/v1/payments", tenant.APIKey, key, body)
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusCreated {

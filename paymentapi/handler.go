@@ -141,8 +141,9 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	input.Currency = strings.ToUpper(strings.TrimSpace(input.Currency))
-	if input.Direction == "" {
-		input.Direction = paymentcore.PaymentDirectionPayout
+	if input.Direction != paymentcore.PaymentDirectionPayin && input.Direction != paymentcore.PaymentDirectionPayout {
+		problem(w, http.StatusBadRequest, "direction must be payin or payout")
+		return
 	}
 	if input.QuoteID == "" {
 		input.QuoteID = input.PayoutQuoteID
@@ -182,10 +183,6 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusAccepted, p)
-		return
-	}
-	if input.Direction != paymentcore.PaymentDirectionPayout {
-		problem(w, http.StatusBadRequest, "direction must be payin or payout")
 		return
 	}
 	if input.Destination != nil {
