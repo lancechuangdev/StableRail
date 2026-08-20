@@ -1,4 +1,4 @@
-package paymentcore
+package payout
 
 import (
 	"context"
@@ -11,16 +11,27 @@ import (
 	"github.com/DATA-DOG/go-sqlmock"
 
 	"stablerail/eventbus"
+	"stablerail/paymentcore"
 )
 
-func TestPostgresCreateCommitsPaymentAndOutboxTogether(t *testing.T) {
+type storageTestProvider struct{}
+
+func (storageTestProvider) Name() string { return "test" }
+func (storageTestProvider) CreatePayoutQuote(context.Context, QuoteRequest) (QuoteResult, error) {
+	return QuoteResult{}, nil
+}
+func (storageTestProvider) ExecutePayout(context.Context, Request) (Result, error) {
+	return Result{}, nil
+}
+
+func TestCreatePaymentCommitsPaymentAndOutboxTogether(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatalf("create SQL mock: %v", err)
 	}
 	defer db.Close()
 
-	service := deterministicPostgresService(db)
+	service := deterministicPayoutService(db)
 	mock.ExpectBegin()
 	mock.ExpectExec("INSERT INTO payments").
 		WithArgs("pay_test", PaymentDirectionPayout, "order-1", "USD", int64(2500), "tenant-1", PaymentStatusCreated, FundsStatusAvailable, "idem-1", service.now()).
@@ -39,7 +50,7 @@ func TestPostgresCreateCommitsPaymentAndOutboxTogether(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 
-	payment, err := service.CreatePayment(context.Background(), "order-1", "USD", 2500, "tenant-1", "idem-1")
+	payment, err := service.CreatePayment(context.Background(), CreatePaymentRequest{ExternalReference: "order-1", Currency: "USD", AmountMinor: 2500, TenantID: "tenant-1", IdempotencyKey: "idem-1"})
 	if err != nil {
 		t.Fatalf("CreatePayment returned error: %v", err)
 	}
@@ -58,7 +69,7 @@ func TestPostgresCreateRollsBackWhenOutboxInsertFails(t *testing.T) {
 	}
 	defer db.Close()
 
-	service := deterministicPostgresService(db)
+	service := deterministicPayoutService(db)
 	mock.ExpectBegin()
 	mock.ExpectExec("INSERT INTO payments").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO payment_audit_events").WillReturnResult(sqlmock.NewResult(1, 1))
@@ -66,7 +77,7 @@ func TestPostgresCreateRollsBackWhenOutboxInsertFails(t *testing.T) {
 	mock.ExpectExec("INSERT INTO outbox_events").WillReturnError(errors.New("database unavailable"))
 	mock.ExpectRollback()
 
-	_, err = service.CreatePayment(context.Background(), "order-1", "USD", 2500, "tenant-1", "idem-1")
+	_, err = service.CreatePayment(context.Background(), CreatePaymentRequest{ExternalReference: "order-1", Currency: "USD", AmountMinor: 2500, TenantID: "tenant-1", IdempotencyKey: "idem-1"})
 	if err == nil {
 		t.Fatal("expected outbox insert error")
 	}
@@ -82,7 +93,7 @@ func TestPostgresCreateWithPayoutQuoteBindsQuoteAndPaymentAtomically(t *testing.
 	}
 	defer db.Close()
 
-	service := deterministicPostgresService(db)
+	service := deterministicPayoutService(db)
 	mock.ExpectBegin()
 	mock.ExpectQuery("SELECT tenant_id,source_currency,sender_amount_minor,status,expires_at FROM payment_quotes").
 		WithArgs("qu_test").
@@ -100,9 +111,9 @@ func TestPostgresCreateWithPayoutQuoteBindsQuoteAndPaymentAtomically(t *testing.
 	mock.ExpectExec("INSERT INTO outbox_events").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 
-	payment, err := service.CreatePaymentWithPayoutQuote(context.Background(), "order-1", "USDB", 2500, "tenant-1", "idem-1", "qu_test")
+	payment, err := service.CreatePayment(context.Background(), CreatePaymentRequest{ExternalReference: "order-1", Currency: "USDB", AmountMinor: 2500, TenantID: "tenant-1", IdempotencyKey: "idem-1", QuoteID: "qu_test"})
 	if err != nil {
-		t.Fatalf("CreatePaymentWithPayoutQuote returned error: %v", err)
+		t.Fatalf("CreatePayment returned error: %v", err)
 	}
 	if payment.QuoteID != "qu_test" {
 		t.Fatalf("QuoteID = %q", payment.QuoteID)
@@ -118,7 +129,7 @@ func TestPostgresCreateWithAcceptedPayoutQuoteReportsIdempotencyConflict(t *test
 		t.Fatal(err)
 	}
 	defer db.Close()
-	service := deterministicPostgresService(db)
+	service := deterministicPayoutService(db)
 	now := service.now()
 	mock.ExpectBegin()
 	mock.ExpectQuery("SELECT tenant_id,source_currency,sender_amount_minor,status,expires_at FROM payment_quotes").WithArgs("qu_test").WillReturnRows(sqlmock.NewRows([]string{"tenant_id", "source_currency", "sender_amount_minor", "status", "expires_at"}).AddRow("tenant-1", "USDB", int64(2500), "accepted", now.Add(time.Minute)))
@@ -127,7 +138,7 @@ func TestPostgresCreateWithAcceptedPayoutQuoteReportsIdempotencyConflict(t *test
 	mock.ExpectQuery("SELECT kind,COALESCE").WithArgs("pay_existing").WillReturnError(sql.ErrNoRows)
 	mock.ExpectRollback()
 
-	_, err = service.CreatePaymentWithPayoutQuote(context.Background(), "changed-order", "USDB", 2500, "tenant-1", "idem-1", "qu_test")
+	_, err = service.CreatePayment(context.Background(), CreatePaymentRequest{ExternalReference: "changed-order", Currency: "USDB", AmountMinor: 2500, TenantID: "tenant-1", IdempotencyKey: "idem-1", QuoteID: "qu_test"})
 	if !errors.Is(err, ErrIdempotencyConflict) {
 		t.Fatalf("error=%v, want ErrIdempotencyConflict", err)
 	}
@@ -143,7 +154,7 @@ func TestPostgresTransitionCommitsStateAndOutboxTogether(t *testing.T) {
 	}
 	defer db.Close()
 
-	service := deterministicPostgresService(db)
+	service := deterministicPayoutService(db)
 	mock.ExpectBegin()
 	mock.ExpectQuery(regexp.QuoteMeta(`SELECT payment_status, amount_minor, currency FROM payments WHERE id = $1 FOR UPDATE`)).
 		WithArgs("pay_test").
@@ -156,10 +167,10 @@ func TestPostgresTransitionCommitsStateAndOutboxTogether(t *testing.T) {
 		WithArgs("jrn_test", "pay_test", "payment.processing", service.now()).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO ledger_entries").
-		WithArgs("jrn_test:debit", "jrn_test", CashOperatingAccount, EntryDebit, int64(2500), "USD").
+		WithArgs("jrn_test:debit", "jrn_test", paymentcore.CashOperatingAccount, paymentcore.EntryDebit, int64(2500), "USD").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO ledger_entries").
-		WithArgs("jrn_test:credit", "jrn_test", SettlementAccount, EntryCredit, int64(2500), "USD").
+		WithArgs("jrn_test:credit", "jrn_test", paymentcore.SettlementAccount, paymentcore.EntryCredit, int64(2500), "USD").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO payment_audit_events").WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec("INSERT INTO payment_timeline_entries").WillReturnResult(sqlmock.NewResult(1, 1))
@@ -182,7 +193,7 @@ func TestPostgresTransitionRollsBackWhenLedgerInsertFails(t *testing.T) {
 	}
 	defer db.Close()
 
-	service := deterministicPostgresService(db)
+	service := deterministicPayoutService(db)
 	mock.ExpectBegin()
 	mock.ExpectQuery("SELECT payment_status, amount_minor, currency FROM payments").
 		WithArgs("pay_test").
@@ -207,8 +218,11 @@ func TestPostgresGetPaymentAllowsMissingDestination(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	service := deterministicPostgresService(db)
-	now := service.now()
+	repository, err := paymentcore.NewRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, time.August, 7, 12, 0, 0, 0, time.UTC)
 	mock.ExpectQuery("SELECT id, direction, external_reference, currency, amount_minor").WithArgs("pay_test").
 		WillReturnRows(sqlmock.NewRows([]string{"id", "direction", "external_reference", "currency", "amount_minor", "tenant_id", "payment_status", "funds_status", "idempotency_key", "created_at", "updated_at"}).
 			AddRow("pay_test", "payout", "order-1", "USD", int64(2500), "tenant-1", PaymentStatusCreated, FundsStatusAvailable, "idem-1", now, now))
@@ -218,7 +232,7 @@ func TestPostgresGetPaymentAllowsMissingDestination(t *testing.T) {
 	mock.ExpectQuery("SELECT payment_status, occurred_at, note FROM payment_timeline_entries").WithArgs("pay_test").
 		WillReturnRows(sqlmock.NewRows([]string{"payment_status", "occurred_at", "note"}).AddRow(PaymentStatusCreated, now, "payment created"))
 
-	payment, err := service.GetPayment(context.Background(), "pay_test")
+	payment, err := repository.GetPayment(context.Background(), "pay_test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -230,9 +244,9 @@ func TestPostgresGetPaymentAllowsMissingDestination(t *testing.T) {
 	}
 }
 
-func deterministicPostgresService(db *sql.DB) *PostgresService {
+func deterministicPayoutService(db *sql.DB) *Service {
 	fixedTime := time.Date(2026, time.August, 7, 12, 0, 0, 0, time.UTC)
-	service := NewPostgresService(db)
+	service, _ := NewService(db, storageTestProvider{})
 	service.now = func() time.Time { return fixedTime }
 	service.newID = func(prefix string) (string, error) {
 		return prefix + "test", nil

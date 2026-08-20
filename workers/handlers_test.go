@@ -21,7 +21,7 @@ import (
 type submissionFailurePayoutService struct{}
 
 func (submissionFailurePayoutService) Name() string { return "blindpay" }
-func (submissionFailurePayoutService) CreatePayout(context.Context, payout.Request) (payout.Result, error) {
+func (submissionFailurePayoutService) ExecutePayout(context.Context, payout.Request) (payout.Result, error) {
 	return payout.Result{}, &payout.ProviderError{Message: "insufficient balance", Code: "submission_failed", Retryable: false}
 }
 

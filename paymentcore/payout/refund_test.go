@@ -1,4 +1,4 @@
-package paymentcore
+package payout
 
 import (
 	"context"
@@ -15,7 +15,7 @@ func TestCreateRefundCreatesLinkedPaymentAndPaymentCreatedEvent(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	service := deterministicPostgresService(db)
+	service := deterministicPayoutService(db)
 	now := service.now()
 
 	mock.ExpectBegin()
@@ -48,7 +48,7 @@ func TestCreateRefundCreatesLinkedPaymentAndPaymentCreatedEvent(t *testing.T) {
 func TestCreateRefundRejectsAmountAboveRemainingActiveRefunds(t *testing.T) {
 	db, mock, _ := sqlmock.New()
 	defer db.Close()
-	service := deterministicPostgresService(db)
+	service := deterministicPayoutService(db)
 	mock.ExpectBegin()
 	mock.ExpectQuery("SELECT tenant_id,external_reference,currency,amount_minor,payment_status,funds_status FROM payments").WillReturnRows(sqlmock.NewRows([]string{"tenant_id", "external_reference", "currency", "amount_minor", "payment_status", "funds_status"}).AddRow("tenant_1", "order-1", "USD", int64(2500), PaymentStatusSucceeded, FundsStatusConsumed))
 	mock.ExpectQuery("SELECT r.id,r.payment_id,r.refund_payment_id").WillReturnRows(sqlmock.NewRows([]string{"id", "payment_id", "refund_payment_id", "amount_minor", "currency", "reason", "created_at", "updated_at", "payout_quote_id"}))

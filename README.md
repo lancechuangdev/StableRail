@@ -40,9 +40,9 @@ Every business update and outgoing event commits in one PostgreSQL transaction. 
 | Package | Responsibility |
 | --- | --- |
 | `paymentapi` | HTTP transport, authentication, and tenant/operator endpoints |
-| `paymentcore` | Payment aggregate, refunds, public payment/funds state, and PostgreSQL payment storage |
+| `paymentcore` | Shared payment, funds, refund, ledger, and destination models, plus direction-neutral payment queries |
 | `paymentcore/payin` | Inbound quote and operation model, saga coordinator, provider-result persistence, ledger completion, and recovery |
-| `paymentcore/payout` | Outbound quote and operation model, saga coordinator, durable submission attempts, provider-result persistence, and recovery |
+| `paymentcore/payout` | Outbound payment creation, refunds, quotes, saga coordination, provider execution, payout persistence, and recovery |
 | `ledger` | Transactional double-entry reservations, releases, and provider-return journals |
 | `policy` | Payment policy evaluation contracts |
 | `reconciliation` | Comparison of payment, ledger, and provider records plus discrepancy resolution |
@@ -210,7 +210,7 @@ Pay-in policy and compliance waits fail on timeout. Provider execution and ledge
 
 ## Pay-ins and payouts
 
-Pay-ins and payouts are directions of the same public payment resource. Create a direction-aware quote with `POST /v1/payment-quotes` when the selected workflow requires one, then create the operation with `POST /v1/payments` using `direction`, an external reference, and `quote_id` when applicable. The current pay-in HTTP workflow requires a quote; payouts may use a quote or supported direct destination routing. Creating either direction persists a `created` payment and a transactional outbox event. A dedicated pay-in coordinator sends `payin.execute` through Kafka only after `payin.policy.evaluate` is approved, and the command worker performs the provider call. Provider confirmation moves the pay-in to `received`; the saga then sends `payin.ledger.record`, and only a successful balanced journal advances the pay-in to `succeeded`. The quote selects an opaque destination account and locks the funding method, amounts, fees, currencies, and expiry. Provider instructions such as an ACH memo, bank details, Pix code, or CLABE become available asynchronously; retrieve current state with `GET /v1/payments/{id}`.
+Pay-ins and payouts are directions of the same public payment resource. Create a direction-aware quote with `POST /v1/payment-quotes` when pricing, FX, fees, or provider routing must be locked, then create the operation with `POST /v1/payments`. Both directions support quoted creation; they may also use direct routing when the provider supports it. A direct pay-in supplies its amount, currency, funding method, and destination account on the payment request. BlindPay still requires a provider quote, so its adapter creates that quote internally before executing a direct pay-in. Creating either direction persists a `created` payment and a transactional outbox event. A dedicated pay-in coordinator sends `payin.execute` through Kafka only after `payin.policy.evaluate` is approved, and the command worker performs the provider call. Provider confirmation moves the pay-in to `received`; the saga then sends `payin.ledger.record`, and only a successful balanced journal advances the pay-in to `succeeded`. Provider instructions such as an ACH memo, bank details, Pix code, or CLABE become available asynchronously; retrieve current state with `GET /v1/payments/{id}`.
 
 Both direction-specific coordinators store orchestration state in `settlement_sagas`, keyed by payment ID and direction. The provider-facing `payins` and `payouts` tables remain separate because their execution details and provider statuses differ; they are not separate public API resources.
 

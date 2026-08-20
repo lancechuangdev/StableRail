@@ -36,7 +36,18 @@ type QuoteResult struct {
 	ExpiresAt                                            time.Time
 	Payload                                              json.RawMessage
 }
-type ExecuteRequest struct{ IdempotencyKey, QuoteID string }
+type ExecuteRequest struct {
+	IdempotencyKey         string
+	QuoteID                string
+	TenantID               string
+	FundingMethod          string
+	SourceInstrumentID     string
+	DestinationAccountID   string
+	SourceAmountMinor      int64
+	SourceCurrency         string
+	DestinationAmountMinor int64
+	DestinationCurrency    string
+}
 type ExecuteResult struct {
 	ProviderPayinID       string
 	Status                PayinStatus

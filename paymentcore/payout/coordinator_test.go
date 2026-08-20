@@ -207,5 +207,5 @@ func sagaEvent(eventType, id string, payload map[string]string) eventbus.Event {
 		payload = map[string]string{}
 	}
 	encoded, _ := json.Marshal(payload)
-	return eventbus.Event{ID: id, Type: eventType, Version: 1, AggregateID: "pay-1", AggregateType: "payment", OccurredAt: time.Now().UTC(), Payload: encoded}
+	return eventbus.Event{ID: id, Type: eventType, Version: 1, AggregateID: "pay-1", AggregateType: "payout", OccurredAt: time.Now().UTC(), Payload: encoded}
 }

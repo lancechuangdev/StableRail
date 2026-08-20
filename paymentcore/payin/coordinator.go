@@ -34,7 +34,7 @@ func NewSagaCoordinator(db *sql.DB) (*SagaCoordinator, error) {
 }
 
 func (c *SagaCoordinator) Handle(ctx context.Context, tx *sql.Tx, event eventbus.Event) error {
-	if event.AggregateType != "payment" {
+	if event.AggregateType != "payin" {
 		return fmt.Errorf("unsupported payin saga aggregate %q", event.AggregateType)
 	}
 	if event.Type == "payin.created" {

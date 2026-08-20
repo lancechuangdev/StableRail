@@ -37,51 +37,6 @@ func NewService(db *sql.DB, provider Provider) (*Service, error) {
 
 func (s *Service) Name() string { return s.provider.Name() }
 
-var ErrQuoteIdempotencyConflict = errors.New("idempotency key is bound to another payout quote")
-
-func (s *Service) CreateQuote(ctx context.Context, request QuoteRequest) (QuoteResult, error) {
-	if err := request.Validate(); err != nil {
-		return QuoteResult{}, err
-	}
-	var existing QuoteResult
-	var sourceAccountID, destinationInstrumentID, currencyType string
-	var coverFees bool
-	var requestAmount int64
-	err := s.db.QueryRowContext(ctx, `SELECT id,provider,provider_quote_id,status,source_currency,destination_currency,sender_amount_minor,receiver_amount_minor,commercial_rate,provider_rate,flat_fee_minor,partner_fee_minor,billing_fee_minor,expires_at,provider_payload,source_resource_id,destination_resource_id,currency_type,cover_fees,request_amount_minor FROM payment_quotes WHERE direction='payout' AND tenant_id=$1 AND idempotency_key=$2`, request.TenantID, request.IdempotencyKey).Scan(&existing.ID, &existing.Provider, &existing.ProviderQuoteID, &existing.Status, &existing.SourceCurrency, &existing.DestinationCurrency, &existing.SenderAmountMinor, &existing.ReceiverAmountMinor, &existing.CommercialRate, &existing.ProviderRate, &existing.FlatFeeMinor, &existing.PartnerFeeMinor, &existing.BillingFeeMinor, &existing.ExpiresAt, &existing.Payload, &sourceAccountID, &destinationInstrumentID, &currencyType, &coverFees, &requestAmount)
-	if err == nil {
-		existing.Direction = "payout"
-		if sourceAccountID != request.SourceAccountID || destinationInstrumentID != request.DestinationInstrumentID || existing.SourceCurrency != request.SourceCurrency || existing.DestinationCurrency != request.DestinationCurrency || currencyType != request.CurrencyType || coverFees != request.CoverFees || requestAmount != request.RequestAmountMinor {
-			return QuoteResult{}, ErrQuoteIdempotencyConflict
-		}
-		return existing, nil
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return QuoteResult{}, fmt.Errorf("lookup payout quote: %w", err)
-	}
-	result, err := s.provider.CreatePayoutQuote(ctx, request)
-	if err != nil {
-		return QuoteResult{}, err
-	}
-	if result.ProviderQuoteID == "" || result.SourceCurrency == "" || result.DestinationCurrency == "" || result.SenderAmountMinor <= 0 || result.ReceiverAmountMinor <= 0 || !result.ExpiresAt.After(s.now()) {
-		return QuoteResult{}, errors.New("provider returned an invalid payout quote")
-	}
-	id, err := s.newID("pqi_")
-	if err != nil {
-		return QuoteResult{}, err
-	}
-	payload := result.Payload
-	if len(payload) == 0 {
-		payload, _ = json.Marshal(result)
-	}
-	now := s.now()
-	_, err = s.db.ExecContext(ctx, `INSERT INTO payment_quotes(id,direction,provider,provider_quote_id,tenant_id,idempotency_key,source_resource_id,destination_resource_id,payment_method,source_currency,destination_currency,currency_type,cover_fees,request_amount_minor,sender_amount_minor,receiver_amount_minor,commercial_rate,provider_rate,flat_fee_minor,partner_fee_minor,billing_fee_minor,status,expires_at,provider_payload,created_at,updated_at) VALUES($1,'payout',$2,$3,$4,$5,$6,$7,'provider_quote',$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,'open',$20,$21,$22,$22)`, id, s.provider.Name(), result.ProviderQuoteID, request.TenantID, request.IdempotencyKey, request.SourceAccountID, request.DestinationInstrumentID, result.SourceCurrency, result.DestinationCurrency, request.CurrencyType, request.CoverFees, request.RequestAmountMinor, result.SenderAmountMinor, result.ReceiverAmountMinor, result.CommercialRate, result.ProviderRate, result.FlatFeeMinor, result.PartnerFeeMinor, result.BillingFeeMinor, result.ExpiresAt, payload, now)
-	if err != nil {
-		return QuoteResult{}, fmt.Errorf("store payout quote: %w", err)
-	}
-	result.Direction, result.ID, result.Provider, result.Status, result.Payload = "payout", id, s.provider.Name(), "open", payload
-	return result, nil
-}
-
 type attempt struct {
 	request           Request
 	providerReference string
@@ -89,7 +44,8 @@ type attempt struct {
 	new               bool
 }
 
-func (s *Service) CreatePayout(ctx context.Context, request Request) (Result, error) {
+// ExecutePayout durably records and submits the provider payout operation.
+func (s *Service) ExecutePayout(ctx context.Context, request Request) (Result, error) {
 	if err := request.Validate(); err != nil {
 		return Result{}, err
 	}
@@ -152,13 +108,17 @@ func (s *Service) prepare(ctx context.Context, request Request) (attempt, error)
 	var sourceAmount, destinationAmount int64
 	err = tx.QueryRowContext(ctx, `SELECT q.id,q.provider_quote_id,q.tenant_id,q.source_resource_id,q.destination_resource_id,COALESCE(d.metadata->>'rail',d.metadata->>'kind','unknown'),q.sender_amount_minor,q.source_currency,q.receiver_amount_minor,q.destination_currency FROM payment_quotes q JOIN provider_resources d ON d.id=q.destination_resource_id WHERE q.direction='payout' AND q.payment_id=$1 AND q.provider=$2 AND q.status='accepted' FOR UPDATE`, request.PaymentID, s.provider.Name()).Scan(&quoteID, &providerQuoteID, &tenantID, &sourceAccountID, &destinationInstrumentID, &method, &sourceAmount, &sourceCurrency, &destinationAmount, &destinationCurrency)
 	if errors.Is(err, sql.ErrNoRows) {
-		return attempt{}, fmt.Errorf("payment has no accepted %s quote", s.provider.Name())
+		err = tx.QueryRowContext(ctx, `SELECT p.tenant_id,p.amount_minor,p.currency,COALESCE(d.kind,'direct') FROM payments p LEFT JOIN payment_destinations d ON d.payment_id=p.id WHERE p.id=$1 AND p.direction='payout' FOR UPDATE OF p`, request.PaymentID).Scan(&tenantID, &sourceAmount, &sourceCurrency, &method)
+		if errors.Is(err, sql.ErrNoRows) {
+			return attempt{}, fmt.Errorf("payout payment %s not found", request.PaymentID)
+		}
+		destinationAmount, destinationCurrency = sourceAmount, sourceCurrency
 	}
 	if err != nil {
-		return attempt{}, fmt.Errorf("lock accepted payout quote: %w", err)
+		return attempt{}, fmt.Errorf("load payout route: %w", err)
 	}
 	now := s.now()
-	res, err := tx.ExecContext(ctx, `INSERT INTO payouts(payment_id,quote_id,tenant_id,source_account_id,destination_instrument_id,payout_method,source_amount_minor,source_currency,destination_amount_minor,destination_currency,provider,provider_status,idempotency_key,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'submission_pending',$12,$13,$13) ON CONFLICT(payment_id) DO NOTHING`, request.PaymentID, quoteID, tenantID, sourceAccountID, destinationInstrumentID, method, sourceAmount, sourceCurrency, destinationAmount, destinationCurrency, s.provider.Name(), request.IdempotencyKey, now)
+	res, err := tx.ExecContext(ctx, `INSERT INTO payouts(payment_id,quote_id,tenant_id,source_account_id,destination_instrument_id,payout_method,source_amount_minor,source_currency,destination_amount_minor,destination_currency,provider,provider_status,idempotency_key,created_at,updated_at) VALUES($1,NULLIF($2,''),$3,NULLIF($4,''),NULLIF($5,''),$6,$7,$8,$9,$10,$11,'submission_pending',$12,$13,$13) ON CONFLICT(payment_id) DO NOTHING`, request.PaymentID, quoteID, tenantID, sourceAccountID, destinationInstrumentID, method, sourceAmount, sourceCurrency, destinationAmount, destinationCurrency, s.provider.Name(), request.IdempotencyKey, now)
 	if err != nil {
 		return attempt{}, fmt.Errorf("create payout submission: %w", err)
 	}
@@ -204,7 +164,7 @@ func (s *Service) RecoverUnknownOnce(ctx context.Context) (int, error) {
 		return 0, err
 	}
 	for i, r := range requests {
-		if _, err := s.CreatePayout(ctx, r); err != nil {
+		if _, err := s.ExecutePayout(ctx, r); err != nil {
 			return i, err
 		}
 	}

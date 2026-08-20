@@ -49,11 +49,40 @@ func TestServiceCommitsAttemptBeforeProviderExecution(t *testing.T) {
 	mock.ExpectExec("UPDATE payouts SET provider_payout_id").WithArgs("po_test", "processing", []byte(`{"id":"po_test"}`), now, "pay_test").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("UPDATE payments SET funds_status").WithArgs("reserved", now, "pay_test").WillReturnResult(sqlmock.NewResult(0, 1))
 
-	_, err = service.CreatePayout(context.Background(), Request{PaymentID: "pay_test", IdempotencyKey: "idem_test", AmountMinor: 100, Currency: "USDB"})
+	_, err = service.ExecutePayout(context.Background(), Request{PaymentID: "pay_test", IdempotencyKey: "idem_test", AmountMinor: 100, Currency: "USDB"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if provider.request.ProviderQuoteID != "qu_provider" || provider.request.SourceAccountID != "account_test" || provider.request.TenantID != "tenant_test" {
+		t.Fatalf("provider request=%+v", provider.request)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestServiceExecutesQuoteLessPayoutThroughDurablePath(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	now := time.Date(2026, time.August, 18, 12, 0, 0, 0, time.UTC)
+	provider := &serviceProvider{result: Result{ProviderReference: "po_test", Status: StatusPending}}
+	service, _ := NewService(db, provider)
+	service.now = func() time.Time { return now }
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT q.id,q.provider_quote_id").WithArgs("pay_test", "blindpay").WillReturnError(sql.ErrNoRows)
+	mock.ExpectQuery("SELECT p.tenant_id,p.amount_minor,p.currency").WithArgs("pay_test").WillReturnRows(sqlmock.NewRows([]string{"tenant_id", "amount_minor", "currency", "method"}).AddRow("tenant_test", int64(100), "USD", "direct"))
+	mock.ExpectExec("INSERT INTO payouts").WithArgs("pay_test", "", "tenant_test", "", "", "direct", int64(100), "USD", int64(100), "USD", "blindpay", "idem_test", now).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+	mock.ExpectExec("UPDATE payouts SET provider_payout_id").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("UPDATE payments SET funds_status").WillReturnResult(sqlmock.NewResult(0, 1))
+
+	if _, err := service.ExecutePayout(context.Background(), Request{PaymentID: "pay_test", IdempotencyKey: "idem_test", AmountMinor: 100, Currency: "USD"}); err != nil {
+		t.Fatal(err)
+	}
+	if provider.request.TenantID != "tenant_test" || provider.request.QuoteID != "" || provider.request.AmountMinor != 100 {
 		t.Fatalf("provider request=%+v", provider.request)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -77,7 +106,7 @@ func TestServiceRecordsAmbiguousProviderOutcome(t *testing.T) {
 	mock.ExpectCommit()
 	mock.ExpectExec("UPDATE payouts SET provider_status").WithArgs("unknown", "connection reset", now, "pay_test").WillReturnResult(sqlmock.NewResult(0, 1))
 
-	_, err = service.CreatePayout(context.Background(), Request{PaymentID: "pay_test", IdempotencyKey: "idem_test", AmountMinor: 100, Currency: "USDB"})
+	_, err = service.ExecutePayout(context.Background(), Request{PaymentID: "pay_test", IdempotencyKey: "idem_test", AmountMinor: 100, Currency: "USDB"})
 	if !errors.Is(err, ErrSubmissionUnknown) {
 		t.Fatalf("error=%v", err)
 	}

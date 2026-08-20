@@ -31,15 +31,6 @@ import (
 	"stablerail/workers"
 )
 
-// directPayoutService keeps the deterministic mock lightweight. Production
-// providers are wrapped by payout.Service so their attempts are durable.
-type directPayoutService struct{ provider payout.ExecutionProvider }
-
-func (s directPayoutService) Name() string { return s.provider.Name() }
-func (s directPayoutService) CreatePayout(ctx context.Context, request payout.Request) (payout.Result, error) {
-	return s.provider.ExecutePayout(ctx, request)
-}
-
 func main() {
 	if err := run(); err != nil {
 		log.Fatal(err)
@@ -108,19 +99,8 @@ func run() error {
 	}
 
 	var provider settlement.SettlementProvider
-	var payoutCreator interface {
-		Name() string
-		CreatePayout(context.Context, payout.Request) (payout.Result, error)
-	}
-	var payoutQuoteCreator interface {
-		CreateQuote(context.Context, payout.QuoteRequest) (payout.QuoteResult, error)
-	}
 	var blindPayWebhookHandler http.Handler
 	webhookReconciler := func(ctx context.Context) error {
-		<-ctx.Done()
-		return ctx.Err()
-	}
-	payoutRecovery := func(ctx context.Context) error {
 		<-ctx.Done()
 		return ctx.Err()
 	}
@@ -138,12 +118,6 @@ func run() error {
 			mockProvider.ResultsByAmount[config.MockSettlementPendingAmount] = payout.Result{Status: payout.StatusPending}
 		}
 		provider = mockProvider
-		payoutCreator = directPayoutService{provider: mockProvider}
-		payoutQuotes, err := payout.NewService(db, mockProvider)
-		if err != nil {
-			return err
-		}
-		payoutQuoteCreator = payoutQuotes
 	case "blindpay":
 		client, err := blindpay.NewClient(blindpay.Config{
 			APIKey:     config.BlindPay.APIKey,
@@ -165,15 +139,6 @@ func run() error {
 		if err != nil {
 			return err
 		}
-		payouts, err := payout.NewService(db, provider)
-		if err != nil {
-			return err
-		}
-		payoutRecovery = func(ctx context.Context) error {
-			return payouts.RunRecovery(ctx, config.ReconciliationInterval)
-		}
-		payoutCreator = payouts
-		payoutQuoteCreator = payouts
 		verifier, err := blindpay.NewWebhookVerifier(config.BlindPay.WebhookSecret)
 		if err != nil {
 			return err
@@ -192,7 +157,7 @@ func run() error {
 	default:
 		return fmt.Errorf("unsupported settlement provider %q", config.SettlementProvider)
 	}
-	apiKeys, err := paymentapi.NewAPIKeyService(db)
+	payouts, err := payout.NewService(db, provider)
 	if err != nil {
 		return err
 	}
@@ -200,7 +165,18 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	handler, err := paymentapi.NewHandler(paymentcore.NewPostgresService(db), db, payoutQuoteCreator, payins)
+	paymentRepository, err := paymentcore.NewRepository(db)
+	if err != nil {
+		return err
+	}
+	payoutRecovery := func(ctx context.Context) error {
+		return payouts.RunRecovery(ctx, config.ReconciliationInterval)
+	}
+	apiKeys, err := paymentapi.NewAPIKeyService(db)
+	if err != nil {
+		return err
+	}
+	handler, err := paymentapi.NewHandler(paymentRepository, payouts, payins, db)
 	if err != nil {
 		return err
 	}
@@ -212,7 +188,7 @@ func run() error {
 	}
 	commandLoop := &consumer.Loop{
 		Reader:    consumer.NewKafkaReader(config.KafkaBrokers, string(eventbus.SettlementCommandsTopic), "stablerail-core-workers"),
-		Processor: inbox.BoundProcessor{Processor: inboxProcessor, Handler: workers.NewCommandHandler(policy.DeterministicEvaluator{RejectAmountMinor: config.MockPolicyRejectAmount}, ledger.NewPostgresService(), payoutCreator, payins).Handle},
+		Processor: inbox.BoundProcessor{Processor: inboxProcessor, Handler: workers.NewCommandHandler(policy.DeterministicEvaluator{RejectAmountMinor: config.MockPolicyRejectAmount}, ledger.NewPostgresService(), payouts, payins).Handle},
 		Consumer:  "core-workers",
 	}
 	webhookEndpoints, err := paymentapi.NewWebhookEndpointService(db)

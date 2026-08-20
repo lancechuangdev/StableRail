@@ -31,7 +31,7 @@ func TestPayinSagaStartsWithPolicyCommand(t *testing.T) {
 	mock.ExpectExec("INSERT INTO outbox_events").WithArgs("evt_command", eventbus.SettlementCommandsTopic, "payin.policy.evaluate", eventbus.PayinPolicyEvaluateVersion, "pay_1", sqlmock.AnyArg(), now).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 	tx, _ := db.BeginTx(context.Background(), nil)
-	event := eventbus.Event{ID: "evt_created", Type: "payin.created", Version: 1, AggregateID: "pay_1", AggregateType: "payment", OccurredAt: now, Payload: json.RawMessage(`{"payin_id":"pin_1"}`)}
+	event := eventbus.Event{ID: "evt_created", Type: "payin.created", Version: 1, AggregateID: "pay_1", AggregateType: "payin", OccurredAt: now, Payload: json.RawMessage(`{"payin_id":"pin_1"}`)}
 	if err := coordinator.Handle(context.Background(), tx, event); err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +57,7 @@ func TestPayinSagaRecordsSucceededResult(t *testing.T) {
 	mock.ExpectExec("UPDATE settlement_sagas SET state").WithArgs("completed", nil, "", now, "psaga_1").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 	tx, _ := db.BeginTx(context.Background(), nil)
-	event := eventbus.Event{ID: "evt_succeeded", Type: "payin.succeeded", Version: 1, AggregateID: "pay_1", AggregateType: "payment", OccurredAt: now, Payload: json.RawMessage(`{"correlation_id":"corr_1"}`)}
+	event := eventbus.Event{ID: "evt_succeeded", Type: "payin.succeeded", Version: 1, AggregateID: "pay_1", AggregateType: "payin", OccurredAt: now, Payload: json.RawMessage(`{"correlation_id":"corr_1"}`)}
 	if err := coordinator.Handle(context.Background(), tx, event); err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +86,7 @@ func TestPayinReceivedEnqueuesLedgerCommand(t *testing.T) {
 	mock.ExpectExec("INSERT INTO outbox_events").WithArgs("evt_ledger", eventbus.SettlementCommandsTopic, "payin.ledger.record", eventbus.PayinLedgerRecordVersion, "pay_1", sqlmock.AnyArg(), now).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 	tx, _ := db.BeginTx(context.Background(), nil)
-	event := eventbus.Event{ID: "evt_received", Type: "payin.received", Version: 1, AggregateID: "pay_1", AggregateType: "payment", OccurredAt: now, Payload: json.RawMessage(`{"correlation_id":"corr_1"}`)}
+	event := eventbus.Event{ID: "evt_received", Type: "payin.received", Version: 1, AggregateID: "pay_1", AggregateType: "payin", OccurredAt: now, Payload: json.RawMessage(`{"correlation_id":"corr_1"}`)}
 	if err := coordinator.Handle(context.Background(), tx, event); err != nil {
 		t.Fatal(err)
 	}

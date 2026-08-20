@@ -15,43 +15,36 @@ import (
 	"stablerail/paymentcore/payout"
 )
 
-type PaymentStore interface {
-	CreatePayment(context.Context, string, string, int64, string, string) (*paymentcore.Payment, error)
-	CreatePaymentWithPayoutQuote(context.Context, string, string, int64, string, string, string) (*paymentcore.Payment, error)
+type PayoutService interface {
+	CreatePayment(context.Context, payout.CreatePaymentRequest) (*paymentcore.Payment, error)
+	CreateQuote(context.Context, payout.QuoteRequest) (payout.QuoteResult, error)
 	CreateRefund(context.Context, string, string, string, int64, string, string) (*paymentcore.Refund, error)
+}
+type PaymentReader interface {
 	GetPayment(context.Context, string) (*paymentcore.Payment, error)
 	Timeline(context.Context, string) ([]paymentcore.TimelineEntry, error)
 }
-type DestinationPaymentStore interface {
-	CreatePaymentWithDestination(context.Context, string, string, int64, string, string, paymentcore.Destination) (*paymentcore.Payment, error)
-}
 type Health interface{ PingContext(context.Context) error }
-type PayoutQuoteService interface {
-	CreateQuote(context.Context, payout.QuoteRequest) (payout.QuoteResult, error)
-}
-type PayinPaymentService interface {
-	CreatePayment(context.Context, string, string, string, string) (*paymentcore.Payment, error)
-	CreateQuote(context.Context, payin.QuoteRequest) (*payin.Quote, error)
+type PayinService interface {
+	CreatePayment(context.Context, payin.CreatePaymentRequest) (*paymentcore.Payment, error)
+	CreateQuote(context.Context, payin.QuoteRequest) (payin.Quote, error)
 }
 
 type Handler struct {
-	payments     PaymentStore
-	health       Health
-	payoutQuotes PayoutQuoteService
-	payins       PayinPaymentService
+	payments PaymentReader
+	payouts  PayoutService
+	payins   PayinService
+	health   Health
 }
 
-func NewHandler(payments PaymentStore, health Health, payoutQuotes PayoutQuoteService, payinServices ...PayinPaymentService) (http.Handler, error) {
-	if payments == nil || health == nil {
+func NewHandler(payments PaymentReader, payouts PayoutService, payins PayinService, health Health) (http.Handler, error) {
+	if payments == nil || payouts == nil || health == nil {
 		return nil, errors.New("payment API and health dependencies are required")
 	}
-	h := &Handler{payments: payments, health: health, payoutQuotes: payoutQuotes}
-	if len(payinServices) > 0 {
-		h.payins = payinServices[0]
-	}
+	h := &Handler{payments: payments, payouts: payouts, payins: payins, health: health}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/payments", h.create)
-	if payoutQuotes != nil || h.payins != nil {
+	if h.payouts != nil || h.payins != nil {
 		mux.HandleFunc("POST /v1/payment-quotes", h.createPaymentQuote)
 	}
 	mux.HandleFunc("GET /v1/payments/{id}", h.get)
@@ -96,7 +89,7 @@ func (h *Handler) createRefund(w http.ResponseWriter, r *http.Request) {
 		problem(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
-	refund, err := h.payments.CreateRefund(r.Context(), r.PathValue("id"), tenantID, key, input.AmountMinor, input.Reason, strings.TrimSpace(input.PayoutQuoteID))
+	refund, err := h.payouts.CreateRefund(r.Context(), r.PathValue("id"), tenantID, key, input.AmountMinor, input.Reason, strings.TrimSpace(input.PayoutQuoteID))
 	if err != nil {
 		switch {
 		case errors.Is(err, paymentcore.ErrPaymentNotFound):
@@ -112,14 +105,17 @@ func (h *Handler) createRefund(w http.ResponseWriter, r *http.Request) {
 }
 
 type createRequest struct {
-	Direction         paymentcore.PaymentDirection `json:"direction"`
-	ExternalReference string                       `json:"external_reference"`
-	Currency          string                       `json:"currency"`
-	AmountMinor       int64                        `json:"amount_minor"`
-	TenantID          string                       `json:"tenant_id"`
-	Destination       *paymentcore.Destination     `json:"destination,omitempty"`
-	QuoteID           string                       `json:"quote_id,omitempty"`
-	PayoutQuoteID     string                       `json:"payout_quote_id,omitempty"` // deprecated input alias
+	Direction            paymentcore.PaymentDirection `json:"direction"`
+	ExternalReference    string                       `json:"external_reference"`
+	Currency             string                       `json:"currency"`
+	AmountMinor          int64                        `json:"amount_minor"`
+	TenantID             string                       `json:"tenant_id"`
+	Destination          *paymentcore.Destination     `json:"destination,omitempty"`
+	QuoteID              string                       `json:"quote_id,omitempty"`
+	PayoutQuoteID        string                       `json:"payout_quote_id,omitempty"` // deprecated input alias
+	FundingMethod        string                       `json:"funding_method,omitempty"`
+	SourceInstrumentID   string                       `json:"source_instrument_id,omitempty"`
+	DestinationAccountID string                       `json:"destination_account_id,omitempty"`
 }
 
 func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
@@ -156,56 +152,83 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 		}
 		tenantID = authenticated
 	}
-	if strings.TrimSpace(input.ExternalReference) == "" || tenantID == "" || (input.Direction == paymentcore.PaymentDirectionPayout && (len(input.Currency) < 3 || len(input.Currency) > 10 || input.AmountMinor <= 0)) {
-		problem(w, http.StatusBadRequest, "external_reference, currency, positive amount_minor, and an authenticated tenant are required")
+	if strings.TrimSpace(input.ExternalReference) == "" || tenantID == "" {
+		problem(w, http.StatusBadRequest, "external_reference and an authenticated tenant are required")
 		return
 	}
-	if input.Destination != nil {
-		if err := input.Destination.Validate(); err != nil {
+
+	var (
+		payment       *paymentcore.Payment
+		err           error
+		successStatus int
+	)
+	switch input.Direction {
+	case paymentcore.PaymentDirectionPayin:
+		if h.payins == nil {
+			problem(w, http.StatusNotImplemented, "payin payments are not configured")
+			return
+		}
+		if input.Destination != nil {
+			problem(w, http.StatusBadRequest, "payin payments do not accept a payout destination")
+			return
+		}
+		request := payin.CreatePaymentRequest{
+			TenantID:             tenantID,
+			IdempotencyKey:       key,
+			ExternalReference:    input.ExternalReference,
+			QuoteID:              input.QuoteID,
+			AmountMinor:          input.AmountMinor,
+			Currency:             input.Currency,
+			FundingMethod:        strings.TrimSpace(input.FundingMethod),
+			SourceInstrumentID:   strings.TrimSpace(input.SourceInstrumentID),
+			DestinationAccountID: strings.TrimSpace(input.DestinationAccountID),
+		}
+		if err := request.Validate(); err != nil {
 			problem(w, http.StatusBadRequest, err.Error())
 			return
 		}
-	}
-	if input.Destination != nil && input.QuoteID != "" {
-		problem(w, http.StatusBadRequest, "destination and payout_quote_id cannot be combined")
-		return
-	}
-	var p *paymentcore.Payment
-	var err error
-	if input.Direction == paymentcore.PaymentDirectionPayin {
-		if h.payins == nil || input.QuoteID == "" || input.Destination != nil {
-			problem(w, http.StatusBadRequest, "payin payments require quote_id")
+		payment, err = h.payins.CreatePayment(r.Context(), request)
+		successStatus = http.StatusAccepted
+
+	case paymentcore.PaymentDirectionPayout:
+		if len(input.Currency) < 3 || len(input.Currency) > 10 || input.AmountMinor <= 0 {
+			problem(w, http.StatusBadRequest, "payout payments require currency and positive amount_minor")
 			return
 		}
-		p, err = h.payins.CreatePayment(r.Context(), tenantID, input.QuoteID, key, input.ExternalReference)
-		if err != nil {
-			problem(w, http.StatusBadRequest, err.Error())
+		if input.Destination != nil {
+			if err := input.Destination.Validate(); err != nil {
+				problem(w, http.StatusBadRequest, err.Error())
+				return
+			}
+		}
+		if input.Destination != nil && input.QuoteID != "" {
+			problem(w, http.StatusBadRequest, "payout quote and destination cannot be combined")
 			return
 		}
-		writeJSON(w, http.StatusAccepted, p)
-		return
+		payment, err = h.payouts.CreatePayment(r.Context(), payout.CreatePaymentRequest{
+			TenantID:          tenantID,
+			IdempotencyKey:    key,
+			ExternalReference: input.ExternalReference,
+			QuoteID:           input.QuoteID,
+			AmountMinor:       input.AmountMinor,
+			Currency:          input.Currency,
+			Destination:       input.Destination,
+		})
+		successStatus = http.StatusCreated
 	}
-	if input.Destination != nil {
-		store, ok := h.payments.(DestinationPaymentStore)
-		if !ok {
-			problem(w, http.StatusBadRequest, "payment destinations are not supported")
-			return
-		}
-		p, err = store.CreatePaymentWithDestination(r.Context(), input.ExternalReference, input.Currency, input.AmountMinor, tenantID, key, *input.Destination)
-	} else if input.QuoteID != "" {
-		p, err = h.payments.CreatePaymentWithPayoutQuote(r.Context(), input.ExternalReference, input.Currency, input.AmountMinor, tenantID, key, input.QuoteID)
-	} else {
-		p, err = h.payments.CreatePayment(r.Context(), input.ExternalReference, input.Currency, input.AmountMinor, tenantID, key)
-	}
+
 	if err != nil {
-		if errors.Is(err, paymentcore.ErrIdempotencyConflict) {
+		switch {
+		case errors.Is(err, paymentcore.ErrIdempotencyConflict), errors.Is(err, payin.ErrIdempotencyConflict):
 			problem(w, http.StatusConflict, err.Error())
-			return
+		case input.Direction == paymentcore.PaymentDirectionPayin:
+			problem(w, http.StatusBadRequest, err.Error())
+		default:
+			problem(w, http.StatusInternalServerError, "could not create payment")
 		}
-		problem(w, http.StatusInternalServerError, "could not create payment")
 		return
 	}
-	writeJSON(w, http.StatusCreated, p)
+	writeJSON(w, successStatus, payment)
 }
 
 type createPayoutQuoteRequest struct {
@@ -316,7 +339,7 @@ func (h *Handler) createPayoutQuote(w http.ResponseWriter, r *http.Request) {
 		}
 		tenantID = authenticated
 	}
-	q, err := h.payoutQuotes.CreateQuote(r.Context(), payout.QuoteRequest{IdempotencyKey: key, TenantID: tenantID, SourceAccountID: input.SourceAccountID, DestinationInstrumentID: input.DestinationInstrumentID, SourceCurrency: input.SourceCurrency, DestinationCurrency: input.DestinationCurrency, CurrencyType: input.CurrencyType, CoverFees: input.CoverFees, RequestAmountMinor: input.RequestAmountMinor})
+	q, err := h.payouts.CreateQuote(r.Context(), payout.QuoteRequest{IdempotencyKey: key, TenantID: tenantID, SourceAccountID: input.SourceAccountID, DestinationInstrumentID: input.DestinationInstrumentID, SourceCurrency: input.SourceCurrency, DestinationCurrency: input.DestinationCurrency, CurrencyType: input.CurrencyType, CoverFees: input.CoverFees, RequestAmountMinor: input.RequestAmountMinor})
 	if err != nil {
 		problem(w, http.StatusBadRequest, err.Error())
 		return

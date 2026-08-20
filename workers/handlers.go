@@ -26,13 +26,13 @@ type CommandHandler struct {
 	newID           func() (string, error)
 	policyEvaluator policy.PolicyEvaluator
 	ledgerService   ledger.LedgerService
-	payoutService   namedPayoutService
+	payoutService   payoutCommandService
 	payinService    payinCommandService
 }
 
-type namedPayoutService interface {
+type payoutCommandService interface {
 	Name() string
-	CreatePayout(context.Context, payout.Request) (payout.Result, error)
+	ExecutePayout(context.Context, payout.Request) (payout.Result, error)
 }
 
 type payinCommandService interface {
@@ -41,7 +41,7 @@ type payinCommandService interface {
 	RecordLedger(context.Context, *sql.Tx, string, string, time.Time) error
 }
 
-func NewCommandHandler(evaluator policy.PolicyEvaluator, ledgerService ledger.LedgerService, payouts namedPayoutService, payins payinCommandService) *CommandHandler {
+func NewCommandHandler(evaluator policy.PolicyEvaluator, ledgerService ledger.LedgerService, payouts payoutCommandService, payins payinCommandService) *CommandHandler {
 	h := &CommandHandler{policyEvaluator: evaluator, ledgerService: ledgerService, payoutService: payouts, payinService: payins, now: func() time.Time { return time.Now().UTC() }, newID: func() (string, error) {
 		b := make([]byte, 16)
 		_, err := rand.Read(b)
@@ -144,7 +144,7 @@ func (h *CommandHandler) Handle(ctx context.Context, tx *sql.Tx, event eventbus.
 		if err != nil {
 			return err
 		}
-		result, err := h.payoutService.CreatePayout(ctx, payout.Request{IdempotencyKey: event.ID, PaymentID: payload.PaymentID, AmountMinor: amount, Currency: currency, Destination: destination})
+		result, err := h.payoutService.ExecutePayout(ctx, payout.Request{IdempotencyKey: event.ID, PaymentID: payload.PaymentID, AmountMinor: amount, Currency: currency, Destination: destination})
 		if err != nil {
 			var providerErr *payout.ProviderError
 			if errors.As(err, &providerErr) && !providerErr.Retryable {
@@ -249,7 +249,7 @@ func (h *CommandHandler) enqueuePayinReply(ctx context.Context, tx *sql.Tx, caus
 	now := h.now()
 	body, _ := json.Marshal(map[string]any{"correlation_id": correlationID, "payment_id": caused.AggregateID, "payin_id": payinID, "reason": reason, "caused_by_event_id": caused.ID})
 	version := map[string]int{"payin.policy.approved": eventbus.PayinPolicyApprovedVersion}[eventType]
-	_, err = tx.ExecContext(ctx, `INSERT INTO outbox_events(id,topic,event_type,event_version,aggregate_id,aggregate_type,payload,occurred_at) VALUES($1,$2,$3,$4,$5,'payment',$6,$7)`, id, eventbus.PayinEventsTopic, eventType, version, caused.AggregateID, body, now)
+	_, err = tx.ExecContext(ctx, `INSERT INTO outbox_events(id,topic,event_type,event_version,aggregate_id,aggregate_type,payload,occurred_at) VALUES($1,$2,$3,$4,$5,'payin',$6,$7)`, id, eventbus.PayinEventsTopic, eventType, version, caused.AggregateID, body, now)
 	return err
 }
 

@@ -100,7 +100,7 @@ func (c *SagaCoordinator) Handle(ctx context.Context, tx *sql.Tx, event eventbus
 	if err := event.Validate(); err != nil {
 		return fmt.Errorf("validate saga event: %w", err)
 	}
-	if event.AggregateType != "payment" {
+	if event.AggregateType != "payout" {
 		return fmt.Errorf("unsupported saga aggregate type %q", event.AggregateType)
 	}
 	if event.Type == "payout.created" {

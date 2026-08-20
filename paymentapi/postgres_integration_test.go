@@ -12,7 +12,9 @@ import (
 	"time"
 
 	"stablerail/paymentcore"
+	"stablerail/paymentcore/payout"
 	"stablerail/postgresdb"
+	"stablerail/settlement"
 )
 
 // Run with STABLERAIL_E2E_DATABASE_URL pointing at a database with migrations
@@ -27,7 +29,15 @@ func TestPostgresPaymentHTTPIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	handler, err := NewHandler(paymentcore.NewPostgresService(db), db, nil)
+	payouts, err := payout.NewService(db, settlement.NewMockProvider(payout.Result{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	paymentRepository, err := paymentcore.NewRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler, err := NewHandler(paymentRepository, payouts, nil, db)
 	if err != nil {
 		t.Fatal(err)
 	}

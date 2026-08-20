@@ -1,4 +1,4 @@
-package paymentcore
+package payout
 
 import (
 	"context"
@@ -7,19 +7,16 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"stablerail/paymentcore"
 )
 
-// Refund is a merchant-issued financial operation linked to a payment. It does
-// not rewrite the original payment's delivery outcome.
-type Refund struct {
-	ID              string    `json:"id"`
-	PaymentID       string    `json:"payment_id"`
-	RefundPaymentID string    `json:"refund_payment_id"`
-	Reason          string    `json:"reason"`
-	CreatedAt       time.Time `json:"created_at"`
-	UpdatedAt       time.Time `json:"updated_at"`
-	IdempotencyKey  string    `json:"-"`
-}
+type Refund = paymentcore.Refund
+
+var (
+	ErrPaymentNotRefundable = paymentcore.ErrPaymentNotRefundable
+	ErrRefundAmountExceeded = paymentcore.ErrRefundAmountExceeded
+)
 
 type refundLookup struct {
 	refund        Refund
@@ -29,7 +26,7 @@ type refundLookup struct {
 
 // CreateRefund creates a new payment linked to the original payment. The new
 // payment enters the ordinary payment saga and is settled as a normal payout.
-func (s *PostgresService) CreateRefund(ctx context.Context, paymentID, tenantID, idempotencyKey string, amountMinor int64, reason, payoutQuoteID string) (*Refund, error) {
+func (s *Service) CreateRefund(ctx context.Context, paymentID, tenantID, idempotencyKey string, amountMinor int64, reason, payoutQuoteID string) (*Refund, error) {
 	// Validate the request
 	if paymentID == "" || tenantID == "" || idempotencyKey == "" || amountMinor <= 0 || reason == "" {
 		return nil, errors.New("invalid refund payload")
