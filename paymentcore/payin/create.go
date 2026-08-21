@@ -94,9 +94,9 @@ func (s *Service) createPayin(ctx context.Context, request CreatePaymentRequest)
 		return nil, err
 	}
 	var existing Payin
-	lookup := `SELECT id,payment_id,COALESCE(quote_id,''),provider,COALESCE(provider_payin_id,''),funding_method,COALESCE(source_instrument_id,''),destination_account_id,source_amount_minor,source_currency,destination_amount_minor,destination_currency,settlement_status,instructions,created_at,updated_at FROM payins WHERE quote_id=$1`
+	lookup := `SELECT payment_id,COALESCE(quote_id,''),provider,COALESCE(provider_payin_id,''),funding_method,COALESCE(source_instrument_id,''),destination_account_id,source_amount_minor,source_currency,destination_amount_minor,destination_currency,settlement_status,instructions,created_at,updated_at FROM payins WHERE quote_id=$1`
 	lookupArg := quoteID
-	err = tx.QueryRowContext(ctx, lookup, lookupArg).Scan(&existing.ID, &existing.PaymentID, &existing.QuoteID, &existing.Provider, &existing.ProviderPayinID, &existing.FundingMethod, &existing.SourceInstrumentID, &existing.DestinationAccountID, &existing.SourceAmountMinor, &existing.SourceCurrency, &existing.DestinationAmountMinor, &existing.DestinationCurrency, &existing.Status, &existing.Instructions, &existing.CreatedAt, &existing.UpdatedAt)
+	err = tx.QueryRowContext(ctx, lookup, lookupArg).Scan(&existing.PaymentID, &existing.QuoteID, &existing.Provider, &existing.ProviderPayinID, &existing.FundingMethod, &existing.SourceInstrumentID, &existing.DestinationAccountID, &existing.SourceAmountMinor, &existing.SourceCurrency, &existing.DestinationAmountMinor, &existing.DestinationCurrency, &existing.Status, &existing.Instructions, &existing.CreatedAt, &existing.UpdatedAt)
 	if err == nil {
 		if existing.QuoteID != quoteID || existing.FundingMethod != fundingMethod || existing.SourceInstrumentID != sourceInstrumentID || existing.DestinationAccountID != destinationAccountID || existing.SourceAmountMinor != sourceAmountMinor || existing.SourceCurrency != sourceCurrency || existing.DestinationAmountMinor != destinationAmountMinor || existing.DestinationCurrency != destinationCurrency {
 			return nil, ErrIdempotencyConflict
@@ -108,10 +108,6 @@ func (s *Service) createPayin(ctx context.Context, request CreatePaymentRequest)
 	}
 	if status != "open" || !expires.After(s.now()) {
 		return nil, errors.New("payin quote expired or already accepted")
-	}
-	id, err := s.newID("pin_")
-	if err != nil {
-		return nil, err
 	}
 	now := s.now()
 	paymentID, err := s.newID("pay_")
@@ -127,7 +123,7 @@ func (s *Service) createPayin(ctx context.Context, request CreatePaymentRequest)
 		paymentcore.TimelineRecord{PaymentID: paymentID, PaymentStatus: paymentcore.PaymentStatusCreated, Note: "payin payment created", At: now}); err != nil {
 		return nil, err
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO payins(id,payment_id,quote_id,tenant_id,idempotency_key,funding_method,source_instrument_id,destination_account_id,source_amount_minor,source_currency,destination_amount_minor,destination_currency,provider,provider_payin_id,settlement_status,instructions,provider_payload,created_at,updated_at) VALUES($1,$2,NULLIF($3,''),$4,$5,$6,NULLIF($7,''),$8,$9,$10,$11,$12,$13,NULL,'created','{}','{}',$14,$14)`, id, paymentID, quoteID, tenantID, idempotencyKey, fundingMethod, sourceInstrumentID, destinationAccountID, sourceAmountMinor, sourceCurrency, destinationAmountMinor, destinationCurrency, s.quoteProvider.Name(), now)
+	_, err = tx.ExecContext(ctx, `INSERT INTO payins(payment_id,quote_id,tenant_id,idempotency_key,funding_method,source_instrument_id,destination_account_id,source_amount_minor,source_currency,destination_amount_minor,destination_currency,provider,provider_payin_id,settlement_status,instructions,provider_payload,created_at,updated_at) VALUES($1,NULLIF($2,''),$3,$4,$5,NULLIF($6,''),$7,$8,$9,$10,$11,$12,NULL,'created','{}','{}',$13,$13)`, paymentID, quoteID, tenantID, idempotencyKey, fundingMethod, sourceInstrumentID, destinationAccountID, sourceAmountMinor, sourceCurrency, destinationAmountMinor, destinationCurrency, s.quoteProvider.Name(), now)
 	if err != nil {
 		return nil, fmt.Errorf("store payin: %w", err)
 	}
@@ -138,8 +134,8 @@ func (s *Service) createPayin(ctx context.Context, request CreatePaymentRequest)
 	if rows, err := accepted.RowsAffected(); err != nil || rows != 1 {
 		return nil, errors.New("payin quote was consumed concurrently")
 	}
-	eventID := "evt_" + id + "_created"
-	eventBody, _ := json.Marshal(map[string]string{"payin_id": id})
+	eventID := "evt_" + paymentID + "_created"
+	eventBody, _ := json.Marshal(map[string]string{"payin_id": paymentID})
 	if _, err := tx.ExecContext(ctx, `INSERT INTO outbox_events(id,topic,event_type,event_version,aggregate_id,aggregate_type,payload,occurred_at) VALUES($1,$2,'payin.created',$3,$4,'payin',$5,$6)`, eventID, eventbus.PayinEventsTopic, eventbus.PayinCreatedVersion, paymentID, eventBody, now); err != nil {
 		return nil, err
 	}
@@ -149,5 +145,5 @@ func (s *Service) createPayin(ctx context.Context, request CreatePaymentRequest)
 	if err = tx.Commit(); err != nil {
 		return nil, err
 	}
-	return &Payin{ID: id, PaymentID: paymentID, QuoteID: quoteID, Provider: s.quoteProvider.Name(), FundingMethod: fundingMethod, SourceInstrumentID: sourceInstrumentID, DestinationAccountID: destinationAccountID, SourceAmountMinor: sourceAmountMinor, SourceCurrency: sourceCurrency, DestinationAmountMinor: destinationAmountMinor, DestinationCurrency: destinationCurrency, Status: StatusCreated, Instructions: json.RawMessage(`{}`), CreatedAt: now, UpdatedAt: now}, nil
+	return &Payin{PaymentID: paymentID, QuoteID: quoteID, Provider: s.quoteProvider.Name(), FundingMethod: fundingMethod, SourceInstrumentID: sourceInstrumentID, DestinationAccountID: destinationAccountID, SourceAmountMinor: sourceAmountMinor, SourceCurrency: sourceCurrency, DestinationAmountMinor: destinationAmountMinor, DestinationCurrency: destinationCurrency, Status: StatusCreated, Instructions: json.RawMessage(`{}`), CreatedAt: now, UpdatedAt: now}, nil
 }

@@ -112,15 +112,11 @@ func (c *SagaCoordinator) enqueueCommand(ctx context.Context, tx *sql.Tx, sagaID
 	if err != nil {
 		return err
 	}
-	var operationID string
-	if err := tx.QueryRowContext(ctx, `SELECT id FROM payins WHERE payment_id=$1`, payinID).Scan(&operationID); err != nil {
-		return err
-	}
 	reason := ""
 	if command == "payin.fail" {
 		reason = "payin workflow timed out"
 	}
-	body, _ := json.Marshal(map[string]string{"saga_id": sagaID, "correlation_id": correlationID, "payment_id": payinID, "payin_id": operationID, "caused_by_event_id": causedBy, "reason": reason})
+	body, _ := json.Marshal(map[string]string{"saga_id": sagaID, "correlation_id": correlationID, "payment_id": payinID, "payin_id": payinID, "caused_by_event_id": causedBy, "reason": reason})
 	version := map[string]int{"payin.policy.evaluate": eventbus.PayinPolicyEvaluateVersion, "payin.execute": eventbus.PayinExecuteVersion, "payin.ledger.record": eventbus.PayinLedgerRecordVersion, "payin.fail": eventbus.PayinFailedVersion}[command]
 	_, err = tx.ExecContext(ctx, `INSERT INTO outbox_events(id,topic,event_type,event_version,aggregate_id,aggregate_type,payload,occurred_at) VALUES($1,$2,$3,$4,$5,'payment',$6,$7)`, commandID, eventbus.SettlementCommandsTopic, command, version, payinID, body, now)
 	return err
@@ -146,15 +142,15 @@ func (c *SagaCoordinator) ExpireOnce(ctx context.Context) (int, error) {
 	}
 	defer tx.Rollback()
 	now := c.now()
-	rows, err := tx.QueryContext(ctx, `SELECT s.id,s.payment_id,s.correlation_id,s.state,p.id FROM settlement_sagas s JOIN payins p ON p.payment_id=s.payment_id WHERE s.direction='payin' AND s.deadline_at <= $1 AND s.state IN ('awaiting_policy','awaiting_execution','processing','on_hold','awaiting_ledger') ORDER BY s.deadline_at FOR UPDATE OF s SKIP LOCKED LIMIT $2`, now, c.timeoutBatchSize)
+	rows, err := tx.QueryContext(ctx, `SELECT s.id,s.payment_id,s.correlation_id,s.state FROM settlement_sagas s JOIN payins p ON p.payment_id=s.payment_id WHERE s.direction='payin' AND s.deadline_at <= $1 AND s.state IN ('awaiting_policy','awaiting_execution','processing','on_hold','awaiting_ledger') ORDER BY s.deadline_at FOR UPDATE OF s SKIP LOCKED LIMIT $2`, now, c.timeoutBatchSize)
 	if err != nil {
 		return 0, err
 	}
-	type expired struct{ sagaID, paymentID, correlation, state, payinID string }
+	type expired struct{ sagaID, paymentID, correlation, state string }
 	var items []expired
 	for rows.Next() {
 		var item expired
-		if err := rows.Scan(&item.sagaID, &item.paymentID, &item.correlation, &item.state, &item.payinID); err != nil {
+		if err := rows.Scan(&item.sagaID, &item.paymentID, &item.correlation, &item.state); err != nil {
 			rows.Close()
 			return 0, err
 		}

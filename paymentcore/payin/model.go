@@ -38,7 +38,6 @@ type Quote struct {
 }
 
 type Payin struct {
-	ID                     string          `json:"id"`
 	PaymentID              string          `json:"payment_id"`
 	QuoteID                string          `json:"quote_id,omitempty"`
 	Provider               string          `json:"provider"`

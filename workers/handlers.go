@@ -78,7 +78,7 @@ func (h *CommandHandler) Handle(ctx context.Context, tx *sql.Tx, event eventbus.
 		}
 		var amount int64
 		var currency string
-		if err := tx.QueryRowContext(ctx, `SELECT source_amount_minor,source_currency FROM payins WHERE id=$1`, payload.PayinID).Scan(&amount, &currency); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT source_amount_minor,source_currency FROM payins WHERE payment_id=$1`, payload.PayinID).Scan(&amount, &currency); err != nil {
 			return fmt.Errorf("load payin for policy: %w", err)
 		}
 		decision, err := h.policyEvaluator.Evaluate(ctx, policy.PolicyRequest{OperationID: payload.PayinID, Direction: "payin", AmountMinor: amount, Currency: currency})

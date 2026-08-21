@@ -78,7 +78,7 @@ func (*PostgresService) RecordPayin(ctx context.Context, tx *sql.Tx, request Pay
 	}
 	var paymentID, status, currency string
 	var amount int64
-	if err := tx.QueryRowContext(ctx, `SELECT payment_id,settlement_status,destination_amount_minor,destination_currency FROM payins WHERE id=$1 FOR UPDATE`, request.PayinID).Scan(&paymentID, &status, &amount, &currency); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT payment_id,settlement_status,destination_amount_minor,destination_currency FROM payins WHERE payment_id=$1 FOR UPDATE`, request.PayinID).Scan(&paymentID, &status, &amount, &currency); err != nil {
 		return fmt.Errorf("lock received payin: %w", err)
 	}
 	if status != "received" {

@@ -110,8 +110,8 @@ func TestPayinExecuteUsesPayinApplicationService(t *testing.T) {
 	defer db.Close()
 	service := &recordingPayinService{}
 	handler := NewCommandHandler(policy.DeterministicEvaluator{}, unusedLedgerService{}, &submissionFailurePayoutService{}, service)
-	payload, _ := json.Marshal(commandPayload{CorrelationID: "corr_1", PayinID: "pin_1"})
-	event := eventbus.Event{ID: "evt_command", Type: "payin.execute", Version: 1, AggregateID: "pin_1", AggregateType: "payin", OccurredAt: time.Now().UTC(), Payload: payload}
+	payload, _ := json.Marshal(commandPayload{CorrelationID: "corr_1", PayinID: "pay_1"})
+	event := eventbus.Event{ID: "evt_command", Type: "payin.execute", Version: 1, AggregateID: "pay_1", AggregateType: "payin", OccurredAt: time.Now().UTC(), Payload: payload}
 	mock.ExpectBegin()
 	mock.ExpectCommit()
 	tx, _ := db.BeginTx(context.Background(), nil)
@@ -121,7 +121,7 @@ func TestPayinExecuteUsesPayinApplicationService(t *testing.T) {
 	if err := tx.Commit(); err != nil {
 		t.Fatal(err)
 	}
-	if service.executedID != "pin_1" || service.appliedID != "pin_1" || service.correlation != "corr_1" {
+	if service.executedID != "pay_1" || service.appliedID != "pay_1" || service.correlation != "corr_1" {
 		t.Fatalf("service=%+v", service)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -139,11 +139,11 @@ func TestPayinPolicyApprovalEnqueuesExecutionProgress(t *testing.T) {
 	handler := NewCommandHandler(policy.DeterministicEvaluator{}, unusedLedgerService{}, &submissionFailurePayoutService{}, unusedPayinService{})
 	handler.now = func() time.Time { return now }
 	handler.newID = func() (string, error) { return "evt_policy_result", nil }
-	payload, _ := json.Marshal(commandPayload{CorrelationID: "corr_1", PayinID: "pin_1"})
-	event := eventbus.Event{ID: "evt_policy", Type: "payin.policy.evaluate", Version: 1, AggregateID: "pin_1", AggregateType: "payin", OccurredAt: now, Payload: payload}
+	payload, _ := json.Marshal(commandPayload{CorrelationID: "corr_1", PayinID: "pay_1"})
+	event := eventbus.Event{ID: "evt_policy", Type: "payin.policy.evaluate", Version: 1, AggregateID: "pay_1", AggregateType: "payin", OccurredAt: now, Payload: payload}
 	mock.ExpectBegin()
-	mock.ExpectQuery("SELECT source_amount_minor,source_currency FROM payins").WithArgs("pin_1").WillReturnRows(sqlmock.NewRows([]string{"amount", "currency"}).AddRow(int64(1000), "USD"))
-	mock.ExpectExec("INSERT INTO outbox_events").WithArgs("evt_policy_result", eventbus.PayinEventsTopic, "payin.policy.approved", eventbus.PayinPolicyApprovedVersion, "pin_1", sqlmock.AnyArg(), now).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery("SELECT source_amount_minor,source_currency FROM payins").WithArgs("pay_1").WillReturnRows(sqlmock.NewRows([]string{"amount", "currency"}).AddRow(int64(1000), "USD"))
+	mock.ExpectExec("INSERT INTO outbox_events").WithArgs("evt_policy_result", eventbus.PayinEventsTopic, "payin.policy.approved", eventbus.PayinPolicyApprovedVersion, "pay_1", sqlmock.AnyArg(), now).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 	tx, _ := db.BeginTx(context.Background(), nil)
 	if err := handler.Handle(context.Background(), tx, event); err != nil {

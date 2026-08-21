@@ -1,6 +1,5 @@
 CREATE TABLE payins (
-    id                 TEXT PRIMARY KEY,
-    payment_id         TEXT NOT NULL UNIQUE REFERENCES payments(id),
+    payment_id         TEXT PRIMARY KEY REFERENCES payments(id),
     quote_id           TEXT UNIQUE REFERENCES payment_quotes(id),
     tenant_id          TEXT NOT NULL,
     idempotency_key    TEXT NOT NULL,
@@ -24,5 +23,5 @@ CREATE TABLE payins (
     UNIQUE (tenant_id, idempotency_key)
 );
 
-CREATE INDEX payins_tenant_idx ON payins (tenant_id, created_at, id);
+CREATE INDEX payins_tenant_idx ON payins (tenant_id, created_at, payment_id);
 CREATE INDEX payins_status_idx ON payins (settlement_status, updated_at);

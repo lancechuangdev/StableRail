@@ -11,7 +11,7 @@ import (
 )
 
 func (s *Service) recordError(ctx context.Context, payinID, status string, cause error) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE payins SET settlement_status=$1,failure_reason=$2,updated_at=$3 WHERE id=$4 AND settlement_status='submission_pending'`, status, cause.Error(), s.now(), payinID)
+	_, err := s.db.ExecContext(ctx, `UPDATE payins SET settlement_status=$1,failure_reason=$2,updated_at=$3 WHERE payment_id=$4 AND settlement_status='submission_pending'`, status, cause.Error(), s.now(), payinID)
 	return err
 }
 
@@ -65,7 +65,7 @@ func (s *Service) ApplyResult(ctx context.Context, tx *sql.Tx, payinID, correlat
 		instructions = json.RawMessage(`{}`)
 	}
 	var paymentID string
-	if err := tx.QueryRowContext(ctx, `SELECT p.payment_id FROM payins p JOIN payments pm ON pm.id=p.payment_id WHERE p.id=$1 FOR UPDATE OF p,pm`, payinID).Scan(&paymentID); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT p.payment_id FROM payins p JOIN payments pm ON pm.id=p.payment_id WHERE p.payment_id=$1 FOR UPDATE OF p,pm`, payinID).Scan(&paymentID); err != nil {
 		return err
 	}
 	lifecycleStatus := normalizeResultStatus(result.Status)
@@ -73,7 +73,7 @@ func (s *Service) ApplyResult(ctx context.Context, tx *sql.Tx, payinID, correlat
 	if failureReason == "" {
 		failureReason = result.FailureCode
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE payins SET provider_payin_id=NULLIF($1,''),settlement_status=$2,instructions=$3,provider_payload=$4,failure_reason=NULLIF($5,''),updated_at=$6 WHERE id=$7`, result.ProviderReference, lifecycleStatus, instructions, payload, failureReason, now, payinID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE payins SET provider_payin_id=NULLIF($1,''),settlement_status=$2,instructions=$3,provider_payload=$4,failure_reason=NULLIF($5,''),updated_at=$6 WHERE payment_id=$7`, result.ProviderReference, lifecycleStatus, instructions, payload, failureReason, now, payinID); err != nil {
 		return err
 	}
 	paymentStatus := paymentStateForResult(lifecycleStatus)
