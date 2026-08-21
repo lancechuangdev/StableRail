@@ -106,7 +106,7 @@ func find(ctx context.Context, tx *sql.Tx) ([]Finding, error) {
 	rows, err := tx.QueryContext(ctx, `SELECT t.id,t.payment_id,
 		COALESCE(SUM(CASE WHEN e.side='debit' THEN e.amount_minor ELSE 0 END),0),
 		COALESCE(SUM(CASE WHEN e.side='credit' THEN e.amount_minor ELSE 0 END),0)
-		FROM ledger_transactions t LEFT JOIN ledger_entries e ON e.transaction_id=t.id GROUP BY t.id,t.payment_id
+		FROM ledger_journals t LEFT JOIN ledger_entries e ON e.journal_id=t.id GROUP BY t.id,t.payment_id
 		HAVING COUNT(e.id)=0 OR COALESCE(SUM(CASE WHEN e.side='debit' THEN e.amount_minor ELSE 0 END),0) <> COALESCE(SUM(CASE WHEN e.side='credit' THEN e.amount_minor ELSE 0 END),0)`)
 	if err != nil {
 		return nil, fmt.Errorf("compare ledger entries: %w", err)

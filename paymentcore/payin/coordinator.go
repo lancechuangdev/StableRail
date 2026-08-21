@@ -40,19 +40,15 @@ func (c *SagaCoordinator) Handle(ctx context.Context, tx *sql.Tx, event eventbus
 	if event.Type == "payin.created" {
 		return c.start(ctx, tx, event)
 	}
-	var id, correlation, state string
-	if err := tx.QueryRowContext(ctx, `SELECT id,correlation_id,state FROM settlement_sagas WHERE payment_id=$1 AND direction='payin' FOR UPDATE`, event.AggregateID).Scan(&id, &correlation, &state); err != nil {
+	var state string
+	if err := tx.QueryRowContext(ctx, `SELECT state FROM settlement_sagas WHERE payment_id=$1 AND direction='payin' FOR UPDATE`, event.AggregateID).Scan(&state); err != nil {
 		return err
 	}
 	var payload struct {
-		CorrelationID string `json:"correlation_id"`
-		Reason        string `json:"reason"`
+		Reason string `json:"reason"`
 	}
 	if err := json.Unmarshal(event.Payload, &payload); err != nil {
 		return err
-	}
-	if payload.CorrelationID != correlation {
-		return fmt.Errorf("payin saga correlation mismatch")
 	}
 	next, command := "", ""
 	switch {
@@ -77,26 +73,18 @@ func (c *SagaCoordinator) Handle(ctx context.Context, tx *sql.Tx, event eventbus
 	}
 	now := c.now()
 	deadline := c.deadline(next, now)
-	if _, err := tx.ExecContext(ctx, `UPDATE settlement_sagas SET state=$1,deadline_at=$2,failure_reason=COALESCE(NULLIF($3,''),failure_reason),updated_at=$4 WHERE id=$5`, next, deadline, payload.Reason, now, id); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE settlement_sagas SET state=$1,deadline_at=$2,failure_reason=COALESCE(NULLIF($3,''),failure_reason),updated_at=$4 WHERE payment_id=$5`, next, deadline, payload.Reason, now, event.AggregateID); err != nil {
 		return err
 	}
 	if command == "" {
 		return nil
 	}
-	return c.enqueueCommand(ctx, tx, id, correlation, event.AggregateID, event.ID, command, now)
+	return c.enqueueCommand(ctx, tx, event.AggregateID, event.ID, command, now)
 }
 
 func (c *SagaCoordinator) start(ctx context.Context, tx *sql.Tx, event eventbus.Event) error {
-	id, err := c.newID("psaga_")
-	if err != nil {
-		return err
-	}
-	correlation, err := c.newID("corr_")
-	if err != nil {
-		return err
-	}
 	now := c.now()
-	res, err := tx.ExecContext(ctx, `INSERT INTO settlement_sagas(id,payment_id,direction,correlation_id,state,deadline_at,created_at,updated_at) VALUES($1,$2,'payin',$3,'awaiting_policy',$4,$5,$5) ON CONFLICT(payment_id) DO NOTHING`, id, event.AggregateID, correlation, now.Add(c.operationTimeout), now)
+	res, err := tx.ExecContext(ctx, `INSERT INTO settlement_sagas(payment_id,direction,state,deadline_at,created_at,updated_at) VALUES($1,'payin','awaiting_policy',$2,$3,$3) ON CONFLICT(payment_id) DO NOTHING`, event.AggregateID, now.Add(c.operationTimeout), now)
 	if err != nil {
 		return err
 	}
@@ -104,10 +92,10 @@ func (c *SagaCoordinator) start(ctx context.Context, tx *sql.Tx, event eventbus.
 	if rows == 0 {
 		return nil
 	}
-	return c.enqueueCommand(ctx, tx, id, correlation, event.AggregateID, event.ID, "payin.policy.evaluate", now)
+	return c.enqueueCommand(ctx, tx, event.AggregateID, event.ID, "payin.policy.evaluate", now)
 }
 
-func (c *SagaCoordinator) enqueueCommand(ctx context.Context, tx *sql.Tx, sagaID, correlationID, payinID, causedBy, command string, now time.Time) error {
+func (c *SagaCoordinator) enqueueCommand(ctx context.Context, tx *sql.Tx, payinID, causedBy, command string, now time.Time) error {
 	commandID, err := c.newID("evt_")
 	if err != nil {
 		return err
@@ -116,7 +104,7 @@ func (c *SagaCoordinator) enqueueCommand(ctx context.Context, tx *sql.Tx, sagaID
 	if command == "payin.fail" {
 		reason = "payin workflow timed out"
 	}
-	body, _ := json.Marshal(map[string]string{"saga_id": sagaID, "correlation_id": correlationID, "payment_id": payinID, "payin_id": payinID, "caused_by_event_id": causedBy, "reason": reason})
+	body, _ := json.Marshal(map[string]string{"payment_id": payinID, "payin_id": payinID, "caused_by_event_id": causedBy, "reason": reason})
 	version := map[string]int{"payin.policy.evaluate": eventbus.PayinPolicyEvaluateVersion, "payin.execute": eventbus.PayinExecuteVersion, "payin.ledger.record": eventbus.PayinLedgerRecordVersion, "payin.fail": eventbus.PayinFailedVersion}[command]
 	_, err = tx.ExecContext(ctx, `INSERT INTO outbox_events(id,topic,event_type,event_version,aggregate_id,aggregate_type,payload,occurred_at) VALUES($1,$2,$3,$4,$5,'payment',$6,$7)`, commandID, eventbus.SettlementCommandsTopic, command, version, payinID, body, now)
 	return err
@@ -142,15 +130,15 @@ func (c *SagaCoordinator) ExpireOnce(ctx context.Context) (int, error) {
 	}
 	defer tx.Rollback()
 	now := c.now()
-	rows, err := tx.QueryContext(ctx, `SELECT s.id,s.payment_id,s.correlation_id,s.state FROM settlement_sagas s JOIN payins p ON p.payment_id=s.payment_id WHERE s.direction='payin' AND s.deadline_at <= $1 AND s.state IN ('awaiting_policy','awaiting_execution','processing','on_hold','awaiting_ledger') ORDER BY s.deadline_at FOR UPDATE OF s SKIP LOCKED LIMIT $2`, now, c.timeoutBatchSize)
+	rows, err := tx.QueryContext(ctx, `SELECT s.payment_id,s.state FROM settlement_sagas s JOIN payins p ON p.payment_id=s.payment_id WHERE s.direction='payin' AND s.deadline_at <= $1 AND s.state IN ('awaiting_policy','awaiting_execution','processing','on_hold','awaiting_ledger') ORDER BY s.deadline_at FOR UPDATE OF s SKIP LOCKED LIMIT $2`, now, c.timeoutBatchSize)
 	if err != nil {
 		return 0, err
 	}
-	type expired struct{ sagaID, paymentID, correlation, state string }
+	type expired struct{ paymentID, state string }
 	var items []expired
 	for rows.Next() {
 		var item expired
-		if err := rows.Scan(&item.sagaID, &item.paymentID, &item.correlation, &item.state); err != nil {
+		if err := rows.Scan(&item.paymentID, &item.state); err != nil {
 			rows.Close()
 			return 0, err
 		}
@@ -167,10 +155,10 @@ func (c *SagaCoordinator) ExpireOnce(ctx context.Context) (int, error) {
 		if item.state == "awaiting_ledger" {
 			command = "payin.ledger.record"
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE settlement_sagas SET deadline_at=$1,failure_reason=COALESCE(failure_reason,$2),updated_at=$3 WHERE id=$4`, now.Add(c.operationTimeout), item.state+" timeout", now, item.sagaID); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE settlement_sagas SET deadline_at=$1,failure_reason=COALESCE(failure_reason,$2),updated_at=$3 WHERE payment_id=$4`, now.Add(c.operationTimeout), item.state+" timeout", now, item.paymentID); err != nil {
 			return 0, err
 		}
-		if err := c.enqueueCommand(ctx, tx, item.sagaID, item.correlation, item.paymentID, "timeout", command, now); err != nil {
+		if err := c.enqueueCommand(ctx, tx, item.paymentID, "timeout", command, now); err != nil {
 			return 0, err
 		}
 	}

@@ -18,15 +18,15 @@ import (
 )
 
 type submissionFailurePayoutService struct {
-	appliedPaymentID, appliedCommandID, appliedCorrelationID string
-	appliedResult                                            paymentcore.ExecutionResult
+	appliedPaymentID, appliedCommandID string
+	appliedResult                      paymentcore.ExecutionResult
 }
 
 func (submissionFailurePayoutService) ExecutePayout(context.Context, string) (paymentcore.ExecutionResult, error) {
 	return paymentcore.ExecutionResult{}, &paymentcore.ProviderError{Message: "insufficient balance", Code: "submission_failed", Retryable: false}
 }
-func (s *submissionFailurePayoutService) ApplyResult(_ context.Context, _ *sql.Tx, paymentID, commandID, correlationID string, result paymentcore.ExecutionResult, _ time.Time) error {
-	s.appliedPaymentID, s.appliedCommandID, s.appliedCorrelationID, s.appliedResult = paymentID, commandID, correlationID, result
+func (s *submissionFailurePayoutService) ApplyResult(_ context.Context, _ *sql.Tx, paymentID, commandID string, result paymentcore.ExecutionResult, _ time.Time) error {
+	s.appliedPaymentID, s.appliedCommandID, s.appliedResult = paymentID, commandID, result
 	return nil
 }
 
@@ -36,20 +36,20 @@ type unusedPayinService struct{}
 func (unusedPayinService) ExecutePayin(context.Context, string) (payin.ExecuteResult, error) {
 	return payin.ExecuteResult{}, errors.New("unused")
 }
-func (unusedPayinService) ApplyResult(context.Context, *sql.Tx, string, string, payin.ExecuteResult, time.Time) error {
+func (unusedPayinService) ApplyResult(context.Context, *sql.Tx, string, payin.ExecuteResult, time.Time) error {
 	return errors.New("unused")
 }
 
 type recordingPayinService struct {
-	executedID, appliedID, correlation string
+	executedID, appliedID string
 }
 
 func (s *recordingPayinService) ExecutePayin(_ context.Context, id string) (payin.ExecuteResult, error) {
 	s.executedID = id
 	return payin.ExecuteResult{ExecutionResult: paymentcore.ExecutionResult{ProviderReference: "pi_1", Status: paymentcore.ExecutionPending}}, nil
 }
-func (s *recordingPayinService) ApplyResult(_ context.Context, _ *sql.Tx, id, correlation string, _ payin.ExecuteResult, _ time.Time) error {
-	s.appliedID, s.correlation = id, correlation
+func (s *recordingPayinService) ApplyResult(_ context.Context, _ *sql.Tx, id string, _ payin.ExecuteResult, _ time.Time) error {
+	s.appliedID = id
 	return nil
 }
 
@@ -78,7 +78,7 @@ func TestSettlementSubmissionFailureDelegatesResultApplication(t *testing.T) {
 	handler := NewCommandHandler(policy.DeterministicEvaluator{}, unusedLedgerService{}, payouts, unusedPayinService{})
 	handler.now = func() time.Time { return now }
 	handler.newID = func() (string, error) { return "evt_result", nil }
-	payload, _ := json.Marshal(commandPayload{CorrelationID: "corr_1", PaymentID: "pay_1"})
+	payload, _ := json.Marshal(commandPayload{PaymentID: "pay_1"})
 	event := eventbus.Event{ID: "evt_command", Type: "settlement.execute", Version: 1, AggregateID: "pay_1", AggregateType: "payment", OccurredAt: now, Payload: payload}
 
 	mock.ExpectBegin()
@@ -94,7 +94,7 @@ func TestSettlementSubmissionFailureDelegatesResultApplication(t *testing.T) {
 	if err := tx.Commit(); err != nil {
 		t.Fatal(err)
 	}
-	if payouts.appliedPaymentID != "pay_1" || payouts.appliedCommandID != "evt_command" || payouts.appliedCorrelationID != "corr_1" || payouts.appliedResult.Status != paymentcore.ExecutionFailed || payouts.appliedResult.FailureCode != "submission_failed" {
+	if payouts.appliedPaymentID != "pay_1" || payouts.appliedCommandID != "evt_command" || payouts.appliedResult.Status != paymentcore.ExecutionFailed || payouts.appliedResult.FailureCode != "submission_failed" {
 		t.Fatalf("applied payout result = %+v", payouts)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -110,7 +110,7 @@ func TestPayinExecuteUsesPayinApplicationService(t *testing.T) {
 	defer db.Close()
 	service := &recordingPayinService{}
 	handler := NewCommandHandler(policy.DeterministicEvaluator{}, unusedLedgerService{}, &submissionFailurePayoutService{}, service)
-	payload, _ := json.Marshal(commandPayload{CorrelationID: "corr_1", PayinID: "pay_1"})
+	payload, _ := json.Marshal(commandPayload{PayinID: "pay_1"})
 	event := eventbus.Event{ID: "evt_command", Type: "payin.execute", Version: 1, AggregateID: "pay_1", AggregateType: "payin", OccurredAt: time.Now().UTC(), Payload: payload}
 	mock.ExpectBegin()
 	mock.ExpectCommit()
@@ -121,7 +121,7 @@ func TestPayinExecuteUsesPayinApplicationService(t *testing.T) {
 	if err := tx.Commit(); err != nil {
 		t.Fatal(err)
 	}
-	if service.executedID != "pay_1" || service.appliedID != "pay_1" || service.correlation != "corr_1" {
+	if service.executedID != "pay_1" || service.appliedID != "pay_1" {
 		t.Fatalf("service=%+v", service)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -139,7 +139,7 @@ func TestPayinPolicyApprovalEnqueuesExecutionProgress(t *testing.T) {
 	handler := NewCommandHandler(policy.DeterministicEvaluator{}, unusedLedgerService{}, &submissionFailurePayoutService{}, unusedPayinService{})
 	handler.now = func() time.Time { return now }
 	handler.newID = func() (string, error) { return "evt_policy_result", nil }
-	payload, _ := json.Marshal(commandPayload{CorrelationID: "corr_1", PayinID: "pay_1"})
+	payload, _ := json.Marshal(commandPayload{PayinID: "pay_1"})
 	event := eventbus.Event{ID: "evt_policy", Type: "payin.policy.evaluate", Version: 1, AggregateID: "pay_1", AggregateType: "payin", OccurredAt: now, Payload: payload}
 	mock.ExpectBegin()
 	mock.ExpectQuery("SELECT source_amount_minor,source_currency FROM payins").WithArgs("pay_1").WillReturnRows(sqlmock.NewRows([]string{"amount", "currency"}).AddRow(int64(1000), "USD"))
@@ -167,7 +167,7 @@ func TestLateReturnRecordsReleasedPaymentReturn(t *testing.T) {
 	handler := NewCommandHandler(policy.DeterministicEvaluator{}, unusedLedgerService{}, &submissionFailurePayoutService{}, unusedPayinService{})
 	handler.now = func() time.Time { return now }
 	handler.newID = func() (string, error) { return "evt_returned", nil }
-	payload, _ := json.Marshal(commandPayload{CorrelationID: "corr_1", PaymentID: "pay_1", Reason: "provider confirmed return"})
+	payload, _ := json.Marshal(commandPayload{PaymentID: "pay_1", Reason: "provider confirmed return"})
 	event := eventbus.Event{ID: "evt_return", Type: "payment.return", Version: 1, AggregateID: "pay_1", AggregateType: "payment", OccurredAt: now, Payload: payload}
 	mock.ExpectBegin()
 	mock.ExpectExec("UPDATE payments SET payment_status=.*payment_status='failed' AND EXISTS").WithArgs(paymentcore.PaymentStatusFailed, now, "pay_1").WillReturnResult(sqlmock.NewResult(0, 1))

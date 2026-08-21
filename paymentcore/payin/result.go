@@ -56,7 +56,7 @@ func paymentStateForResult(status PayinStatus) paymentcore.PaymentStatus {
 
 // ApplyResult records a provider result and its accounting effects in
 // the inbox transaction that consumed the execution command.
-func (s *Service) ApplyResult(ctx context.Context, tx *sql.Tx, payinID, correlationID string, result ExecuteResult, now time.Time) error {
+func (s *Service) ApplyResult(ctx context.Context, tx *sql.Tx, payinID string, result ExecuteResult, now time.Time) error {
 	payload, instructions := result.Payload, result.Instructions
 	if len(payload) == 0 {
 		payload = json.RawMessage(`{}`)
@@ -84,7 +84,7 @@ func (s *Service) ApplyResult(ctx context.Context, tx *sql.Tx, payinID, correlat
 	if err := paymentcore.NewHistoryService().RecordTimeline(ctx, tx, paymentcore.TimelineRecord{PaymentID: paymentID, PaymentStatus: paymentStatus, Note: eventType, At: now}); err != nil {
 		return err
 	}
-	body, _ := json.Marshal(map[string]any{"id": eventID, "type": eventType, "payin_id": payinID, "correlation_id": correlationID, "reason": failureReason, "occurred_at": now, "data": map[string]any{"status": result.Status}})
+	body, _ := json.Marshal(map[string]any{"id": eventID, "type": eventType, "payin_id": payinID, "reason": failureReason, "occurred_at": now, "data": map[string]any{"status": result.Status}})
 	version := map[PayinStatus]int{StatusProcessing: eventbus.PayinProcessingVersion, StatusOnHold: eventbus.PayinOnHoldVersion, StatusReceived: eventbus.PayinReceivedVersion, StatusFailed: eventbus.PayinFailedVersion, StatusRefunded: eventbus.PayinRefundedVersion}[lifecycleStatus]
 	if _, err := tx.ExecContext(ctx, `INSERT INTO outbox_events(id,topic,event_type,event_version,aggregate_id,aggregate_type,payload,occurred_at) VALUES($1,$2,$3,$4,$5,'payin',$6,$7) ON CONFLICT(id) DO NOTHING`, eventID, eventbus.PayinEventsTopic, eventType, version, paymentID, body, now); err != nil {
 		return err

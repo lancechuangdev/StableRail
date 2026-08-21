@@ -1,8 +1,6 @@
 CREATE TABLE settlement_sagas (
-    id             TEXT PRIMARY KEY,
-    payment_id     TEXT NOT NULL UNIQUE REFERENCES payments(id),
+    payment_id     TEXT PRIMARY KEY REFERENCES payments(id),
     direction      TEXT NOT NULL CHECK (direction IN ('payin', 'payout')),
-    correlation_id TEXT NOT NULL UNIQUE,
     state          TEXT NOT NULL CHECK (state IN (
         'awaiting_policy', 'awaiting_ledger', 'awaiting_settlement', 'on_hold', 'manual_review',
         'releasing_ledger', 'returning', 'settling_payment', 'completed',
@@ -20,15 +18,15 @@ CREATE INDEX settlement_sagas_deadline_idx
 
 CREATE TABLE saga_manual_review_actions (
     id          BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    saga_id     TEXT NOT NULL REFERENCES settlement_sagas(id),
+    payment_id  TEXT NOT NULL REFERENCES settlement_sagas(payment_id),
     action      TEXT NOT NULL CHECK (action IN ('retry','complete','fail','return')),
     operator    TEXT NOT NULL,
     note        TEXT NOT NULL,
     occurred_at TIMESTAMPTZ NOT NULL
 );
 
-CREATE INDEX saga_manual_review_actions_saga_idx
-    ON saga_manual_review_actions (saga_id, occurred_at, id);
+CREATE INDEX saga_manual_review_actions_payment_idx
+    ON saga_manual_review_actions (payment_id, occurred_at, id);
 
 CREATE TABLE settlement_submissions (
     id                 BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,

@@ -47,7 +47,7 @@ func TestBLINDPAY001SuccessfulPaymentLifecycle(t *testing.T) {
 	env, tenant, quote, payment := newPayment(t, 2500, "001")
 	complete(t, env, tenant, quote, payment)
 	env.WaitForCount(t, `SELECT count(*) FROM payouts WHERE payment_id=$1 AND settlement_status='completed'`, 1, payment.ID)
-	rows, err := env.DB.Query(`SELECT t.event_type,SUM(CASE WHEN e.side='debit' THEN e.amount_minor ELSE 0 END),SUM(CASE WHEN e.side='credit' THEN e.amount_minor ELSE 0 END) FROM ledger_transactions t JOIN ledger_entries e ON e.transaction_id=t.id WHERE t.payment_id=$1 GROUP BY t.event_type`, payment.ID)
+	rows, err := env.DB.Query(`SELECT t.event_type,SUM(CASE WHEN e.side='debit' THEN e.amount_minor ELSE 0 END),SUM(CASE WHEN e.side='credit' THEN e.amount_minor ELSE 0 END) FROM ledger_journals t JOIN ledger_entries e ON e.journal_id=t.id WHERE t.payment_id=$1 GROUP BY t.event_type`, payment.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,7 +133,7 @@ func TestBLINDPAY004PolicyRejection(t *testing.T) {
 	env, _, _, payment := newPayment(t, 4004, "004")
 	env.WaitForSagaState(t, payment.ID, "failed")
 	env.WaitForCount(t, `SELECT count(*) FROM payouts WHERE payment_id=$1`, 0, payment.ID)
-	env.WaitForCount(t, `SELECT count(*) FROM ledger_transactions WHERE payment_id=$1`, 0, payment.ID)
+	env.WaitForCount(t, `SELECT count(*) FROM ledger_journals WHERE payment_id=$1`, 0, payment.ID)
 }
 
 func TestBLINDPAY005SettlementFailureKeepsFundsReserved(t *testing.T) {
@@ -142,8 +142,8 @@ func TestBLINDPAY005SettlementFailureKeepsFundsReserved(t *testing.T) {
 	env.WaitForCount(t, `SELECT count(*) FROM payouts WHERE payment_id=$1 AND provider_payout_id=$2 AND settlement_status='processing'`, 1, payment.ID, testenv.PayoutID(quote))
 	env.SendBlindPayWebhook(t, testenv.PayoutID(quote), "failed")
 	env.WaitForSagaState(t, payment.ID, "failed")
-	env.WaitForCount(t, `SELECT count(*) FROM ledger_transactions WHERE payment_id=$1 AND event_type='payment.processing'`, 1, payment.ID)
-	env.WaitForCount(t, `SELECT count(*) FROM ledger_transactions WHERE payment_id=$1 AND event_type='payment.released'`, 0, payment.ID)
+	env.WaitForCount(t, `SELECT count(*) FROM ledger_journals WHERE payment_id=$1 AND event_type='payment.processing'`, 1, payment.ID)
+	env.WaitForCount(t, `SELECT count(*) FROM ledger_journals WHERE payment_id=$1 AND event_type='payment.released'`, 0, payment.ID)
 }
 
 func TestBLINDPAY006TerminalReturn(t *testing.T) {
@@ -157,7 +157,7 @@ func TestBLINDPAY006TerminalReturn(t *testing.T) {
 	env.SendBlindPayWebhook(t, testenv.PayoutID(quote), "refunded")
 	env.WaitForSagaState(t, payment.ID, "completed")
 	env.WaitForCount(t, `SELECT count(*) FROM payment_returns WHERE payment_id=$1 AND status='succeeded'`, 1, payment.ID)
-	env.WaitForCount(t, `SELECT count(*) FROM ledger_transactions WHERE payment_id=$1 AND event_type='payment.return.succeeded'`, 1, payment.ID)
+	env.WaitForCount(t, `SELECT count(*) FROM ledger_journals WHERE payment_id=$1 AND event_type='payment.return.succeeded'`, 1, payment.ID)
 	env.WaitForCount(t, `SELECT count(*) FROM webhook_deliveries WHERE payment_id=$1 AND event_type='payment.return.succeeded' AND status='delivered'`, 1, payment.ID)
 }
 
@@ -173,7 +173,7 @@ func TestBLINDPAY007ManualReviewResolution(t *testing.T) {
 	}
 	tenant.WaitForPaymentStatus(t, payment.ID, "succeeded")
 	env.WaitForSagaState(t, payment.ID, "completed")
-	env.WaitForCount(t, `SELECT count(*) FROM saga_manual_review_actions a JOIN settlement_sagas s ON s.id=a.saga_id WHERE s.payment_id=$1`, 1, payment.ID)
+	env.WaitForCount(t, `SELECT count(*) FROM saga_manual_review_actions WHERE payment_id=$1`, 1, payment.ID)
 }
 
 func TestBLINDPAY008IndependentSignedTenantWebhooks(t *testing.T) {
@@ -272,5 +272,5 @@ func TestBLINDPAY009RestartCompletesDurableWorkOnce(t *testing.T) {
 	tenant.WaitForPaymentStatus(t, payment.ID, "succeeded")
 	env.WaitForSagaState(t, payment.ID, "completed")
 	env.WaitForCount(t, `SELECT count(*) FROM payouts WHERE payment_id=$1`, 1, payment.ID)
-	env.WaitForCount(t, `SELECT count(*) FROM ledger_transactions WHERE payment_id=$1 AND event_type='payment.succeeded'`, 1, payment.ID)
+	env.WaitForCount(t, `SELECT count(*) FROM ledger_journals WHERE payment_id=$1 AND event_type='payment.succeeded'`, 1, payment.ID)
 }

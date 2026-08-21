@@ -38,7 +38,7 @@ func TestFailureBeforeReceiptFailsPayment(t *testing.T) {
 	mock.ExpectExec("INSERT INTO outbox_events").WithArgs("evt_pay_1_failed_payment", eventbus.PaymentEventsTopic, "payment.failed", eventbus.PaymentFailedVersion, "pay_1", sqlmock.AnyArg(), now).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 	tx, _ := db.BeginTx(context.Background(), nil)
-	if err := service.ApplyResult(context.Background(), tx, "pay_1", "corr_1", ExecuteResult{ExecutionResult: paymentcore.ExecutionResult{Status: paymentcore.ExecutionFailed, FailureMessage: "policy rejected"}}, now); err != nil {
+	if err := service.ApplyResult(context.Background(), tx, "pay_1", ExecuteResult{ExecutionResult: paymentcore.ExecutionResult{Status: paymentcore.ExecutionFailed, FailureMessage: "policy rejected"}}, now); err != nil {
 		t.Fatal(err)
 	}
 	if err := tx.Commit(); err != nil {

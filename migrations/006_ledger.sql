@@ -8,7 +8,7 @@ INSERT INTO ledger_accounts (code, name, account_type) VALUES
     ('cash:operating', 'Operating cash', 'asset'),
     ('settlement:payable', 'Settlement payable', 'liability');
 
-CREATE TABLE ledger_transactions (
+CREATE TABLE ledger_journals (
     id           TEXT PRIMARY KEY,
     payment_id   TEXT NOT NULL REFERENCES payments(id),
     event_type   TEXT NOT NULL,
@@ -19,17 +19,17 @@ CREATE TABLE ledger_transactions (
 
 CREATE TABLE ledger_entries (
     id              TEXT PRIMARY KEY,
-    transaction_id  TEXT NOT NULL REFERENCES ledger_transactions(id),
+    journal_id      TEXT NOT NULL REFERENCES ledger_journals(id),
     account_code    TEXT NOT NULL REFERENCES ledger_accounts(code),
     side            TEXT NOT NULL CHECK (side IN ('debit', 'credit')),
     amount_minor    BIGINT NOT NULL CHECK (amount_minor > 0),
     currency        TEXT NOT NULL
 );
 
-CREATE INDEX ledger_transactions_payment_idx
-    ON ledger_transactions (payment_id, occurred_at, id);
-CREATE INDEX ledger_entries_transaction_idx
-    ON ledger_entries (transaction_id, id);
+CREATE INDEX ledger_journals_payment_idx
+    ON ledger_journals (payment_id, occurred_at, id);
+CREATE INDEX ledger_entries_journal_idx
+    ON ledger_entries (journal_id, id);
 
 CREATE TABLE payment_returns (
     id                    TEXT PRIMARY KEY,
@@ -40,7 +40,7 @@ CREATE TABLE payment_returns (
     currency              TEXT NOT NULL,
     status                TEXT NOT NULL CHECK (status IN ('created', 'processing', 'succeeded', 'failed')),
     reason                TEXT NOT NULL,
-    ledger_transaction_id TEXT NOT NULL UNIQUE REFERENCES ledger_transactions(id),
+    ledger_journal_id     TEXT NOT NULL UNIQUE REFERENCES ledger_journals(id),
     occurred_at           TIMESTAMPTZ NOT NULL
 );
 

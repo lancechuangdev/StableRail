@@ -58,7 +58,7 @@ func payoutEventVersion(eventType string) int {
 	}
 }
 
-func enqueueProviderResult(ctx context.Context, tx *sql.Tx, paymentID, commandEventID, correlationID, eventType, reason string, now time.Time) error {
+func enqueueProviderResult(ctx context.Context, tx *sql.Tx, paymentID, commandEventID, eventType, reason string, now time.Time) error {
 	version := map[string]int{
 		"payout.provider_completed": eventbus.PayoutProviderCompletedVersion,
 		"payout.provider_failed":    eventbus.PayoutProviderFailedVersion,
@@ -69,7 +69,7 @@ func enqueueProviderResult(ctx context.Context, tx *sql.Tx, paymentID, commandEv
 		return fmt.Errorf("unsupported payout provider event %q", eventType)
 	}
 	eventID := commandEventID + ":result"
-	body, err := json.Marshal(map[string]string{"correlation_id": correlationID, "caused_by_event_id": commandEventID, "reason": reason})
+	body, err := json.Marshal(map[string]string{"caused_by_event_id": commandEventID, "reason": reason})
 	if err != nil {
 		return fmt.Errorf("marshal payout provider result: %w", err)
 	}

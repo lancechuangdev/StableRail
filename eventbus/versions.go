@@ -12,7 +12,7 @@ const (
 	PayoutCompletedVersion         = 1
 	PayoutFailedVersion            = 1
 	PayoutFundsReturnedVersion     = 1
-	PayoutReturnCompletedVersion   = 1
+	PaymentReturnSucceededVersion  = 1
 	PayoutPolicyApprovedVersion    = 1
 	PayoutPolicyRejectedVersion    = 1
 	PayoutFundsReservedVersion     = 1

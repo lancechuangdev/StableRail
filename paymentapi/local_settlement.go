@@ -29,15 +29,15 @@ func (c *LocalSettlementControl) Emit(ctx context.Context, paymentID, status, re
 	if eventType == "" {
 		return errors.New("status must be completed, failed, or refunded")
 	}
-	var correlationID string
-	if err := c.db.QueryRowContext(ctx, `SELECT correlation_id FROM settlement_sagas WHERE payment_id=$1`, paymentID).Scan(&correlationID); err != nil {
+	var exists bool
+	if err := c.db.QueryRowContext(ctx, `SELECT true FROM settlement_sagas WHERE payment_id=$1`, paymentID).Scan(&exists); err != nil {
 		return err
 	}
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {
 		return err
 	}
-	payload, _ := json.Marshal(map[string]string{"correlation_id": correlationID, "reason": reason})
+	payload, _ := json.Marshal(map[string]string{"reason": reason})
 	now := time.Now().UTC()
 	_, err := c.db.ExecContext(ctx, `INSERT INTO outbox_events(id,topic,event_type,event_version,aggregate_id,aggregate_type,payload,occurred_at,next_attempt_at) VALUES($1,$2,$3,1,$4,'payout',$5,$6,$7)`, "evt_"+hex.EncodeToString(b), eventbus.PayoutEventsTopic, eventType, paymentID, payload, now, now.Add(delay))
 	return err

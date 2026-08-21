@@ -13,12 +13,12 @@ import (
 
 // ApplyResult persists a normalized provider outcome, applies its immediate
 // payment effects, and publishes the next saga event in the inbox transaction.
-func (s *Service) ApplyResult(ctx context.Context, tx *sql.Tx, paymentID, commandEventID, correlationID string, result paymentcore.ExecutionResult, now time.Time) error {
+func (s *Service) ApplyResult(ctx context.Context, tx *sql.Tx, paymentID, commandEventID string, result paymentcore.ExecutionResult, now time.Time) error {
 	if tx == nil {
 		return errors.New("payout result transaction is required")
 	}
-	if paymentID == "" || commandEventID == "" || correlationID == "" {
-		return errors.New("payout payment, command event, and correlation IDs are required")
+	if paymentID == "" || commandEventID == "" {
+		return errors.New("payout payment and command event IDs are required")
 	}
 	_, err := tx.ExecContext(ctx, `INSERT INTO settlement_submissions
 		(payment_id,command_event_id,provider,provider_reference,status,failure_code,failure_message,created_at,updated_at)
@@ -48,7 +48,7 @@ func (s *Service) ApplyResult(ctx context.Context, tx *sql.Tx, paymentID, comman
 	default:
 		return fmt.Errorf("unsupported payout result status %q", result.Status)
 	}
-	return enqueueProviderResult(ctx, tx, paymentID, commandEventID, correlationID, eventType, reason, now)
+	return enqueueProviderResult(ctx, tx, paymentID, commandEventID, eventType, reason, now)
 }
 
 func (s *Service) recordError(ctx context.Context, paymentID, status string, cause error) error {

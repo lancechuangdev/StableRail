@@ -65,7 +65,7 @@ docker compose --env-file /dev/null -p stablerail-local-e2e \
 2. Create a USD payment using the tenant key and a unique idempotency key.
 3. Poll the payment API until the payment is `succeeded`.
 4. Verify the corresponding saga is `completed`.
-5. Verify every ledger transaction has equal debit and credit totals.
+5. Verify every ledger journal has equal debit and credit totals.
 6. Verify the timeline contains `created`, `processing`, and `succeeded` in order.
 
 ## LOCAL-002: payment idempotency

@@ -69,7 +69,7 @@ func (s *Service) CreateRefund(ctx context.Context, paymentID, tenantID, idempot
 
 	// Verify that the original payment is refundable
 	var settled bool
-	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM ledger_transactions WHERE payment_id=$1 AND event_type='payment.succeeded' AND ledger_status='posted')`, paymentID).Scan(&settled); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM ledger_journals WHERE payment_id=$1 AND event_type='payment.succeeded' AND ledger_status='posted')`, paymentID).Scan(&settled); err != nil {
 		return nil, fmt.Errorf("inspect settlement journal: %w", err)
 	}
 	if paymentStatus != PaymentStatusSucceeded || !settled {

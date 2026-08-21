@@ -32,12 +32,12 @@ type CommandHandler struct {
 
 type payoutCommandService interface {
 	ExecutePayout(context.Context, string) (paymentcore.ExecutionResult, error)
-	ApplyResult(context.Context, *sql.Tx, string, string, string, paymentcore.ExecutionResult, time.Time) error
+	ApplyResult(context.Context, *sql.Tx, string, string, paymentcore.ExecutionResult, time.Time) error
 }
 
 type payinCommandService interface {
 	ExecutePayin(context.Context, string) (payin.ExecuteResult, error)
-	ApplyResult(context.Context, *sql.Tx, string, string, payin.ExecuteResult, time.Time) error
+	ApplyResult(context.Context, *sql.Tx, string, payin.ExecuteResult, time.Time) error
 }
 
 func NewCommandHandler(evaluator policy.PolicyEvaluator, ledgerService ledger.LedgerService, payouts payoutCommandService, payins payinCommandService) *CommandHandler {
@@ -50,10 +50,9 @@ func NewCommandHandler(evaluator policy.PolicyEvaluator, ledgerService ledger.Le
 }
 
 type commandPayload struct {
-	CorrelationID string `json:"correlation_id"`
-	PaymentID     string `json:"payment_id"`
-	PayinID       string `json:"payin_id"`
-	Reason        string `json:"reason"`
+	PaymentID string `json:"payment_id"`
+	PayinID   string `json:"payin_id"`
+	Reason    string `json:"reason"`
 }
 
 func (h *CommandHandler) Handle(ctx context.Context, tx *sql.Tx, event eventbus.Event) error {
@@ -66,9 +65,6 @@ func (h *CommandHandler) Handle(ctx context.Context, tx *sql.Tx, event eventbus.
 	}
 	if payload.PaymentID == "" {
 		payload.PaymentID = event.AggregateID
-	}
-	if payload.CorrelationID == "" {
-		return consumer.Permanent(errors.New("invalid command payload"))
 	}
 	var reply string
 	switch event.Type {
@@ -86,9 +82,9 @@ func (h *CommandHandler) Handle(ctx context.Context, tx *sql.Tx, event eventbus.
 			return fmt.Errorf("evaluate payin policy: %w", err)
 		}
 		if !decision.Approved {
-			return h.payinService.ApplyResult(ctx, tx, payload.PayinID, payload.CorrelationID, payin.ExecuteResult{ExecutionResult: paymentcore.ExecutionResult{Status: paymentcore.ExecutionFailed, FailureMessage: decision.Reason}}, h.now())
+			return h.payinService.ApplyResult(ctx, tx, payload.PayinID, payin.ExecuteResult{ExecutionResult: paymentcore.ExecutionResult{Status: paymentcore.ExecutionFailed, FailureMessage: decision.Reason}}, h.now())
 		}
-		return h.enqueuePayinReply(ctx, tx, event, payload.PayinID, payload.CorrelationID, "payin.policy.approved", "")
+		return h.enqueuePayinReply(ctx, tx, event, payload.PayinID, "payin.policy.approved", "")
 	case "payin.execute":
 		if payload.PayinID == "" {
 			payload.PayinID = event.AggregateID
@@ -97,21 +93,21 @@ func (h *CommandHandler) Handle(ctx context.Context, tx *sql.Tx, event eventbus.
 		if err != nil {
 			var providerErr *paymentcore.ProviderError
 			if errors.As(err, &providerErr) && !providerErr.Retryable {
-				return h.payinService.ApplyResult(ctx, tx, payload.PayinID, payload.CorrelationID, payin.ExecuteResult{ExecutionResult: paymentcore.ExecutionResult{Status: paymentcore.ExecutionFailed, FailureCode: providerErr.Code, FailureMessage: providerErr.Message}}, h.now())
+				return h.payinService.ApplyResult(ctx, tx, payload.PayinID, payin.ExecuteResult{ExecutionResult: paymentcore.ExecutionResult{Status: paymentcore.ExecutionFailed, FailureCode: providerErr.Code, FailureMessage: providerErr.Message}}, h.now())
 			}
 			return fmt.Errorf("execute payin: %w", err)
 		}
-		return h.payinService.ApplyResult(ctx, tx, payload.PayinID, payload.CorrelationID, result, h.now())
+		return h.payinService.ApplyResult(ctx, tx, payload.PayinID, result, h.now())
 	case "payin.ledger.record":
 		if payload.PayinID == "" {
 			payload.PayinID = event.AggregateID
 		}
-		return h.ledgerService.RecordPayin(ctx, tx, ledger.PayinReceiptRequest{PayinID: payload.PayinID, CorrelationID: payload.CorrelationID, At: h.now()})
+		return h.ledgerService.RecordPayin(ctx, tx, ledger.PayinReceiptRequest{PayinID: payload.PayinID, At: h.now()})
 	case "payin.fail":
 		if payload.PayinID == "" {
 			return consumer.Permanent(errors.New("payin ID is required"))
 		}
-		return h.payinService.ApplyResult(ctx, tx, payload.PayinID, payload.CorrelationID, payin.ExecuteResult{ExecutionResult: paymentcore.ExecutionResult{Status: paymentcore.ExecutionFailed, FailureMessage: payload.Reason}}, h.now())
+		return h.payinService.ApplyResult(ctx, tx, payload.PayinID, payin.ExecuteResult{ExecutionResult: paymentcore.ExecutionResult{Status: paymentcore.ExecutionFailed, FailureMessage: payload.Reason}}, h.now())
 	case "policy.evaluate":
 		amount, currency, err := loadPaymentAmount(ctx, tx, payload.PaymentID)
 		if err != nil {
@@ -140,13 +136,13 @@ func (h *CommandHandler) Handle(ctx context.Context, tx *sql.Tx, event eventbus.
 			var providerErr *paymentcore.ProviderError
 			if errors.As(err, &providerErr) && !providerErr.Retryable {
 				if providerErr.Code == "submission_failed" {
-					return h.payoutService.ApplyResult(ctx, tx, payload.PaymentID, event.ID, payload.CorrelationID, paymentcore.ExecutionResult{Status: paymentcore.ExecutionFailed, FailureCode: providerErr.Code, FailureMessage: providerErr.Message}, h.now())
+					return h.payoutService.ApplyResult(ctx, tx, payload.PaymentID, event.ID, paymentcore.ExecutionResult{Status: paymentcore.ExecutionFailed, FailureCode: providerErr.Code, FailureMessage: providerErr.Message}, h.now())
 				}
 				return consumer.Permanent(err)
 			}
 			return fmt.Errorf("submit settlement: %w", err)
 		}
-		return h.payoutService.ApplyResult(ctx, tx, payload.PaymentID, event.ID, payload.CorrelationID, result, h.now())
+		return h.payoutService.ApplyResult(ctx, tx, payload.PaymentID, event.ID, result, h.now())
 	case "ledger.release":
 		if err := h.ledgerService.Release(ctx, tx, ledger.ReleaseRequest{PaymentID: payload.PaymentID, At: h.now()}); err != nil {
 			if errors.Is(err, ledger.ErrInvalidPaymentStatus) {
@@ -174,7 +170,7 @@ func (h *CommandHandler) Handle(ctx context.Context, tx *sql.Tx, event eventbus.
 		now := h.now()
 		predicate := "payment_status NOT IN ('succeeded','failed')"
 		if event.Type == "payment.return" {
-			predicate = "payment_status='failed' AND EXISTS (SELECT 1 FROM ledger_transactions WHERE payment_id=payments.id AND event_type='payment.released' AND ledger_status='posted')"
+			predicate = "payment_status='failed' AND EXISTS (SELECT 1 FROM ledger_journals WHERE payment_id=payments.id AND event_type='payment.released' AND ledger_status='posted')"
 		}
 		result, err := tx.ExecContext(ctx, `UPDATE payments SET payment_status=$1, updated_at=$2 WHERE id=$3 AND `+predicate, status, now, payload.PaymentID)
 		if err != nil {
@@ -203,13 +199,13 @@ func (h *CommandHandler) Handle(ctx context.Context, tx *sql.Tx, event eventbus.
 	return h.enqueueReply(ctx, tx, event, payload, reply)
 }
 
-func (h *CommandHandler) enqueuePayinReply(ctx context.Context, tx *sql.Tx, caused eventbus.Event, payinID, correlationID, eventType, reason string) error {
+func (h *CommandHandler) enqueuePayinReply(ctx context.Context, tx *sql.Tx, caused eventbus.Event, payinID, eventType, reason string) error {
 	id, err := h.newID()
 	if err != nil {
 		return err
 	}
 	now := h.now()
-	body, _ := json.Marshal(map[string]any{"correlation_id": correlationID, "payment_id": caused.AggregateID, "payin_id": payinID, "reason": reason, "caused_by_event_id": caused.ID})
+	body, _ := json.Marshal(map[string]any{"payment_id": caused.AggregateID, "payin_id": payinID, "reason": reason, "caused_by_event_id": caused.ID})
 	version := map[string]int{"payin.policy.approved": eventbus.PayinPolicyApprovedVersion}[eventType]
 	_, err = tx.ExecContext(ctx, `INSERT INTO outbox_events(id,topic,event_type,event_version,aggregate_id,aggregate_type,payload,occurred_at) VALUES($1,$2,$3,$4,$5,'payin',$6,$7)`, id, eventbus.PayinEventsTopic, eventType, version, caused.AggregateID, body, now)
 	return err
@@ -229,7 +225,7 @@ func (h *CommandHandler) enqueueReply(ctx context.Context, tx *sql.Tx, caused ev
 	if err != nil {
 		return err
 	}
-	bodyFields := map[string]string{"correlation_id": p.CorrelationID, "caused_by_event_id": caused.ID, "reason": p.Reason}
+	bodyFields := map[string]string{"caused_by_event_id": caused.ID, "reason": p.Reason}
 	switch reply {
 	case "payout.completed":
 		bodyFields["payment_status"] = "succeeded"

@@ -65,10 +65,10 @@ func TestHandleStartsSagaAndEnqueuesPolicyCommand(t *testing.T) {
 
 	mock.ExpectBegin()
 	mock.ExpectExec("INSERT INTO settlement_sagas").
-		WithArgs("saga_1", "pay-1", "corr_2", StateAwaitingPolicy, now.Add(time.Minute), now).
+		WithArgs("pay-1", StateAwaitingPolicy, now.Add(time.Minute), now).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO outbox_events").
-		WithArgs("evt_3", eventbus.SettlementCommandsTopic, "policy.evaluate", eventbus.PolicyEvaluateVersion, "pay-1", sqlmock.AnyArg(), now).
+		WithArgs("evt_1", eventbus.SettlementCommandsTopic, "policy.evaluate", eventbus.PolicyEvaluateVersion, "pay-1", sqlmock.AnyArg(), now).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 
@@ -87,24 +87,28 @@ func TestHandleStartsSagaAndEnqueuesPolicyCommand(t *testing.T) {
 	}
 }
 
-func TestHandleRejectsMismatchedCorrelation(t *testing.T) {
+func TestHandleTransitionsWithoutCorrelationID(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatalf("create SQL mock: %v", err)
 	}
 	defer db.Close()
 	c := testSagaCoordinator(t, db)
-	event := sagaEvent("payout.policy.approved", "evt-approved", map[string]string{"correlation_id": "wrong"})
+	event := sagaEvent("payout.policy.approved", "evt-approved", nil)
+	now := c.now()
 	mock.ExpectBegin()
-	mock.ExpectQuery("SELECT id, correlation_id, state FROM settlement_sagas").WithArgs("pay-1").
-		WillReturnRows(sqlmock.NewRows([]string{"id", "correlation_id", "state"}).AddRow("saga-1", "corr-1", StateAwaitingPolicy))
-	mock.ExpectRollback()
+	mock.ExpectQuery("SELECT state FROM settlement_sagas").WithArgs("pay-1").WillReturnRows(sqlmock.NewRows([]string{"state"}).AddRow(StateAwaitingPolicy))
+	mock.ExpectExec("UPDATE settlement_sagas").WithArgs(StateAwaitingLedger, now.Add(time.Minute), "", now, "pay-1").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO outbox_events").WithArgs("evt_1", eventbus.SettlementCommandsTopic, "ledger.reserve", eventbus.LedgerReserveVersion, "pay-1", sqlmock.AnyArg(), now).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
 	tx, _ := db.BeginTx(context.Background(), nil)
 	err = c.Handle(context.Background(), tx, event)
-	if err == nil {
-		t.Fatal("expected correlation mismatch")
+	if err != nil {
+		t.Fatal(err)
 	}
-	tx.Rollback()
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet database expectations: %v", err)
 	}
@@ -119,11 +123,10 @@ func TestExpireOnceRetriesSettlementWithReservedFunds(t *testing.T) {
 	c := testSagaCoordinator(t, db)
 	now := c.now()
 	mock.ExpectBegin()
-	mock.ExpectQuery("SELECT id, payment_id, correlation_id, state").WithArgs(now, 10).
-		WillReturnRows(sqlmock.NewRows([]string{"id", "payment_id", "correlation_id", "state"}).
-			AddRow("saga-1", "pay-1", "corr-1", StateAwaitingSettlement))
+	mock.ExpectQuery("SELECT payment_id, state").WithArgs(now, 10).
+		WillReturnRows(sqlmock.NewRows([]string{"payment_id", "state"}).AddRow("pay-1", StateAwaitingSettlement))
 	mock.ExpectExec("UPDATE settlement_sagas").
-		WithArgs(StateAwaitingSettlement, now.Add(c.settlementTimeout), "awaiting_settlement timeout", now, "saga-1").
+		WithArgs(StateAwaitingSettlement, now.Add(c.settlementTimeout), "awaiting_settlement timeout", now, "pay-1").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO outbox_events").
 		WithArgs("evt_1", eventbus.SettlementCommandsTopic, "settlement.execute", eventbus.SettlementExecuteVersion, "pay-1", sqlmock.AnyArg(), now).
@@ -147,11 +150,10 @@ func TestExpireOnceRetriesReturnWhoseLedgerReleaseTimedOut(t *testing.T) {
 	c := testSagaCoordinator(t, db)
 	now := c.now()
 	mock.ExpectBegin()
-	mock.ExpectQuery("SELECT id, payment_id, correlation_id, state").WithArgs(now, 10).
-		WillReturnRows(sqlmock.NewRows([]string{"id", "payment_id", "correlation_id", "state"}).
-			AddRow("saga-1", "pay-1", "corr-1", StateReturning))
+	mock.ExpectQuery("SELECT payment_id, state").WithArgs(now, 10).
+		WillReturnRows(sqlmock.NewRows([]string{"payment_id", "state"}).AddRow("pay-1", StateReturning))
 	mock.ExpectExec("UPDATE settlement_sagas").
-		WithArgs(StateReturning, now.Add(time.Minute), "returning timeout", now, "saga-1").
+		WithArgs(StateReturning, now.Add(time.Minute), "returning timeout", now, "pay-1").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO outbox_events").
 		WithArgs("evt_1", eventbus.SettlementCommandsTopic, "ledger.release", eventbus.LedgerReleaseVersion, "pay-1", sqlmock.AnyArg(), now).
@@ -175,11 +177,11 @@ func TestResolveManualReviewReturnsPayment(t *testing.T) {
 	c := testSagaCoordinator(t, db)
 	now := c.now()
 	mock.ExpectBegin()
-	mock.ExpectQuery("SELECT id,correlation_id,state FROM settlement_sagas").WithArgs("pay-1").
-		WillReturnRows(sqlmock.NewRows([]string{"id", "correlation_id", "state"}).AddRow("saga-1", "corr-1", StateManualReview))
-	mock.ExpectExec("INSERT INTO saga_manual_review_actions").WithArgs("saga-1", "return", "alice", "provider confirmed return", now).
+	mock.ExpectQuery("SELECT state FROM settlement_sagas").WithArgs("pay-1").
+		WillReturnRows(sqlmock.NewRows([]string{"state"}).AddRow(StateManualReview))
+	mock.ExpectExec("INSERT INTO saga_manual_review_actions").WithArgs("pay-1", "return", "alice", "provider confirmed return", now).
 		WillReturnResult(sqlmock.NewResult(1, 1))
-	mock.ExpectExec("UPDATE settlement_sagas").WithArgs(StateReturning, now.Add(time.Minute), "provider confirmed return", now, "saga-1").
+	mock.ExpectExec("UPDATE settlement_sagas").WithArgs(StateReturning, now.Add(time.Minute), "provider confirmed return", now, "pay-1").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO outbox_events").WithArgs("evt_1", eventbus.SettlementCommandsTopic, "ledger.release", eventbus.LedgerReleaseVersion, "pay-1", sqlmock.AnyArg(), now).
 		WillReturnResult(sqlmock.NewResult(0, 1))

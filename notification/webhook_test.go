@@ -47,7 +47,9 @@ func TestEventHandlerCreatesReturnDelivery(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)
-	event := eventbus.Event{ID: "evt_returned", Type: "payout.return_completed", Version: 1, AggregateID: "pay_1", AggregateType: "payout", Payload: []byte(`{}`), OccurredAt: now}
+	event := eventbus.Event{ID: "evt_returned", Type: "payment.return.succeeded", Version: 1, AggregateID: "pay_1", AggregateType: "payment", Payload: []byte(`{}`), OccurredAt: now}
+	mock.ExpectQuery("SELECT tenant_id FROM payments").WithArgs("pay_1").WillReturnRows(sqlmock.NewRows([]string{"tenant_id"}).AddRow("tenant_1"))
+	mock.ExpectExec("INSERT INTO webhook_deliveries").WithArgs("evt_returned", "pay_1", "payment.return.succeeded", sqlmock.AnyArg(), now, "tenant_1").WillReturnResult(sqlmock.NewResult(0, 1))
 
 	if err := EventHandler()(context.Background(), tx, event); err != nil {
 		t.Fatal(err)

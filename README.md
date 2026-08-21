@@ -91,7 +91,7 @@ Operational and accounting state stays with the subsystem that owns it:
 | --- | --- | --- |
 | `payment_status` | `payments` | Public business outcome: `created`, `processing`, `succeeded`, or `failed` |
 | `settlement_status` | `payins` / `payouts` | Normalized external movement state, including uncertainty, holds, receipt/completion, failure, and return |
-| `ledger_status` | `ledger_transactions` | Accounting recognition: `pending`, `posted`, or `failed` |
+| `ledger_status` | `ledger_journals` | Accounting recognition: `pending`, `posted`, or `failed` |
 | `reconciliation_status` | `payins` / `payouts` | Agreement with external records: `unmatched`, `matched`, or `exception` |
 
 Balances, reservations, and availability are calculated from posted `ledger_entries`; they are not mutable payment attributes. An ambiguous provider submission remains `payment_status=processing` with `payouts.settlement_status=unknown`, while the posted reservation journal continues to determine availability until a retry, webhook, or reconciliation establishes the outcome.

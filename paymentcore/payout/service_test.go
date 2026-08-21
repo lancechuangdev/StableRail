@@ -80,7 +80,7 @@ func TestServiceAppliesPayoutResultInInboxTransaction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := service.ApplyResult(context.Background(), tx, "pay_test", "evt_test", "corr_test", paymentcore.ExecutionResult{ProviderReference: "po_test", Status: paymentcore.ExecutionPending}, now); err != nil {
+	if err := service.ApplyResult(context.Background(), tx, "pay_test", "evt_test", paymentcore.ExecutionResult{ProviderReference: "po_test", Status: paymentcore.ExecutionPending}, now); err != nil {
 		t.Fatal(err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -106,7 +106,7 @@ func TestServiceAppliesFailedPayoutAndPublishesSagaEvent(t *testing.T) {
 	mock.ExpectCommit()
 	tx, _ := db.BeginTx(context.Background(), nil)
 	result := paymentcore.ExecutionResult{Status: paymentcore.ExecutionFailed, FailureCode: "submission_failed", FailureMessage: "insufficient balance"}
-	if err := service.ApplyResult(context.Background(), tx, "pay_test", "evt_test", "corr_test", result, now); err != nil {
+	if err := service.ApplyResult(context.Background(), tx, "pay_test", "evt_test", result, now); err != nil {
 		t.Fatal(err)
 	}
 	if err := tx.Commit(); err != nil {

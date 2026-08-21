@@ -107,48 +107,34 @@ func (c *SagaCoordinator) Handle(ctx context.Context, tx *sql.Tx, event eventbus
 		return c.start(ctx, tx, event)
 	}
 
-	var sagaID, correlationID string
 	var state State
 	if err := tx.QueryRowContext(ctx, `
-		SELECT id, correlation_id, state FROM settlement_sagas
-		WHERE payment_id = $1 FOR UPDATE`, event.AggregateID).Scan(&sagaID, &correlationID, &state); err != nil {
+		SELECT state FROM settlement_sagas
+		WHERE payment_id = $1 FOR UPDATE`, event.AggregateID).Scan(&state); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return fmt.Errorf("payment saga for %s not found", event.AggregateID)
 		}
 		return fmt.Errorf("lock payment saga: %w", err)
 	}
 	var reply struct {
-		CorrelationID string `json:"correlation_id"`
-		Reason        string `json:"reason"`
+		Reason string `json:"reason"`
 	}
 	if err := json.Unmarshal(event.Payload, &reply); err != nil {
 		return fmt.Errorf("decode saga event %s: %w", event.ID, err)
 	}
-	if reply.CorrelationID == "" || reply.CorrelationID != correlationID {
-		return fmt.Errorf("saga correlation mismatch for event %s", event.ID)
-	}
-
 	next, command, timeout, failure, err := c.transition(state, event.Type, reply.Reason)
 	if err != nil {
 		return err
 	}
-	return c.updateAndCommand(ctx, tx, sagaID, correlationID, event.AggregateID, event.ID, next, command, timeout, failure)
+	return c.updateAndCommand(ctx, tx, event.AggregateID, event.ID, next, command, timeout, failure)
 }
 
 func (c *SagaCoordinator) start(ctx context.Context, tx *sql.Tx, event eventbus.Event) error {
-	sagaID, err := c.newID("saga_")
-	if err != nil {
-		return fmt.Errorf("generate saga ID: %w", err)
-	}
-	correlationID, err := c.newID("corr_")
-	if err != nil {
-		return fmt.Errorf("generate correlation ID: %w", err)
-	}
 	now := c.now()
 	result, err := tx.ExecContext(ctx, `INSERT INTO settlement_sagas
-		(id, payment_id, direction, correlation_id, state, deadline_at, created_at, updated_at)
-		VALUES ($1, $2, 'payout', $3, $4, $5, $6, $6) ON CONFLICT (payment_id) DO NOTHING`,
-		sagaID, event.AggregateID, correlationID, StateAwaitingPolicy, now.Add(c.policyTimeout), now)
+		(payment_id, direction, state, deadline_at, created_at, updated_at)
+		VALUES ($1, 'payout', $2, $3, $4, $4) ON CONFLICT (payment_id) DO NOTHING`,
+		event.AggregateID, StateAwaitingPolicy, now.Add(c.policyTimeout), now)
 	if err != nil {
 		return fmt.Errorf("create payment saga: %w", err)
 	}
@@ -162,7 +148,7 @@ func (c *SagaCoordinator) start(ctx context.Context, tx *sql.Tx, event eventbus.
 	if rows != 1 {
 		return fmt.Errorf("create payment saga: inserted %d rows", rows)
 	}
-	return c.enqueue(ctx, tx, sagaID, correlationID, event.AggregateID, event.ID, "policy.evaluate", "", now)
+	return c.enqueue(ctx, tx, event.AggregateID, event.ID, "policy.evaluate", "", now)
 }
 
 func (c *SagaCoordinator) transition(state State, eventType, reason string) (State, string, time.Duration, string, error) {
@@ -209,29 +195,29 @@ func (c *SagaCoordinator) transition(state State, eventType, reason string) (Sta
 	}
 }
 
-func (c *SagaCoordinator) updateAndCommand(ctx context.Context, tx *sql.Tx, sagaID, correlationID, paymentID, causedBy string, state State, command string, timeout time.Duration, failure string) error {
+func (c *SagaCoordinator) updateAndCommand(ctx context.Context, tx *sql.Tx, paymentID, causedBy string, state State, command string, timeout time.Duration, failure string) error {
 	now := c.now()
 	var deadline any
 	if timeout > 0 {
 		deadline = now.Add(timeout)
 	}
 	_, err := tx.ExecContext(ctx, `UPDATE settlement_sagas SET state = $1, deadline_at = $2,
-		failure_reason = COALESCE(NULLIF($3, ''), failure_reason), updated_at = $4 WHERE id = $5`, state, deadline, failure, now, sagaID)
+		failure_reason = COALESCE(NULLIF($3, ''), failure_reason), updated_at = $4 WHERE payment_id = $5`, state, deadline, failure, now, paymentID)
 	if err != nil {
 		return fmt.Errorf("update payment saga: %w", err)
 	}
 	if command == "" {
 		return nil
 	}
-	return c.enqueue(ctx, tx, sagaID, correlationID, paymentID, causedBy, command, failure, now)
+	return c.enqueue(ctx, tx, paymentID, causedBy, command, failure, now)
 }
 
-func (c *SagaCoordinator) enqueue(ctx context.Context, tx *sql.Tx, sagaID, correlationID, paymentID, causedBy, command, reason string, now time.Time) error {
+func (c *SagaCoordinator) enqueue(ctx context.Context, tx *sql.Tx, paymentID, causedBy, command, reason string, now time.Time) error {
 	eventID, err := c.newID("evt_")
 	if err != nil {
 		return fmt.Errorf("generate saga command ID: %w", err)
 	}
-	payload, err := json.Marshal(map[string]string{"saga_id": sagaID, "correlation_id": correlationID, "payment_id": paymentID, "caused_by_event_id": causedBy, "reason": reason})
+	payload, err := json.Marshal(map[string]string{"payment_id": paymentID, "caused_by_event_id": causedBy, "reason": reason})
 	if err != nil {
 		return fmt.Errorf("encode saga command: %w", err)
 	}
@@ -283,9 +269,8 @@ func (c *SagaCoordinator) ResolveManualReview(ctx context.Context, paymentID, ac
 		return fmt.Errorf("begin manual review resolution: %w", err)
 	}
 	defer tx.Rollback()
-	var sagaID, correlationID string
 	var state State
-	if err := tx.QueryRowContext(ctx, `SELECT id,correlation_id,state FROM settlement_sagas WHERE payment_id=$1 FOR UPDATE`, paymentID).Scan(&sagaID, &correlationID, &state); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT state FROM settlement_sagas WHERE payment_id=$1 FOR UPDATE`, paymentID).Scan(&state); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrSagaNotFound
 		}
@@ -307,10 +292,10 @@ func (c *SagaCoordinator) ResolveManualReview(ctx context.Context, paymentID, ac
 		return errors.New("manual review action must be retry, complete, fail, or return")
 	}
 	now := c.now()
-	if _, err := tx.ExecContext(ctx, `INSERT INTO saga_manual_review_actions(saga_id,action,operator,note,occurred_at) VALUES($1,$2,$3,$4,$5)`, sagaID, action, operator, note, now); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO saga_manual_review_actions(payment_id,action,operator,note,occurred_at) VALUES($1,$2,$3,$4,$5)`, paymentID, action, operator, note, now); err != nil {
 		return fmt.Errorf("audit manual review resolution: %w", err)
 	}
-	if err := c.updateAndCommand(ctx, tx, sagaID, correlationID, paymentID, "manual_review", next, command, timeout, note); err != nil {
+	if err := c.updateAndCommand(ctx, tx, paymentID, "manual_review", next, command, timeout, note); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
@@ -328,7 +313,7 @@ func (c *SagaCoordinator) ExpireOnce(ctx context.Context) (int, error) {
 	}
 	defer tx.Rollback()
 	now := c.now()
-	rows, err := tx.QueryContext(ctx, `SELECT id, payment_id, correlation_id, state
+	rows, err := tx.QueryContext(ctx, `SELECT payment_id, state
 		FROM settlement_sagas WHERE direction='payout' AND deadline_at <= $1
 		  AND state IN ('awaiting_policy', 'awaiting_ledger', 'awaiting_settlement', 'on_hold', 'releasing_ledger', 'returning', 'settling_payment')
 		ORDER BY deadline_at FOR UPDATE SKIP LOCKED LIMIT $2`, now, c.timeoutBatchSize)
@@ -336,13 +321,13 @@ func (c *SagaCoordinator) ExpireOnce(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("claim timed out payment sagas: %w", err)
 	}
 	type expired struct {
-		id, paymentID, correlationID string
-		state                        State
+		paymentID string
+		state     State
 	}
 	var sagas []expired
 	for rows.Next() {
 		var s expired
-		if err := rows.Scan(&s.id, &s.paymentID, &s.correlationID, &s.state); err != nil {
+		if err := rows.Scan(&s.paymentID, &s.state); err != nil {
 			rows.Close()
 			return 0, fmt.Errorf("scan timed out saga: %w", err)
 		}
@@ -371,7 +356,7 @@ func (c *SagaCoordinator) ExpireOnce(ctx context.Context) (int, error) {
 		if s.state == StateSettlingPayment {
 			next, command, timeout = StateSettlingPayment, "payment.settle", c.ledgerTimeout
 		}
-		if err := c.updateAndCommand(ctx, tx, s.id, s.correlationID, s.paymentID, "timeout", next, command, timeout, string(s.state)+" timeout"); err != nil {
+		if err := c.updateAndCommand(ctx, tx, s.paymentID, "timeout", next, command, timeout, string(s.state)+" timeout"); err != nil {
 			return 0, err
 		}
 	}

@@ -236,14 +236,14 @@ func (s *WebhookService) applyPayinWebhook(ctx context.Context, tx *sql.Tx, prov
 	if err := paymentcore.NewHistoryService().RecordTimeline(ctx, tx, paymentcore.TimelineRecord{PaymentID: paymentID, PaymentStatus: paymentcore.PaymentStatus(paymentStatus), Note: "payin." + lifecycleStatus, At: now}); err != nil {
 		return false, err
 	}
-	var correlationID string
-	if err := tx.QueryRowContext(ctx, `SELECT correlation_id FROM settlement_sagas WHERE payment_id=$1 AND direction='payin'`, paymentID).Scan(&correlationID); err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return false, fmt.Errorf("load payin saga correlation: %w", err)
+	var sagaExists bool
+	if err := tx.QueryRowContext(ctx, `SELECT true FROM settlement_sagas WHERE payment_id=$1 AND direction='payin'`, paymentID).Scan(&sagaExists); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return false, fmt.Errorf("load payin saga: %w", err)
 	}
 	eventID := "evt_blindpay_" + providerID + "_" + lifecycleStatus
 	eventType := "payin." + lifecycleStatus
-	body, _ := json.Marshal(map[string]any{"id": eventID, "type": eventType, "payin_id": paymentID, "correlation_id": correlationID, "reason": providerStatus, "occurred_at": now, "data": map[string]any{"status": lifecycleStatus, "settlement_status": providerStatus}})
-	if correlationID != "" {
+	body, _ := json.Marshal(map[string]any{"id": eventID, "type": eventType, "payin_id": paymentID, "reason": providerStatus, "occurred_at": now, "data": map[string]any{"status": lifecycleStatus, "settlement_status": providerStatus}})
+	if sagaExists {
 		version := map[string]int{"processing": eventbus.PayinProcessingVersion, "on_hold": eventbus.PayinOnHoldVersion, "received": eventbus.PayinReceivedVersion, "failed": eventbus.PayinFailedVersion, "refunded": eventbus.PayinRefundedVersion}[lifecycleStatus]
 		if _, err := tx.ExecContext(ctx, `INSERT INTO outbox_events(id,topic,event_type,event_version,aggregate_id,aggregate_type,payload,occurred_at) VALUES($1,$2,$3,$4,$5,'payin',$6,$7) ON CONFLICT(id) DO NOTHING`, "evt_payin_saga_"+providerID+"_"+lifecycleStatus, eventbus.PayinEventsTopic, eventType, version, paymentID, body, now); err != nil {
 			return false, fmt.Errorf("enqueue payin saga event: %w", err)
@@ -261,7 +261,7 @@ func (s *WebhookService) applyPayinWebhook(ctx context.Context, tx *sql.Tx, prov
 	}
 	eventType, debit, credit := "payin.refunded", paymentcore.SettlementAccount, paymentcore.CashOperatingAccount
 	journalID := "jrn_" + paymentID + "_" + strings.TrimPrefix(eventType, "payin.")
-	result, err := tx.ExecContext(ctx, `INSERT INTO ledger_transactions(id,payment_id,event_type,occurred_at) VALUES($1,$2,$3,$4) ON CONFLICT(payment_id,event_type) DO NOTHING`, journalID, paymentID, eventType, now)
+	result, err := tx.ExecContext(ctx, `INSERT INTO ledger_journals(id,payment_id,event_type,occurred_at) VALUES($1,$2,$3,$4) ON CONFLICT(payment_id,event_type) DO NOTHING`, journalID, paymentID, eventType, now)
 	if err != nil {
 		return false, fmt.Errorf("insert payin journal: %w", err)
 	}
@@ -270,7 +270,7 @@ func (s *WebhookService) applyPayinWebhook(ctx context.Context, tx *sql.Tx, prov
 		return false, err
 	}
 	for _, line := range []struct{ suffix, account, side string }{{"debit", debit, "debit"}, {"credit", credit, "credit"}} {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO ledger_entries(id,transaction_id,account_code,side,amount_minor,currency) VALUES($1,$2,$3,$4,$5,$6)`, journalID+":"+line.suffix, journalID, line.account, line.side, amount, currency); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO ledger_entries(id,journal_id,account_code,side,amount_minor,currency) VALUES($1,$2,$3,$4,$5,$6)`, journalID+":"+line.suffix, journalID, line.account, line.side, amount, currency); err != nil {
 			return false, fmt.Errorf("insert payin ledger entry: %w", err)
 		}
 	}
@@ -297,7 +297,7 @@ func (s *WebhookService) enqueuePaymentReturn(ctx context.Context, tx *sql.Tx, s
 	if err != nil {
 		return err
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO outbox_events(id,topic,event_type,event_version,aggregate_id,aggregate_type,payload,occurred_at) VALUES($1,$2,'payout.return_completed',$3,$4,'payout',$5,$6) ON CONFLICT(id) DO NOTHING`, "evt_blindpay_"+svixID, eventbus.PayoutEventsTopic, eventbus.PayoutReturnCompletedVersion, paymentID, body, now)
+	_, err = tx.ExecContext(ctx, `INSERT INTO outbox_events(id,topic,event_type,event_version,aggregate_id,aggregate_type,payload,occurred_at) VALUES($1,$2,'payment.return.succeeded',$3,$4,'payment',$5,$6) ON CONFLICT(id) DO NOTHING`, "evt_blindpay_"+svixID, eventbus.PaymentEventsTopic, eventbus.PaymentReturnSucceededVersion, paymentID, body, now)
 	if err != nil {
 		return fmt.Errorf("enqueue post-success payment return: %w", err)
 	}
@@ -407,12 +407,12 @@ func (s *WebhookService) RunReconciler(ctx context.Context, interval time.Durati
 }
 
 func (s *WebhookService) enqueueSagaResult(ctx context.Context, tx *sql.Tx, svixID, paymentID, status string, now time.Time) error {
-	var correlationID string
-	if err := tx.QueryRowContext(ctx, `SELECT correlation_id FROM settlement_sagas WHERE payment_id=$1`, paymentID).Scan(&correlationID); err != nil {
+	var sagaExists bool
+	if err := tx.QueryRowContext(ctx, `SELECT true FROM settlement_sagas WHERE payment_id=$1`, paymentID).Scan(&sagaExists); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil // reconciliation will repair an early webhook.
 		}
-		return fmt.Errorf("get payout saga correlation: %w", err)
+		return fmt.Errorf("get payout saga: %w", err)
 	}
 	eventType, version, reason := "payout.provider_failed", eventbus.PayoutProviderFailedVersion, status
 	if status == "completed" {
@@ -422,7 +422,7 @@ func (s *WebhookService) enqueueSagaResult(ctx context.Context, tx *sql.Tx, svix
 	} else if status == "on_hold" {
 		eventType, version, reason = "payout.on_hold", eventbus.PayoutOnHoldVersion, "settlement on hold"
 	}
-	body, err := json.Marshal(map[string]string{"correlation_id": correlationID, "reason": reason})
+	body, err := json.Marshal(map[string]string{"reason": reason})
 	if err != nil {
 		return err
 	}
