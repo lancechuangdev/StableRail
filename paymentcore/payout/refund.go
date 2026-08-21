@@ -131,7 +131,9 @@ func (s *Service) CreateRefund(ctx context.Context, paymentID, tenantID, idempot
 	}
 
 	// Record the refund payment’s history
-	if err := insertHistory(ctx, tx, refundPaymentID, "created", "merchant refund payment created: "+reason, PaymentStatusCreated, "refund payment created", now); err != nil {
+	if err := paymentcore.NewHistoryService().Record(ctx, tx,
+		paymentcore.AuditRecord{PaymentID: refundPaymentID, Event: "created", Message: "merchant refund payment created: " + reason, At: now},
+		paymentcore.TimelineRecord{PaymentID: refundPaymentID, PaymentStatus: PaymentStatusCreated, Note: "refund payment created", At: now}); err != nil {
 		return nil, err
 	}
 	payload, err := json.Marshal(map[string]any{"external_reference": refundReference, "currency": currency, "amount_minor": amountMinor, "tenant_id": tenantID, "payment_status": PaymentStatusCreated, "funds_status": FundsStatusAvailable, "refund_id": refundID, "original_payment_id": paymentID})

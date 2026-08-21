@@ -31,7 +31,7 @@ type CommandHandler struct {
 }
 
 type payoutCommandService interface {
-	ExecutePayout(context.Context, string, string) (paymentcore.ExecutionResult, error)
+	ExecutePayout(context.Context, string) (paymentcore.ExecutionResult, error)
 	ApplyResult(context.Context, *sql.Tx, string, string, string, paymentcore.ExecutionResult, time.Time) error
 }
 
@@ -135,7 +135,7 @@ func (h *CommandHandler) Handle(ctx context.Context, tx *sql.Tx, event eventbus.
 		}
 		reply = "payout.funds_reserved"
 	case "settlement.execute":
-		result, err := h.payoutService.ExecutePayout(ctx, payload.PaymentID, event.ID)
+		result, err := h.payoutService.ExecutePayout(ctx, payload.PaymentID)
 		if err != nil {
 			var providerErr *paymentcore.ProviderError
 			if errors.As(err, &providerErr) && !providerErr.Retryable {
@@ -189,11 +189,10 @@ func (h *CommandHandler) Handle(ctx context.Context, tx *sql.Tx, event eventbus.
 		if rows != 1 {
 			return consumer.Permanent(fmt.Errorf("payment %s is not eligible for %s", payload.PaymentID, event.Type))
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO payment_audit_events(payment_id,event,message,occurred_at) VALUES($1,$2,$3,$4)`, payload.PaymentID, eventName, message, now); err != nil {
-			return fmt.Errorf("audit payment outcome: %w", err)
-		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO payment_timeline_entries(payment_id,payment_status,note,occurred_at) VALUES($1,$2,$3,$4)`, payload.PaymentID, status, message, now); err != nil {
-			return fmt.Errorf("timeline payment outcome: %w", err)
+		if err := paymentcore.NewHistoryService().Record(ctx, tx,
+			paymentcore.AuditRecord{PaymentID: payload.PaymentID, Event: eventName, Message: message, At: now},
+			paymentcore.TimelineRecord{PaymentID: payload.PaymentID, PaymentStatus: status, Note: message, At: now}); err != nil {
+			return err
 		}
 		reply := "payout.failed"
 		if event.Type == "payment.return" {

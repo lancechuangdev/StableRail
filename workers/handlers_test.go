@@ -22,7 +22,7 @@ type submissionFailurePayoutService struct {
 	appliedResult                                            paymentcore.ExecutionResult
 }
 
-func (submissionFailurePayoutService) ExecutePayout(context.Context, string, string) (paymentcore.ExecutionResult, error) {
+func (submissionFailurePayoutService) ExecutePayout(context.Context, string) (paymentcore.ExecutionResult, error) {
 	return paymentcore.ExecutionResult{}, &paymentcore.ProviderError{Message: "insufficient balance", Code: "submission_failed", Retryable: false}
 }
 func (s *submissionFailurePayoutService) ApplyResult(_ context.Context, _ *sql.Tx, paymentID, commandID, correlationID string, result paymentcore.ExecutionResult, _ time.Time) error {

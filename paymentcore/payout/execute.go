@@ -25,26 +25,22 @@ type executionRequest struct {
 }
 
 // ExecutePayout loads the persisted payment route and durably submits it to the provider.
-func (s *Service) ExecutePayout(ctx context.Context, paymentID, idempotencyKey string) (paymentcore.ExecutionResult, error) {
-	request, err := s.loadExecutionRequest(ctx, paymentID, idempotencyKey)
+func (s *Service) ExecutePayout(ctx context.Context, paymentID string) (paymentcore.ExecutionResult, error) {
+	request, err := s.loadExecutionRequest(ctx, paymentID)
 	if err != nil {
 		return paymentcore.ExecutionResult{}, err
 	}
 	return s.executePayout(ctx, request)
 }
 
-func (s *Service) loadExecutionRequest(ctx context.Context, paymentID, idempotencyKey string) (executionRequest, error) {
-	request := executionRequest{paymentID: paymentID, idempotencyKey: idempotencyKey}
-	var exists bool
-	err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM payments WHERE id=$1 AND direction='payout')`, paymentID).Scan(&exists)
+func (s *Service) loadExecutionRequest(ctx context.Context, paymentID string) (executionRequest, error) {
+	request := executionRequest{paymentID: paymentID}
+	err := s.db.QueryRowContext(ctx, `SELECT idempotency_key FROM payments WHERE id=$1 AND direction='payout'`, paymentID).Scan(&request.idempotencyKey)
 	if errors.Is(err, sql.ErrNoRows) {
 		return executionRequest{}, fmt.Errorf("payout payment %s not found", paymentID)
 	}
 	if err != nil {
 		return executionRequest{}, fmt.Errorf("load payout execution request: %w", err)
-	}
-	if !exists {
-		return executionRequest{}, fmt.Errorf("payout payment %s not found", paymentID)
 	}
 	return request, nil
 }

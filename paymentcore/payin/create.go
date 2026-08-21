@@ -122,10 +122,9 @@ func (s *Service) createPayin(ctx context.Context, request CreatePaymentRequest)
 	if err != nil {
 		return nil, fmt.Errorf("store payin payment: %w", err)
 	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO payment_audit_events(payment_id,event,message,occurred_at) VALUES($1,'created','payin payment intent created',$2)`, paymentID, now); err != nil {
-		return nil, err
-	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO payment_timeline_entries(payment_id,payment_status,note,occurred_at) VALUES($1,'created','payin payment created',$2)`, paymentID, now); err != nil {
+	if err := paymentcore.NewHistoryService().Record(ctx, tx,
+		paymentcore.AuditRecord{PaymentID: paymentID, Event: "created", Message: "payin payment intent created", At: now},
+		paymentcore.TimelineRecord{PaymentID: paymentID, PaymentStatus: paymentcore.PaymentStatusCreated, Note: "payin payment created", At: now}); err != nil {
 		return nil, err
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO payins(id,payment_id,quote_id,tenant_id,idempotency_key,funding_method,source_instrument_id,destination_account_id,source_amount_minor,source_currency,destination_amount_minor,destination_currency,provider,provider_payin_id,status,instructions,provider_payload,created_at,updated_at) VALUES($1,$2,NULLIF($3,''),$4,$5,$6,NULLIF($7,''),$8,$9,$10,$11,$12,$13,NULL,'created','{}','{}',$14,$14)`, id, paymentID, quoteID, tenantID, idempotencyKey, fundingMethod, sourceInstrumentID, destinationAccountID, sourceAmountMinor, sourceCurrency, destinationAmountMinor, destinationCurrency, s.quoteProvider.Name(), now)

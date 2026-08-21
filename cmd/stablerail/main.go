@@ -169,9 +169,6 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	payoutRecovery := func(ctx context.Context) error {
-		return payouts.RunRecovery(ctx, config.ReconciliationInterval)
-	}
 	apiKeys, err := paymentapi.NewAPIKeyService(db)
 	if err != nil {
 		return err
@@ -262,7 +259,6 @@ func run() error {
 		webhookDispatcher.Run,
 		reconciler.Run,
 		webhookReconciler,
-		payoutRecovery,
 	)
 	if errors.Is(err, context.Canceled) {
 		return nil

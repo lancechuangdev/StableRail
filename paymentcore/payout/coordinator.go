@@ -315,7 +315,7 @@ func (c *SagaCoordinator) ResolveManualReview(ctx context.Context, paymentID, ac
 	return nil
 }
 
-// ExpireOnce claims overdue active sagas and emits their failure or
+// ExpireOnce claims overdue active sagas and emits their retry, failure, or
 // compensation command. Multiple timeout workers may run concurrently.
 func (c *SagaCoordinator) ExpireOnce(ctx context.Context) (int, error) {
 	tx, err := c.db.BeginTx(ctx, nil)
@@ -353,7 +353,7 @@ func (c *SagaCoordinator) ExpireOnce(ctx context.Context) (int, error) {
 	for _, s := range sagas {
 		next, command, timeout := StateFailed, "payment.fail", time.Duration(0)
 		if s.state == StateAwaitingSettlement {
-			next, command, timeout = StateFailed, "payment.fail_reserved", 0
+			next, command, timeout = StateAwaitingSettlement, "settlement.execute", c.settlementTimeout
 		}
 		if s.state == StateOnHold {
 			next, command, timeout = StateManualReview, "", 0

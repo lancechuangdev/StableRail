@@ -233,7 +233,7 @@ func (s *WebhookService) applyPayinWebhook(ctx context.Context, tx *sql.Tx, prov
 	if _, err := tx.ExecContext(ctx, `UPDATE payments SET payment_status=$1,funds_status=$2,updated_at=$3 WHERE id=$4`, paymentStatus, fundsStatus, now, paymentID); err != nil {
 		return false, fmt.Errorf("update payin payment: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO payment_timeline_entries(payment_id,payment_status,note,occurred_at) VALUES($1,$2,$3,$4)`, paymentID, paymentStatus, "payin."+lifecycleStatus, now); err != nil {
+	if err := paymentcore.NewHistoryService().RecordTimeline(ctx, tx, paymentcore.TimelineRecord{PaymentID: paymentID, PaymentStatus: paymentcore.PaymentStatus(paymentStatus), Note: "payin." + lifecycleStatus, At: now}); err != nil {
 		return false, err
 	}
 	var correlationID string

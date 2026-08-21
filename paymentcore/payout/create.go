@@ -183,7 +183,9 @@ func (s *Service) createPayout(ctx context.Context, request CreatePaymentRequest
 	if rows, err := result.RowsAffected(); err != nil || rows != 1 {
 		return nil, errors.New("payout quote already accepted")
 	}
-	if err := insertHistory(ctx, tx, payment.ID, "created", "payment intent created", PaymentStatusCreated, "payment created", now); err != nil {
+	if err := paymentcore.NewHistoryService().Record(ctx, tx,
+		paymentcore.AuditRecord{PaymentID: payment.ID, Event: "created", Message: "payment intent created", At: now},
+		paymentcore.TimelineRecord{PaymentID: payment.ID, PaymentStatus: PaymentStatusCreated, Note: "payment created", At: now}); err != nil {
 		return nil, err
 	}
 	payment.AuditLog = []AuditEvent{{Event: "created", Message: "payment intent created", At: now}}

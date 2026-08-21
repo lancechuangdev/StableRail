@@ -10,6 +10,7 @@ import (
 	"github.com/DATA-DOG/go-sqlmock"
 
 	"stablerail/eventbus"
+	"stablerail/paymentcore"
 )
 
 func TestRecordPayinCompletesReceivedPayin(t *testing.T) {
@@ -26,7 +27,7 @@ func TestRecordPayinCompletesReceivedPayin(t *testing.T) {
 	mock.ExpectExec("INSERT INTO ledger_entries").WithArgs("jrn_pin_1_succeeded:credit", "jrn_pin_1_succeeded", "settlement:payable", "credit", int64(9900), "USDC").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("UPDATE payins SET status='succeeded'").WithArgs(now, "pin_1").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("UPDATE payments SET payment_status='succeeded'").WithArgs(now, "pay_1").WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectExec("INSERT INTO payment_timeline_entries").WithArgs("pay_1", now).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO payment_timeline_entries").WithArgs("pay_1", paymentcore.PaymentStatusSucceeded, "payin ledger recorded", now).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO outbox_events").WithArgs("evt_pin_1_succeeded", eventbus.PayinEventsTopic, "payin.succeeded", eventbus.PayinSucceededVersion, "pay_1", sqlmock.AnyArg(), now).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO outbox_events").WithArgs("evt_pin_1_succeeded_payment", eventbus.PaymentEventsTopic, eventbus.PaymentSucceededVersion, "pay_1", sqlmock.AnyArg(), now).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
@@ -93,8 +94,8 @@ func TestRecordReturnCreditsObligationWithoutChangingSucceededPayment(t *testing
 		mock.ExpectExec("INSERT INTO ledger_entries").WithArgs(line.id, "jrn_ret_1", line.account, line.side, int64(2500), "USD").WillReturnResult(sqlmock.NewResult(0, 1))
 	}
 	mock.ExpectExec("INSERT INTO payment_returns").WithArgs("ret_1", "pay_1", "blindpay", "msg_1", int64(2500), "USD", "recipient account frozen", "jrn_ret_1", now).WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectExec("INSERT INTO payment_audit_events").WithArgs("pay_1", "recipient account frozen", now).WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectExec("INSERT INTO payment_timeline_entries").WithArgs("pay_1", "recipient account frozen", now).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO payment_audit_events").WithArgs("pay_1", "return_succeeded", "recipient account frozen", now).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO payment_timeline_entries").WithArgs("pay_1", paymentcore.PaymentStatusSucceeded, "recipient account frozen", now).WillReturnResult(sqlmock.NewResult(0, 1))
 
 	err = NewPostgresService().RecordReturn(context.Background(), tx, ReturnRequest{ID: "ret_1", PaymentID: "pay_1", Provider: "blindpay", ProviderEventID: "msg_1", Reason: "recipient account frozen", At: now})
 	if err != nil {

@@ -109,8 +109,8 @@ func (*PostgresService) RecordPayin(ctx context.Context, tx *sql.Tx, request Pay
 	if _, err := tx.ExecContext(ctx, `UPDATE payments SET payment_status='succeeded',funds_status='received',updated_at=$1 WHERE id=$2`, request.At, paymentID); err != nil {
 		return fmt.Errorf("complete payin payment: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO payment_timeline_entries(payment_id,payment_status,note,occurred_at) VALUES($1,'succeeded','payin ledger recorded',$2)`, paymentID, request.At); err != nil {
-		return fmt.Errorf("insert payin timeline: %w", err)
+	if err := paymentcore.NewHistoryService().RecordTimeline(ctx, tx, paymentcore.TimelineRecord{PaymentID: paymentID, PaymentStatus: paymentcore.PaymentStatusSucceeded, Note: "payin ledger recorded", At: request.At}); err != nil {
+		return err
 	}
 	eventID, eventType := "evt_"+request.PayinID+"_succeeded", "payin.succeeded"
 	body, _ := json.Marshal(map[string]any{"id": eventID, "type": eventType, "payin_id": request.PayinID, "correlation_id": request.CorrelationID, "occurred_at": request.At, "data": map[string]string{"status": "succeeded"}})
@@ -162,11 +162,10 @@ func (*PostgresService) RecordReturn(ctx context.Context, tx *sql.Tx, request Re
 	if _, err := tx.ExecContext(ctx, `INSERT INTO payment_returns(id,payment_id,provider,provider_event_id,amount_minor,currency,status,reason,ledger_transaction_id,occurred_at) VALUES($1,$2,$3,$4,$5,$6,'succeeded',$7,$8,$9)`, request.ID, request.PaymentID, request.Provider, request.ProviderEventID, amount, currency, request.Reason, journalID, request.At); err != nil {
 		return fmt.Errorf("insert payment return: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO payment_audit_events(payment_id,event,message,occurred_at) VALUES($1,'return_succeeded',$2,$3)`, request.PaymentID, request.Reason, request.At); err != nil {
-		return fmt.Errorf("insert return audit event: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO payment_timeline_entries(payment_id,payment_status,note,occurred_at) VALUES($1,'succeeded',$2,$3)`, request.PaymentID, request.Reason, request.At); err != nil {
-		return fmt.Errorf("insert return timeline entry: %w", err)
+	if err := paymentcore.NewHistoryService().Record(ctx, tx,
+		paymentcore.AuditRecord{PaymentID: request.PaymentID, Event: "return_succeeded", Message: request.Reason, At: request.At},
+		paymentcore.TimelineRecord{PaymentID: request.PaymentID, PaymentStatus: paymentcore.PaymentStatusSucceeded, Note: request.Reason, At: request.At}); err != nil {
+		return err
 	}
 	return nil
 }
@@ -217,15 +216,14 @@ func postFrom(ctx context.Context, tx *sql.Tx, id string, from []paymentcore.Pay
 			return fmt.Errorf("insert ledger entry: %w", err)
 		}
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO payment_audit_events(payment_id,event,message,occurred_at) VALUES($1,$2,$3,$4)`, id, suffix, message, now); err != nil {
-		return fmt.Errorf("insert ledger audit event: %w", err)
-	}
 	timelineStatus := status
 	if updateState {
 		timelineStatus = to
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO payment_timeline_entries(payment_id,payment_status,note,occurred_at) VALUES($1,$2,$3,$4)`, id, timelineStatus, note, now); err != nil {
-		return fmt.Errorf("insert ledger timeline entry: %w", err)
+	if err := paymentcore.NewHistoryService().Record(ctx, tx,
+		paymentcore.AuditRecord{PaymentID: id, Event: suffix, Message: message, At: now},
+		paymentcore.TimelineRecord{PaymentID: id, PaymentStatus: timelineStatus, Note: note, At: now}); err != nil {
+		return err
 	}
 	return nil
 }

@@ -12,6 +12,7 @@ import (
 	"github.com/DATA-DOG/go-sqlmock"
 
 	"stablerail/eventbus"
+	"stablerail/paymentcore"
 )
 
 func TestWebhookVerifierAcceptsV1Signature(t *testing.T) {
@@ -133,8 +134,8 @@ func TestPayoutWebhookRecordsPostSuccessReturnWithoutChangingPayment(t *testing.
 		mock.ExpectExec("INSERT INTO ledger_entries").WithArgs(line.id, "jrn_ret_blindpay_msg_return", line.account, line.side, int64(2500), "USD").WillReturnResult(sqlmock.NewResult(0, 1))
 	}
 	mock.ExpectExec("INSERT INTO payment_returns").WithArgs("ret_blindpay_msg_return", "pay_test", "blindpay", "msg_return", int64(2500), "USD", "provider returned funds after completed payout", "jrn_ret_blindpay_msg_return", now).WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectExec("INSERT INTO payment_audit_events").WithArgs("pay_test", "provider returned funds after completed payout", now).WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectExec("INSERT INTO payment_timeline_entries").WithArgs("pay_test", "provider returned funds after completed payout", now).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO payment_audit_events").WithArgs("pay_test", "return_succeeded", "provider returned funds after completed payout", now).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO payment_timeline_entries").WithArgs("pay_test", paymentcore.PaymentStatusSucceeded, "provider returned funds after completed payout", now).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO outbox_events").WithArgs("evt_blindpay_msg_return", eventbus.PayoutEventsTopic, eventbus.PayoutReturnCompletedVersion, "pay_test", sqlmock.AnyArg(), now).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO outbox_events").WithArgs("evt_blindpay_msg_return_payment", eventbus.PaymentEventsTopic, eventbus.PaymentFundsStatusChangedVersion, "pay_test", sqlmock.AnyArg(), now).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()

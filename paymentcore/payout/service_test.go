@@ -45,7 +45,7 @@ func TestServiceCommitsAttemptBeforeProviderExecution(t *testing.T) {
 	provider := &serviceProvider{result: paymentcore.ExecutionResult{ProviderReference: "po_test", Status: paymentcore.ExecutionPending, Payload: []byte(`{"id":"po_test"}`)}}
 	service, _ := NewService(db, provider, provider)
 	service.now = func() time.Time { return now }
-	mock.ExpectQuery("SELECT EXISTS").WithArgs("pay_test").WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
+	mock.ExpectQuery("SELECT idempotency_key FROM payments").WithArgs("pay_test").WillReturnRows(sqlmock.NewRows([]string{"idempotency_key"}).AddRow("idem_test"))
 	mock.ExpectBegin()
 	mock.ExpectQuery("SELECT q.id,q.provider_quote_id").WithArgs("pay_test", "blindpay").WillReturnRows(quoteRows())
 	mock.ExpectExec("INSERT INTO payouts").WithArgs("pay_test", "quote_test", "tenant_test", "account_test", "instrument_test", "ach", int64(100), "USDB", int64(90), "USD", "blindpay", "idem_test", now).WillReturnResult(sqlmock.NewResult(0, 1))
@@ -53,7 +53,7 @@ func TestServiceCommitsAttemptBeforeProviderExecution(t *testing.T) {
 	mock.ExpectExec("UPDATE payouts SET provider_payout_id").WithArgs("po_test", "processing", []byte(`{"id":"po_test"}`), now, "pay_test").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("UPDATE payments SET funds_status").WithArgs("reserved", now, "pay_test").WillReturnResult(sqlmock.NewResult(0, 1))
 
-	_, err = service.ExecutePayout(context.Background(), "pay_test", "idem_test")
+	_, err = service.ExecutePayout(context.Background(), "pay_test")
 	if err != nil {
 		t.Fatal(err)
 	}

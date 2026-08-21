@@ -108,7 +108,7 @@ func TestHandleRejectsMismatchedCorrelation(t *testing.T) {
 	}
 }
 
-func TestExpireOncePreservesReservedFundsAfterSettlementTimeout(t *testing.T) {
+func TestExpireOnceRetriesSettlementWithReservedFunds(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatalf("create SQL mock: %v", err)
@@ -121,10 +121,10 @@ func TestExpireOncePreservesReservedFundsAfterSettlementTimeout(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"id", "payment_id", "correlation_id", "state"}).
 			AddRow("saga-1", "pay-1", "corr-1", StateAwaitingSettlement))
 	mock.ExpectExec("UPDATE settlement_sagas").
-		WithArgs(StateFailed, nil, "awaiting_settlement timeout", now, "saga-1").
+		WithArgs(StateAwaitingSettlement, now.Add(c.settlementTimeout), "awaiting_settlement timeout", now, "saga-1").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO outbox_events").
-		WithArgs("evt_1", eventbus.SettlementCommandsTopic, "payment.fail_reserved", eventbus.PaymentFailVersion, "pay-1", sqlmock.AnyArg(), now).
+		WithArgs("evt_1", eventbus.SettlementCommandsTopic, "settlement.execute", eventbus.SettlementExecuteVersion, "pay-1", sqlmock.AnyArg(), now).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 	count, err := c.ExpireOnce(context.Background())
