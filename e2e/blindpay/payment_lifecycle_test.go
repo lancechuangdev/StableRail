@@ -156,7 +156,7 @@ func TestBLINDPAY006TerminalReturn(t *testing.T) {
 	complete(t, env, tenant, quote, payment)
 	env.SendBlindPayWebhook(t, testenv.PayoutID(quote), "refunded")
 	env.WaitForSagaState(t, payment.ID, "completed")
-	env.WaitForCount(t, `SELECT count(*) FROM payment_returns WHERE payment_id=$1 AND status='succeeded'`, 1, payment.ID)
+	env.WaitForCount(t, `SELECT count(*) FROM payment_returns WHERE payment_id=$1`, 1, payment.ID)
 	env.WaitForCount(t, `SELECT count(*) FROM ledger_journals WHERE payment_id=$1 AND event_type='payment.return.succeeded'`, 1, payment.ID)
 	env.WaitForCount(t, `SELECT count(*) FROM webhook_deliveries WHERE payment_id=$1 AND event_type='payment.return.succeeded' AND status='delivered'`, 1, payment.ID)
 }

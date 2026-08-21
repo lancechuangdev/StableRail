@@ -154,7 +154,7 @@ func find(ctx context.Context, tx *sql.Tx) ([]Finding, error) {
 		FROM payments p JOIN payouts b ON b.payment_id=p.id
 		WHERE (b.settlement_status='completed' AND p.payment_status<>'succeeded')
 		   OR (b.settlement_status='refunded' AND NOT EXISTS (
-		       SELECT 1 FROM payment_returns r WHERE r.payment_id=p.id AND r.status='succeeded'
+		       SELECT 1 FROM payment_returns r WHERE r.payment_id=p.id
 		   ))
 		   OR (b.settlement_status='failed' AND p.payment_status<>'failed')`)
 	if err != nil {

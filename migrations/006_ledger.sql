@@ -38,7 +38,6 @@ CREATE TABLE payment_returns (
     provider_event_id     TEXT NOT NULL UNIQUE,
     amount_minor          BIGINT NOT NULL CHECK (amount_minor > 0),
     currency              TEXT NOT NULL,
-    status                TEXT NOT NULL CHECK (status IN ('created', 'processing', 'succeeded', 'failed')),
     reason                TEXT NOT NULL,
     ledger_journal_id     TEXT NOT NULL UNIQUE REFERENCES ledger_journals(id),
     occurred_at           TIMESTAMPTZ NOT NULL

@@ -155,7 +155,7 @@ func (*PostgresService) RecordReturn(ctx context.Context, tx *sql.Tx, request Re
 			return fmt.Errorf("insert return ledger entry: %w", err)
 		}
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO payment_returns(id,payment_id,provider,provider_event_id,amount_minor,currency,status,reason,ledger_journal_id,occurred_at) VALUES($1,$2,$3,$4,$5,$6,'succeeded',$7,$8,$9)`, request.ID, request.PaymentID, request.Provider, request.ProviderEventID, amount, currency, request.Reason, journalID, request.At); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO payment_returns(id,payment_id,provider,provider_event_id,amount_minor,currency,reason,ledger_journal_id,occurred_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`, request.ID, request.PaymentID, request.Provider, request.ProviderEventID, amount, currency, request.Reason, journalID, request.At); err != nil {
 		return fmt.Errorf("insert payment return: %w", err)
 	}
 	if err := paymentcore.NewHistoryService().Record(ctx, tx,

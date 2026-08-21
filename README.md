@@ -100,12 +100,7 @@ Balances, reservations, and availability are calculated from posted `ledger_entr
 
 A bank or provider can return funds after a payout was already confirmed. StableRail records that as a separate financial operation:
 
-```text
-Payment: created -> processing -> succeeded
-Return:  created -> processing -> succeeded | failed
-```
-
-The return status domain contains only `created`, `processing`, `succeeded`, and `failed`. The current provider webhook path learns about a return after it has completed externally, so it creates the return directly as `succeeded`; initiated `created` and `processing` transitions are not implemented yet. The return journal debits `cash:operating` for the asset received back and credits `settlement:payable` to restore the obligation. The original payment is not rewritten. StableRail emits the internal `payout.return_completed` event; return details are read from the separate return operation rather than encoded as payment state.
+`payment_returns` contains only completed provider returns; it is an immutable record rather than a return lifecycle. Its required journal debits `cash:operating` for the asset received back and credits `settlement:payable` to restore the obligation. The original payment is not rewritten. StableRail emits `payment.return.succeeded`; return details are read from the separate return operation rather than encoded as payment state.
 
 Merchant-issued refunds are separate linked payments. `POST /v1/payments/{id}/refunds` accepts an idempotency key, a positive amount, a reason, and an optional fresh `payout_quote_id` for BlindPay routing. Partial refunds are supported up to the original payment amount. StableRail creates a new payment, links it through `payment_refunds.refund_payment_id`, binds the payout quote when supplied, and emits `payout.created` for workflow coordination and `payment.created` for merchant notification. From there, policy, ledger reservation, settlement, and failure handling use the ordinary payout workflow. Refund eligibility is established by the original payment outcome and its posted settlement journal. Provider-originated returns remain separate and continue to use `payment_returns` and reversal accounting.
 
