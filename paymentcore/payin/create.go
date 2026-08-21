@@ -64,7 +64,7 @@ func (s *Service) CreatePayment(ctx context.Context, request CreatePaymentReques
 	if err != nil {
 		return nil, err
 	}
-	return &paymentcore.Payment{ID: p.PaymentID, Direction: paymentcore.PaymentDirectionPayin, ExternalReference: request.ExternalReference, Currency: p.DestinationCurrency, AmountMinor: p.DestinationAmountMinor, TenantID: request.TenantID, PaymentStatus: paymentcore.PaymentStatusCreated, FundsStatus: paymentcore.FundsStatusPending, CreatedAt: p.CreatedAt, UpdatedAt: p.UpdatedAt}, nil
+	return &paymentcore.Payment{ID: p.PaymentID, Direction: paymentcore.PaymentDirectionPayin, ExternalReference: request.ExternalReference, Currency: p.DestinationCurrency, AmountMinor: p.DestinationAmountMinor, TenantID: request.TenantID, PaymentStatus: paymentcore.PaymentStatusCreated, CreatedAt: p.CreatedAt, UpdatedAt: p.UpdatedAt}, nil
 }
 
 func (s *Service) createPayin(ctx context.Context, request CreatePaymentRequest) (*Payin, error) {
@@ -94,7 +94,7 @@ func (s *Service) createPayin(ctx context.Context, request CreatePaymentRequest)
 		return nil, err
 	}
 	var existing Payin
-	lookup := `SELECT id,payment_id,COALESCE(quote_id,''),provider,COALESCE(provider_payin_id,''),funding_method,COALESCE(source_instrument_id,''),destination_account_id,source_amount_minor,source_currency,destination_amount_minor,destination_currency,status,instructions,created_at,updated_at FROM payins WHERE quote_id=$1`
+	lookup := `SELECT id,payment_id,COALESCE(quote_id,''),provider,COALESCE(provider_payin_id,''),funding_method,COALESCE(source_instrument_id,''),destination_account_id,source_amount_minor,source_currency,destination_amount_minor,destination_currency,settlement_status,instructions,created_at,updated_at FROM payins WHERE quote_id=$1`
 	lookupArg := quoteID
 	err = tx.QueryRowContext(ctx, lookup, lookupArg).Scan(&existing.ID, &existing.PaymentID, &existing.QuoteID, &existing.Provider, &existing.ProviderPayinID, &existing.FundingMethod, &existing.SourceInstrumentID, &existing.DestinationAccountID, &existing.SourceAmountMinor, &existing.SourceCurrency, &existing.DestinationAmountMinor, &existing.DestinationCurrency, &existing.Status, &existing.Instructions, &existing.CreatedAt, &existing.UpdatedAt)
 	if err == nil {
@@ -118,7 +118,7 @@ func (s *Service) createPayin(ctx context.Context, request CreatePaymentRequest)
 	if err != nil {
 		return nil, err
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO payments(id,direction,external_reference,currency,amount_minor,tenant_id,payment_status,funds_status,idempotency_key,created_at,updated_at) VALUES($1,'payin',$2,$3,$4,$5,'created','pending',$6,$7,$7)`, paymentID, externalReference, destinationCurrency, destinationAmountMinor, tenantID, idempotencyKey, now)
+	_, err = tx.ExecContext(ctx, `INSERT INTO payments(id,direction,external_reference,currency,amount_minor,tenant_id,payment_status,idempotency_key,created_at,updated_at) VALUES($1,'payin',$2,$3,$4,$5,'created',$6,$7,$7)`, paymentID, externalReference, destinationCurrency, destinationAmountMinor, tenantID, idempotencyKey, now)
 	if err != nil {
 		return nil, fmt.Errorf("store payin payment: %w", err)
 	}
@@ -127,7 +127,7 @@ func (s *Service) createPayin(ctx context.Context, request CreatePaymentRequest)
 		paymentcore.TimelineRecord{PaymentID: paymentID, PaymentStatus: paymentcore.PaymentStatusCreated, Note: "payin payment created", At: now}); err != nil {
 		return nil, err
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO payins(id,payment_id,quote_id,tenant_id,idempotency_key,funding_method,source_instrument_id,destination_account_id,source_amount_minor,source_currency,destination_amount_minor,destination_currency,provider,provider_payin_id,status,instructions,provider_payload,created_at,updated_at) VALUES($1,$2,NULLIF($3,''),$4,$5,$6,NULLIF($7,''),$8,$9,$10,$11,$12,$13,NULL,'created','{}','{}',$14,$14)`, id, paymentID, quoteID, tenantID, idempotencyKey, fundingMethod, sourceInstrumentID, destinationAccountID, sourceAmountMinor, sourceCurrency, destinationAmountMinor, destinationCurrency, s.quoteProvider.Name(), now)
+	_, err = tx.ExecContext(ctx, `INSERT INTO payins(id,payment_id,quote_id,tenant_id,idempotency_key,funding_method,source_instrument_id,destination_account_id,source_amount_minor,source_currency,destination_amount_minor,destination_currency,provider,provider_payin_id,settlement_status,instructions,provider_payload,created_at,updated_at) VALUES($1,$2,NULLIF($3,''),$4,$5,$6,NULLIF($7,''),$8,$9,$10,$11,$12,$13,NULL,'created','{}','{}',$14,$14)`, id, paymentID, quoteID, tenantID, idempotencyKey, fundingMethod, sourceInstrumentID, destinationAccountID, sourceAmountMinor, sourceCurrency, destinationAmountMinor, destinationCurrency, s.quoteProvider.Name(), now)
 	if err != nil {
 		return nil, fmt.Errorf("store payin: %w", err)
 	}

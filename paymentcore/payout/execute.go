@@ -55,9 +55,6 @@ func (s *Service) executePayout(ctx context.Context, request executionRequest) (
 	}
 	if !a.new {
 		if a.providerReference != "" {
-			if err := s.setPaymentFundsStatus(ctx, request.paymentID, "reserved"); err != nil {
-				return paymentcore.ExecutionResult{}, err
-			}
 			return mapPersistedResult(a.providerReference, a.providerStatus)
 		}
 		if a.providerStatus != "unknown" {
@@ -89,11 +86,8 @@ func (s *Service) executePayout(ctx context.Context, request executionRequest) (
 	}
 	providerStatus := persistedStatus(result)
 	now := s.now()
-	if _, err := s.db.ExecContext(ctx, `UPDATE payouts SET provider_payout_id=$1,provider_status=$2,provider_payload=$3,last_error=NULL,updated_at=$4,submitted_at=$4 WHERE payment_id=$5 AND provider_status IN ('submission_pending','unknown')`, result.ProviderReference, providerStatus, payload, now, request.paymentID); err != nil {
+	if _, err := s.db.ExecContext(ctx, `UPDATE payouts SET provider_payout_id=$1,settlement_status=$2,provider_payload=$3,last_error=NULL,updated_at=$4,submitted_at=$4 WHERE payment_id=$5 AND settlement_status IN ('submission_pending','unknown')`, result.ProviderReference, providerStatus, payload, now, request.paymentID); err != nil {
 		return paymentcore.ExecutionResult{}, fmt.Errorf("record payout response: %w", err)
-	}
-	if err := s.setPaymentFundsStatus(ctx, request.paymentID, "reserved"); err != nil {
-		return paymentcore.ExecutionResult{}, err
 	}
 	return result, nil
 }
@@ -114,7 +108,7 @@ func (s *Service) prepare(ctx context.Context, request executionRequest) (attemp
 		return attempt{}, fmt.Errorf("load payout route: %w", err)
 	}
 	now := s.now()
-	res, err := tx.ExecContext(ctx, `INSERT INTO payouts(payment_id,quote_id,tenant_id,source_account_id,destination_instrument_id,payout_method,source_amount_minor,source_currency,destination_amount_minor,destination_currency,provider,provider_status,idempotency_key,created_at,updated_at) VALUES($1,NULLIF($2,''),$3,NULLIF($4,''),NULLIF($5,''),$6,$7,$8,$9,$10,$11,'submission_pending',$12,$13,$13) ON CONFLICT(payment_id) DO NOTHING`, request.paymentID, quoteID, tenantID, sourceAccountID, destinationInstrumentID, method, sourceAmount, sourceCurrency, destinationAmount, destinationCurrency, s.executionProvider.Name(), request.idempotencyKey, now)
+	res, err := tx.ExecContext(ctx, `INSERT INTO payouts(payment_id,quote_id,tenant_id,source_account_id,destination_instrument_id,payout_method,source_amount_minor,source_currency,destination_amount_minor,destination_currency,provider,settlement_status,idempotency_key,created_at,updated_at) VALUES($1,NULLIF($2,''),$3,NULLIF($4,''),NULLIF($5,''),$6,$7,$8,$9,$10,$11,'submission_pending',$12,$13,$13) ON CONFLICT(payment_id) DO NOTHING`, request.paymentID, quoteID, tenantID, sourceAccountID, destinationInstrumentID, method, sourceAmount, sourceCurrency, destinationAmount, destinationCurrency, s.executionProvider.Name(), request.idempotencyKey, now)
 	if err != nil {
 		return attempt{}, fmt.Errorf("create payout submission: %w", err)
 	}
@@ -125,7 +119,7 @@ func (s *Service) prepare(ctx context.Context, request executionRequest) (attemp
 	a := attempt{new: rows == 1}
 	if !a.new {
 		var storedKey string
-		err = tx.QueryRowContext(ctx, `SELECT COALESCE(provider_payout_id,''),provider_status,idempotency_key FROM payouts WHERE payment_id=$1 FOR UPDATE`, request.paymentID).Scan(&a.providerReference, &a.providerStatus, &storedKey)
+		err = tx.QueryRowContext(ctx, `SELECT COALESCE(provider_payout_id,''),settlement_status,idempotency_key FROM payouts WHERE payment_id=$1 FOR UPDATE`, request.paymentID).Scan(&a.providerReference, &a.providerStatus, &storedKey)
 		if err != nil {
 			return attempt{}, fmt.Errorf("get existing payout submission: %w", err)
 		}
@@ -138,12 +132,4 @@ func (s *Service) prepare(ctx context.Context, request executionRequest) (attemp
 		return attempt{}, fmt.Errorf("commit payout submission: %w", err)
 	}
 	return a, nil
-}
-
-func (s *Service) setPaymentFundsStatus(ctx context.Context, paymentID, status string) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE payments SET funds_status=$1,updated_at=$2 WHERE id=$3 AND payment_status='processing'`, status, s.now(), paymentID)
-	if err != nil {
-		return fmt.Errorf("update payment funds status: %w", err)
-	}
-	return nil
 }

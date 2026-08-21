@@ -21,7 +21,7 @@ func (s *Service) ExecutePayin(ctx context.Context, payinID string) (ExecuteResu
 	var providerQuote, key, status, tenantID, fundingMethod, sourceInstrumentID, destinationAccountID, sourceCurrency, destinationCurrency string
 	var sourceAmountMinor, destinationAmountMinor int64
 	var providerID sql.NullString
-	err = tx.QueryRowContext(ctx, `SELECT COALESCE(q.provider_quote_id,''),p.idempotency_key,p.status,p.provider_payin_id,p.tenant_id,p.funding_method,COALESCE(p.source_instrument_id,''),p.destination_account_id,p.source_amount_minor,p.source_currency,p.destination_amount_minor,p.destination_currency FROM payins p LEFT JOIN payment_quotes q ON q.id=p.quote_id WHERE p.id=$1 AND p.provider=$2 FOR UPDATE`, payinID, s.executionProvider.Name()).Scan(&providerQuote, &key, &status, &providerID, &tenantID, &fundingMethod, &sourceInstrumentID, &destinationAccountID, &sourceAmountMinor, &sourceCurrency, &destinationAmountMinor, &destinationCurrency)
+	err = tx.QueryRowContext(ctx, `SELECT COALESCE(q.provider_quote_id,''),p.idempotency_key,p.settlement_status,p.provider_payin_id,p.tenant_id,p.funding_method,COALESCE(p.source_instrument_id,''),p.destination_account_id,p.source_amount_minor,p.source_currency,p.destination_amount_minor,p.destination_currency FROM payins p LEFT JOIN payment_quotes q ON q.id=p.quote_id WHERE p.id=$1 AND p.provider=$2 FOR UPDATE`, payinID, s.executionProvider.Name()).Scan(&providerQuote, &key, &status, &providerID, &tenantID, &fundingMethod, &sourceInstrumentID, &destinationAccountID, &sourceAmountMinor, &sourceCurrency, &destinationAmountMinor, &destinationCurrency)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ExecuteResult{}, ErrNotFound
 	}
@@ -41,7 +41,7 @@ func (s *Service) ExecutePayin(ctx context.Context, payinID string) (ExecuteResu
 	if status != "created" && status != "submission_pending" && status != "unknown" {
 		return ExecuteResult{}, fmt.Errorf("payin cannot execute from status %s", status)
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE payins SET status='submission_pending',updated_at=$1 WHERE id=$2`, s.now(), payinID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE payins SET settlement_status='submission_pending',updated_at=$1 WHERE id=$2`, s.now(), payinID); err != nil {
 		return ExecuteResult{}, err
 	}
 	if err := tx.Commit(); err != nil {

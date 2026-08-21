@@ -140,7 +140,7 @@ func TestPostgresCreateWithPayoutQuoteBindsQuoteAndPaymentAtomically(t *testing.
 		WillReturnRows(sqlmock.NewRows([]string{"tenant_id", "source_currency", "sender_amount_minor", "status", "expires_at"}).
 			AddRow("tenant-1", "USDB", int64(2500), "open", service.now().Add(time.Minute)))
 	mock.ExpectExec("INSERT INTO payments").
-		WithArgs("pay_test", PaymentDirectionPayout, "order-1", "USDB", int64(2500), "tenant-1", PaymentStatusCreated, FundsStatusAvailable, "idem-1", service.now()).
+		WithArgs("pay_test", PaymentDirectionPayout, "order-1", "USDB", int64(2500), "tenant-1", PaymentStatusCreated, "idem-1", service.now()).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("UPDATE payment_quotes SET status='accepted'").
 		WithArgs("pay_test", service.now(), "qu_test").
@@ -173,7 +173,7 @@ func TestPostgresCreateWithAcceptedPayoutQuoteReportsIdempotencyConflict(t *test
 	now := service.now()
 	mock.ExpectBegin()
 	mock.ExpectQuery("SELECT tenant_id,source_currency,sender_amount_minor,status,expires_at FROM payment_quotes").WithArgs("qu_test").WillReturnRows(sqlmock.NewRows([]string{"tenant_id", "source_currency", "sender_amount_minor", "status", "expires_at"}).AddRow("tenant-1", "USDB", int64(2500), "accepted", now.Add(time.Minute)))
-	mock.ExpectQuery("SELECT id, direction, external_reference, currency, amount_minor").WithArgs("idem-1").WillReturnRows(sqlmock.NewRows([]string{"id", "direction", "external_reference", "currency", "amount_minor", "tenant_id", "payment_status", "funds_status", "idempotency_key", "created_at", "updated_at"}).AddRow("pay_existing", "payout", "order-1", "USDB", int64(2500), "tenant-1", PaymentStatusCreated, FundsStatusAvailable, "idem-1", now, now))
+	mock.ExpectQuery("SELECT id, direction, external_reference, currency, amount_minor").WithArgs("idem-1").WillReturnRows(sqlmock.NewRows([]string{"id", "direction", "external_reference", "currency", "amount_minor", "tenant_id", "payment_status", "idempotency_key", "created_at", "updated_at"}).AddRow("pay_existing", "payout", "order-1", "USDB", int64(2500), "tenant-1", PaymentStatusCreated, "idem-1", now, now))
 	mock.ExpectQuery("SELECT id FROM payment_quotes").WithArgs("pay_existing").WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("qu_test"))
 	mock.ExpectRollback()
 
@@ -198,8 +198,8 @@ func TestPostgresGetPaymentAllowsMissingDestination(t *testing.T) {
 	}
 	now := time.Date(2026, time.August, 7, 12, 0, 0, 0, time.UTC)
 	mock.ExpectQuery("SELECT id, direction, external_reference, currency, amount_minor").WithArgs("pay_test").
-		WillReturnRows(sqlmock.NewRows([]string{"id", "direction", "external_reference", "currency", "amount_minor", "tenant_id", "payment_status", "funds_status", "idempotency_key", "created_at", "updated_at"}).
-			AddRow("pay_test", "payout", "order-1", "USD", int64(2500), "tenant-1", PaymentStatusCreated, FundsStatusAvailable, "idem-1", now, now))
+		WillReturnRows(sqlmock.NewRows([]string{"id", "direction", "external_reference", "currency", "amount_minor", "tenant_id", "payment_status", "idempotency_key", "created_at", "updated_at"}).
+			AddRow("pay_test", "payout", "order-1", "USD", int64(2500), "tenant-1", PaymentStatusCreated, "idem-1", now, now))
 	mock.ExpectQuery("SELECT id FROM payment_quotes").WithArgs("pay_test").WillReturnError(sql.ErrNoRows)
 	mock.ExpectQuery("SELECT provider,COALESCE.*FROM payouts").WithArgs("pay_test").WillReturnError(sql.ErrNoRows)
 	mock.ExpectQuery("SELECT payment_status, occurred_at, note FROM payment_timeline_entries").WithArgs("pay_test").

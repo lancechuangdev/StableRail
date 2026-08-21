@@ -14,7 +14,6 @@ import (
 
 type Payment = paymentcore.Payment
 type PaymentStatus = paymentcore.PaymentStatus
-type FundsStatus = paymentcore.FundsStatus
 type AuditEvent = paymentcore.AuditEvent
 type TimelineEntry = paymentcore.TimelineEntry
 type LedgerEntry = paymentcore.LedgerEntry
@@ -25,9 +24,6 @@ const (
 	PaymentStatusProcessing = paymentcore.PaymentStatusProcessing
 	PaymentStatusSucceeded  = paymentcore.PaymentStatusSucceeded
 	PaymentStatusFailed     = paymentcore.PaymentStatusFailed
-	FundsStatusAvailable    = paymentcore.FundsStatusAvailable
-	FundsStatusReserved     = paymentcore.FundsStatusReserved
-	FundsStatusConsumed     = paymentcore.FundsStatusConsumed
 )
 
 var (
@@ -104,7 +100,7 @@ func (s *Service) createPayout(ctx context.Context, request CreatePaymentRequest
 	now := s.now()
 	payment := &Payment{
 		ID: paymentID, Direction: PaymentDirectionPayout, ExternalReference: externalRef, Currency: currency,
-		AmountMinor: amountMinor, TenantID: tenantID, PaymentStatus: PaymentStatusCreated, FundsStatus: FundsStatusAvailable,
+		AmountMinor: amountMinor, TenantID: tenantID, PaymentStatus: PaymentStatusCreated,
 		IdempotencyKey: idempotencyKey, QuoteID: payoutQuoteID, CreatedAt: now, UpdatedAt: now,
 	}
 	var quoteTenant, quoteCurrency string
@@ -149,12 +145,12 @@ func (s *Service) createPayout(ctx context.Context, request CreatePaymentRequest
 
 	result, err := tx.ExecContext(ctx, `
 		INSERT INTO payments
-			(id, direction, external_reference, currency, amount_minor, tenant_id, payment_status, funds_status,
+			(id, direction, external_reference, currency, amount_minor, tenant_id, payment_status,
 			 idempotency_key, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9)
 		ON CONFLICT (idempotency_key) DO NOTHING`,
 		payment.ID, payment.Direction, payment.ExternalReference, payment.Currency, payment.AmountMinor,
-		payment.TenantID, payment.PaymentStatus, payment.FundsStatus, payment.IdempotencyKey, now,
+		payment.TenantID, payment.PaymentStatus, payment.IdempotencyKey, now,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert payment: %w", err)
@@ -197,8 +193,7 @@ func (s *Service) createPayout(ctx context.Context, request CreatePaymentRequest
 		AmountMinor       int64  `json:"amount_minor"`
 		TenantID          string `json:"tenant_id"`
 		PaymentStatus     string `json:"payment_status"`
-		FundsStatus       string `json:"funds_status"`
-	}{externalRef, currency, amountMinor, tenantID, string(PaymentStatusCreated), string(FundsStatusAvailable)})
+	}{externalRef, currency, amountMinor, tenantID, string(PaymentStatusCreated)})
 	if err != nil {
 		return nil, fmt.Errorf("marshal payment created payload: %w", err)
 	}
@@ -215,12 +210,12 @@ func (s *Service) createPayout(ctx context.Context, request CreatePaymentRequest
 func getPaymentByIdempotencyKey(ctx context.Context, tx *sql.Tx, key string) (*Payment, error) {
 	payment := &Payment{}
 	err := tx.QueryRowContext(ctx, `
-		SELECT id, direction, external_reference, currency, amount_minor, tenant_id, payment_status, funds_status,
+		SELECT id, direction, external_reference, currency, amount_minor, tenant_id, payment_status,
 		       idempotency_key, created_at, updated_at
 		FROM payments WHERE idempotency_key = $1`, key,
 	).Scan(
 		&payment.ID, &payment.Direction, &payment.ExternalReference, &payment.Currency, &payment.AmountMinor,
-		&payment.TenantID, &payment.PaymentStatus, &payment.FundsStatus, &payment.IdempotencyKey,
+		&payment.TenantID, &payment.PaymentStatus, &payment.IdempotencyKey,
 		&payment.CreatedAt, &payment.UpdatedAt,
 	)
 	if err != nil {

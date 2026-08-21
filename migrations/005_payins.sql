@@ -13,7 +13,8 @@ CREATE TABLE payins (
     destination_currency TEXT NOT NULL,
     provider           TEXT NOT NULL,
     provider_payin_id  TEXT,
-    status             TEXT NOT NULL CHECK (status IN ('created','submission_pending','unknown','processing','on_hold','received','succeeded','failed','refunded')),
+    settlement_status  TEXT NOT NULL CHECK (settlement_status IN ('created','submission_pending','unknown','processing','on_hold','received','failed','refunded')),
+    reconciliation_status TEXT NOT NULL DEFAULT 'unmatched' CHECK (reconciliation_status IN ('unmatched','matched','exception')),
     instructions       JSONB NOT NULL,
     provider_payload   JSONB NOT NULL,
     failure_reason     TEXT,
@@ -24,4 +25,4 @@ CREATE TABLE payins (
 );
 
 CREATE INDEX payins_tenant_idx ON payins (tenant_id, created_at, id);
-CREATE INDEX payins_status_idx ON payins (status, updated_at);
+CREATE INDEX payins_status_idx ON payins (settlement_status, updated_at);

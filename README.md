@@ -4,7 +4,7 @@ StableRail is a Go reference implementation of a provider-neutral payment orches
 
 ## Highlights
 
-- Separate payment and funds statuses so delivery outcome never obscures fund disposition
+- Separate payment, settlement, ledger, and reconciliation statuses so business outcomes do not obscure operational or accounting state
 - Immutable, balanced double-entry ledger postings
 - Transactional outbox and inbox with retries, dead-lettering, and redrive
 - Persisted sagas with timeouts, provider returns, compliance holds, and audited manual review
@@ -40,10 +40,10 @@ Every business update and outgoing event commits in one PostgreSQL transaction. 
 | Package | Responsibility |
 | --- | --- |
 | `paymentapi` | HTTP transport, authentication, and tenant/operator endpoints |
-| `paymentcore` | Shared payment, funds, refund, ledger, and destination models, plus direction-neutral payment queries |
-| `paymentcore/payin` | Inbound quote and operation model, saga coordinator, provider-result persistence, and recovery |
-| `paymentcore/payout` | Outbound payment creation, refunds, quotes, saga coordination, provider execution, payout persistence, and recovery |
-| `ledger` | Transactional double-entry payout reservations and releases, inbound pay-in receipts, and provider-return journals |
+| `paymentcore` | Shared payment, funds, quote, execution, refund, history, and direction-neutral payment-query models |
+| `paymentcore/payin` | Inbound quote and operation model, saga coordination, provider execution, and result persistence |
+| `paymentcore/payout` | Outbound creation, refunds, quotes, saga coordination, provider execution, and result persistence |
+| `ledger` | Transactional double-entry payout reservation, settlement, and release; inbound pay-in receipts; and provider-return journals |
 | `policy` | Payment policy evaluation contracts |
 | `reconciliation` | Comparison of payment, ledger, and provider records plus discrepancy resolution |
 | `eventbus` | Shared event envelopes, topic and version contracts, and Kafka producer/consumer adapters |
@@ -52,9 +52,9 @@ Every business update and outgoing event commits in one PostgreSQL transaction. 
 | `settlement/blindpay` | BlindPay client, resource mapping, quote/execution adapters, and webhooks |
 | `workers` | Policy, ledger, and provider command execution plus runtime timeout polling for both settlement directions |
 
-`paymentcore` owns the payment and funds lifecycle, with `payin` and `payout` handling their direction-specific workflows. `eventbus` defines shared events and routing, `workers` executes asynchronous work, and `settlement` provides one interface for provider pay-in and payout capabilities.
+`paymentcore` owns the shared merchant-facing payment lifecycle, with `payin` and `payout` handling their direction-specific workflows. `eventbus` defines shared events and routing, `workers` executes asynchronous work, and settlement providers implement separate quote and execution capabilities for each supported direction.
 
-Pay-in and payout services manage quotes, provider execution, and safe recovery from uncertain outcomes. Provider adapters translate external API responses and webhooks into consistent payment, ledger, and merchant-notification updates.
+Pay-in and payout services manage quotes and provider execution. Their saga coordinators retry uncertain operations with stable idempotency keys. Provider adapters translate external API responses and webhooks into normalized results; payment, ledger, and merchant-notification updates remain owned by StableRail.
 
 ### Kafka topics
 
@@ -64,15 +64,15 @@ All application topic names are defined in `eventbus/topics.go`. Pay-in and payo
 | --- | --- | --- | --- | --- |
 | `payout-events` | `eventbus.PayoutEventsTopic` | Payout services, workers, and provider webhooks | Payout saga coordinator | Internal payout workflow facts |
 | `payin-events` | `eventbus.PayinEventsTopic` | Pay-in services, workers, and provider webhooks | Pay-in saga coordinator | Internal pay-in workflow facts |
-| `payment-events` | `eventbus.PaymentEventsTopic` | Pay-in and payout workflows | Tenant-webhook dispatcher | Merchant-facing payment and funds lifecycle facts |
+| `payment-events` | `eventbus.PaymentEventsTopic` | Pay-in and payout workflows | Tenant-webhook dispatcher | Merchant-facing payment lifecycle facts |
 | `settlement-commands` | `eventbus.SettlementCommandsTopic` | Pay-in and payout saga coordinators | Policy, ledger, and provider command workers | Durable workflow commands for both settlement directions |
 | `stablerail-dead-letter` | `eventbus.DeadLetterTopic` | Outbox relay | Operator inspection and redrive tooling | Events that exhausted outbox publication retries or exceeded the retry age |
 
-Workflow events use direction-specific names such as `payout.created`, `payout.provider_completed`, `payin.created`, and `payin.received`. Merchant integrations receive only the shared `payment.created`, `payment.processing`, `payment.succeeded`, `payment.failed`, and `payment.funds_status_changed` events.
+Workflow events use direction-specific names such as `payout.created`, `payout.provider_completed`, `payin.created`, and `payin.received`. Merchant integrations receive only the shared `payment.created`, `payment.processing`, `payment.succeeded`, and `payment.failed` events.
 
 ## Payment lifecycle
 
-The API exposes two independent dimensions. Payment status has the same shape in both directions, while funds status describes different inbound and outbound dispositions:
+The API exposes `payment_status` as the public business outcome:
 
 ```mermaid
 stateDiagram-v2
@@ -83,46 +83,18 @@ stateDiagram-v2
         processing --> succeeded: recipient paid
         processing --> failed: settlement unsuccessful
     }
-
-    state "Payout funds status" as payout_funds {
-        [*] --> available
-        available --> reserved: ledger reservation
-        reserved --> consumed: payout succeeded
-        reserved --> available: pre-capture failure confirmed
-        reserved --> reserved: payout failed, disposition unresolved
-        reserved --> returned: provider returned captured funds
-    }
-
-    state "Pay-in funds status" as payin_funds {
-        [*] --> pending
-        pending --> received: provider confirms receipt
-        pending --> pending: fails before receipt
-        received --> received: ledger succeeds or disposition is unresolved
-        received --> returned: provider confirms refund
-    }
 ```
 
-Common combinations are:
+Operational and accounting state stays with the subsystem that owns it:
 
-| `payment_status` | `funds_status` | Meaning |
+| State | Owner | Meaning |
 | --- | --- | --- |
-| `created` | `available` | Payout recorded but not reserved |
-| `processing` | `reserved` | Funds committed while the payout runs |
-| `succeeded` | `consumed` | Recipient payout completed |
-| `failed` | `available` | Payout failed before capture |
-| `failed` | `reserved` | Payout failed but disposition remains unresolved |
-| `failed` | `returned` | Provider returned captured payout funds |
-| `created` | `pending` | Pay-in recorded before provider execution |
-| `processing` | `pending` | Pay-in is awaiting incoming funds |
-| `processing` | `received` | Provider received funds and ledger posting is pending |
-| `succeeded` | `received` | Pay-in funds were received and recorded |
-| `failed` | `pending` | Pay-in failed before funds were received |
-| `failed` | `received` | Pay-in failed while received funds remain unresolved |
-| `failed` | `returned` | Provider confirmed that pay-in funds were refunded |
+| `payment_status` | `payments` | Public business outcome: `created`, `processing`, `succeeded`, or `failed` |
+| `settlement_status` | `payins` / `payouts` | Normalized external movement state, including uncertainty, holds, receipt/completion, failure, and return |
+| `ledger_status` | `ledger_transactions` | Accounting recognition: `pending`, `posted`, or `failed` |
+| `reconciliation_status` | `payins` / `payouts` | Agreement with external records: `unmatched`, `matched`, or `exception` |
 
-Before success, BlindPay's external `refunded` payout status maps to `payment_status=failed` and `funds_status=returned`. After success, it creates a separate `payment_returns` record and reversal journal while the original payment remains `payment_status=succeeded` and `funds_status=consumed`.
-
-An ambiguous provider submission remains `payment_status=processing` and `funds_status=reserved`. The uncertainty is recorded on `payouts.provider_status=unknown` until idempotent recovery or a webhook establishes the outcome.
+Balances, reservations, and availability are calculated from posted `ledger_entries`; they are not mutable payment attributes. An ambiguous provider submission remains `payment_status=processing` with `payouts.settlement_status=unknown`, while the posted reservation journal continues to determine availability until a retry, webhook, or reconciliation establishes the outcome.
 
 ### Post-success returns
 
@@ -133,13 +105,13 @@ Payment: created -> processing -> succeeded
 Return:  created -> processing -> succeeded | failed
 ```
 
-The return status domain contains only `created`, `processing`, `succeeded`, and `failed`. The current provider webhook path learns about a return after it has completed externally, so it creates the return directly as `succeeded`; initiated `created` and `processing` transitions are not implemented yet. The return journal debits `cash:operating` for the asset received back and credits `settlement:payable` to restore the obligation. The original payment is not rewritten. StableRail emits an internal `payout.return_completed` event and a merchant-facing `payment.funds_status_changed` event.
+The return status domain contains only `created`, `processing`, `succeeded`, and `failed`. The current provider webhook path learns about a return after it has completed externally, so it creates the return directly as `succeeded`; initiated `created` and `processing` transitions are not implemented yet. The return journal debits `cash:operating` for the asset received back and credits `settlement:payable` to restore the obligation. The original payment is not rewritten. StableRail emits the internal `payout.return_completed` event; return details are read from the separate return operation rather than encoded as payment state.
 
-Merchant-issued refunds are separate linked payments. `POST /v1/payments/{id}/refunds` accepts an idempotency key, a positive amount, a reason, and an optional fresh `payout_quote_id` for BlindPay routing. Partial refunds are supported up to the original payment amount. StableRail creates a new payment, links it through `payment_refunds.refund_payment_id`, binds the payout quote when supplied, and emits `payout.created` for workflow coordination and `payment.created` for merchant notification. From there, policy, ledger reservation, settlement, and failure handling use the ordinary payout workflow; no refund-specific provider operation or reversal journal is involved. The refund response contains `refund_payment_id` but no duplicated status; clients query `GET /v1/payments/{refund_payment_id}` for its payment and funds statuses. The original payment remains `succeeded/consumed`. Provider-originated returns remain separate and continue to use `payment_returns` and reversal accounting.
+Merchant-issued refunds are separate linked payments. `POST /v1/payments/{id}/refunds` accepts an idempotency key, a positive amount, a reason, and an optional fresh `payout_quote_id` for BlindPay routing. Partial refunds are supported up to the original payment amount. StableRail creates a new payment, links it through `payment_refunds.refund_payment_id`, binds the payout quote when supplied, and emits `payout.created` for workflow coordination and `payment.created` for merchant notification. From there, policy, ledger reservation, settlement, and failure handling use the ordinary payout workflow. Refund eligibility is established by the original payment outcome and its posted settlement journal. Provider-originated returns remain separate and continue to use `payment_returns` and reversal accounting.
 
 ## Payout saga lifecycle
 
-The persisted payout saga tracks internal workflow progress in more detail than the public payment and funds statuses:
+The persisted payout saga tracks internal workflow progress in more detail than the public payment status:
 
 ```mermaid
 stateDiagram-v2
@@ -153,7 +125,8 @@ stateDiagram-v2
     awaiting_settlement --> settling_payment: payout.provider_completed / payment.settle
     settling_payment --> completed: payout.completed
 
-    awaiting_settlement --> failed: payout.provider_failed or timeout / payment.fail_reserved
+    awaiting_settlement --> awaiting_settlement: settlement timeout / retry settlement.execute
+    awaiting_settlement --> failed: payout.provider_failed / payment.fail_reserved
     awaiting_settlement --> failed: submission_failed / payment.fail
 
     awaiting_settlement --> returning: payout.provider_returned / ledger.release
@@ -171,9 +144,9 @@ stateDiagram-v2
     manual_review --> returning: operator return / ledger.release
 ```
 
-The saga's `funds_returned` label is persisted internally as `returned`. It is not a payment status: the resulting payment remains `payment_status=failed` while `funds_status=returned`. The transition from `failed` handles a provider return that arrives after a reserved-funds failure was already recorded.
+The saga's `funds_returned` label is workflow state, not a payment status. The resulting payment remains `payment_status=failed`; the posted release journal records the accounting effect. The transition from `failed` handles a provider return that arrives after a reservation-related failure was already recorded.
 
-Timeout handling is conservative: settlement timeouts fail the payment but preserve its reservation, compliance timeouts require manual review, and ambiguous submissions remain in processing until recovery or reconciliation establishes an outcome. A reservation becomes available only after a confirmed pre-capture failure, and becomes returned only after the provider confirms the funds came back.
+Timeout handling is conservative: settlement timeouts retry the idempotent provider command while preserving the reservation, compliance timeouts require manual review, and ambiguous submissions remain in processing until a retry, webhook, or reconciliation establishes an outcome. A reservation becomes available only after a confirmed pre-capture failure, and becomes returned only after the provider confirms the funds came back.
 
 ## Pay-in saga lifecycle
 
@@ -210,13 +183,13 @@ Pay-in policy and compliance waits fail on timeout. Provider execution and ledge
 
 ## Pay-ins and payouts
 
-Pay-ins and payouts are directions of the same public payment resource. Create a direction-aware quote with `POST /v1/payment-quotes` when pricing, FX, fees, or provider routing must be locked, then create the operation with `POST /v1/payments`. Both directions support quoted creation; they may also use direct routing when the provider supports it. A direct pay-in supplies its amount, currency, funding method, and destination account on the payment request. BlindPay still requires a provider quote, so its adapter creates that quote internally before executing a direct pay-in. Creating either direction persists a `created` payment and a transactional outbox event. A dedicated pay-in coordinator sends `payin.execute` through Kafka only after `payin.policy.evaluate` is approved, and the command worker performs the provider call. Provider confirmation moves the pay-in to `received`; the saga then sends `payin.ledger.record`, and only a successful balanced journal advances the pay-in to `succeeded`. Provider instructions such as an ACH memo, bank details, Pix code, or CLABE become available asynchronously; retrieve current state with `GET /v1/payments/{id}`.
+Pay-ins and payouts are directions of the same public payment resource. Create a direction-aware quote with `POST /v1/payment-quotes` when the client needs to preview and lock pricing, FX, fees, or routing, then create the operation with `POST /v1/payments` using its `quote_id`. Both directions also support direct creation. A direct pay-in supplies amount, currency, funding method, and destination account; a direct payout additionally supplies source account and destination instrument. StableRail creates and persists an implicit provider quote before accepting either direct payment, so provider execution always uses a durable `provider_quote_id`. Creating either direction persists a `created` payment and transactional outbox events. A dedicated pay-in coordinator sends `payin.execute` through Kafka only after `payin.policy.evaluate` is approved, and the command worker performs the provider call. Provider confirmation moves the pay-in to `received`; the saga then sends `payin.ledger.record`, and only a successful balanced journal advances the pay-in to `succeeded`. Provider instructions such as an ACH memo, bank details, Pix code, or CLABE become available asynchronously; retrieve current state with `GET /v1/payments/{id}`.
 
 Both direction-specific coordinators store orchestration state in `settlement_sagas`, keyed by payment ID and direction. The provider-facing `payins` and `payouts` tables remain separate because their execution details and provider statuses differ; they are not separate public API resources.
 
-The generic `payin.Provider` boundary uses opaque source-instrument and destination-account IDs resolved through `provider_resources`; provider wallet and bank-account identifiers do not appear in the shared contract. Verified `payin.*` webhooks can advance an executed pay-in to `processing`, `on_hold`, `received`, `failed`, or `refunded`. The saga turns `received` into `succeeded` only after the ledger command debits `cash:operating` and credits `settlement:payable`. A refund after that successful journal posts the inverse journal; a refund before ledger completion has no completed pay-in journal to reverse. Early webhooks are retained and reconciled after the local pay-in becomes visible.
+Direction-specific quote boundaries use opaque StableRail resource IDs resolved through `provider_resources`; provider wallet and bank-account identifiers do not appear in the shared payment API. Both execution boundaries receive only a stable idempotency key and provider quote ID. Verified `payin.*` webhooks can advance an executed pay-in to `processing`, `on_hold`, `received`, `failed`, or `refunded`. The saga turns `received` into `succeeded` only after the ledger command debits `cash:operating` and credits `settlement:payable`. A refund after that successful journal posts the inverse journal; a refund before ledger completion has no completed pay-in journal to reverse. Early webhooks are retained and reconciled after the local pay-in becomes visible.
 
-Pay-in and payout records own their source, destination, method, and monetary snapshot. At the generic data-model level, a quote is an optional commercial attachment that locks fees, FX, and source/destination amounts. Accepting a quote copies those terms into the operation, so lifecycle processing and accounting never depend on joining back to the quote. The schema permits providers that execute without a quote. The current pay-in HTTP workflow and BlindPay adapter remain quote-first.
+Pay-in and payout records own their source, destination, method, and monetary snapshot. A quote locks fees, FX, provider routing, and source/destination amounts. Clients may supply an explicit quote or use direct creation, but StableRail persists a quote in both cases and provider execution always references it. Accepting the quote copies its terms into the direction-specific operation snapshot.
 
 ## Provider resources
 
@@ -242,7 +215,7 @@ Migrations are ordered by dependency. Provider-neutral platform and workflow sch
 
 | Migration | Main purpose |
 | --- | --- |
-| [001_payment_core.sql](migrations/001_payment_core.sql) | Payments, shared quotes and provider resources, audit/timeline, destinations, and refunds |
+| [001_payment_core.sql](migrations/001_payment_core.sql) | Payments, shared quotes and provider resources, audit/timeline history, and refunds |
 | [002_eventing.sql](migrations/002_eventing.sql) | Transactional outbox and consumer inbox |
 | [003_payment_workflow.sql](migrations/003_payment_workflow.sql) | Direction-aware settlement sagas, manual review actions, and settlement submission records |
 | [004_payouts.sql](migrations/004_payouts.sql) | Payout provider operations linked to payments |
@@ -303,14 +276,26 @@ curl -X POST http://localhost:8080/v1/operator/tenants/tenant-1/api-keys \
   -d '{"name":"local development"}'
 ```
 
-Save the returned `srk_...` value as `STABLERAIL_API_KEY`, then create and inspect a payment:
+Save the returned `srk_...` value as `STABLERAIL_API_KEY`. For the mock provider, seed provider-neutral development resources:
+
+```bash
+docker compose exec -T postgres psql -U stablerail -d stablerail -c "
+INSERT INTO provider_resources
+    (id, tenant_id, provider, resource_type, provider_reference, metadata, created_at, updated_at)
+VALUES
+    ('acct_local', 'tenant-1', 'mock', 'account', 'mock_wallet', '{\"kind\":\"wallet\"}', now(), now()),
+    ('instrument_local', 'tenant-1', 'mock', 'payment_instrument', 'mock_bank', '{\"kind\":\"bank_account\"}', now(), now())
+ON CONFLICT (id) DO NOTHING;"
+```
+
+Then create and inspect a payment:
 
 ```bash
 curl -X POST http://localhost:8080/v1/payments \
   -H "Authorization: Bearer $STABLERAIL_API_KEY" \
   -H 'Content-Type: application/json' \
   -H 'Idempotency-Key: request-123' \
-  -d '{"direction":"payout","external_reference":"order-123","currency":"USD","amount_minor":2500}'
+  -d '{"direction":"payout","external_reference":"order-123","currency":"USD","amount_minor":2500,"funding_method":"bank","source_account_id":"acct_local","destination_instrument_id":"instrument_local"}'
 
 curl -H "Authorization: Bearer $STABLERAIL_API_KEY" \
   http://localhost:8080/v1/payments/PAYMENT_ID/timeline
@@ -341,15 +326,15 @@ Stop the environment with `docker compose down`. Add `--volumes` to permanently 
 | `GET /readyz` | PostgreSQL readiness check |
 | `GET /metrics` | Prometheus metrics |
 
-Tenant endpoints require `Authorization: Bearer <api-key>`. Operator endpoints are available only when `STABLERAIL_OPERATOR_TOKEN` is set and require that token. Payment reads are tenant-scoped. `direction` should be supplied explicitly; omission currently defaults to `payout` for backward compatibility.
+Tenant endpoints require `Authorization: Bearer <api-key>`. Operator endpoints are available only when `STABLERAIL_OPERATOR_TOKEN` is set and require that token. Payment reads are tenant-scoped. `direction` is required and must be `payin` or `payout`.
 
-`POST /v1/payments` returns `202 Accepted` for a created pay-in and `201 Created` for a created payout. Provider instructions and later lifecycle statuses are asynchronous; there is no provider network call in the HTTP transaction.
+`POST /v1/payments` returns `202 Accepted` for both directions. Provider instructions and later lifecycle statuses are asynchronous. Direct creation may create a provider quote before the payment is persisted; provider execution itself remains asynchronous.
 
 ## Settlement providers
 
-The application selects one complete `settlement.SettlementProvider`, which composes `payout.Provider` and `payin.Provider`. Those capabilities expose generic quotes and execution, while workers depend on the application service they use. The runtime includes a deterministic mock provider and a BlindPay adapter with durable payout submission, pay-ins, signed webhooks, compliance holds, reconciliation, and ambiguous-outcome recovery.
+The application selects one `settlement.SettlementProvider`, which composes direction-specific `QuoteProvider` and `ExecutionProvider` capabilities. Quote requests carry provider-neutral route IDs. Both execution capabilities use the shared `paymentcore.ExecuteRequest`, containing only an idempotency key and provider quote ID. The runtime includes a deterministic mock provider and a BlindPay adapter with durable payout submission, pay-ins, signed webhooks, compliance holds, reconciliation, and coordinator-driven ambiguous-outcome retries.
 
-BlindPay refund semantics depend on direction and timing. A payout refunded before success becomes `payment_status=failed` with `funds_status=returned`; after payout success, returned funds are recorded as a separate `payment_returns` operation while the original payment remains `succeeded/consumed`. A refunded pay-in becomes `failed/returned`. None of these provider-originated events is a merchant-issued refund.
+BlindPay refund semantics depend on direction and timing. A payout or pay-in refunded before success becomes `payment_status=failed`, while its direction record and journals retain settlement and accounting detail. After payout success, returned funds are recorded as a separate `payment_returns` operation and reversal journal while the original payment remains `succeeded`. None of these provider-originated events is a merchant-issued refund.
 
 Configure the BlindPay provider with:
 
@@ -365,7 +350,7 @@ export STABLERAIL_BLINDPAY_MANAGED_WALLET_ADDRESS='0x...'
 
 Register the public HTTPS URL `https://your-host/v1/providers/blindpay/webhooks` in the BlindPay dashboard. This is an inbound provider endpoint, not a client API. StableRail verifies its Svix signature headers before storing or processing a delivery.
 
-StableRail persists a payout submission attempt before calling BlindPay. If the response is lost, recovery retries with the original provider idempotency key and reconciliation confirms the result. A verified webhook or reconciliation result, rather than the initial HTTP response alone, determines the final payment and funds statuses.
+StableRail persists a payout submission attempt before calling BlindPay. If the response is lost, the saga coordinator re-enqueues execution with the payment's original provider idempotency key; reconciliation can independently confirm the result. A verified webhook or reconciliation result, rather than the initial HTTP response alone, determines the final payment and settlement statuses.
 
 See [BlindPay lifecycle testing](docs/testing/blindpay-payment-lifecycle.md) for provider scenarios and expected accounting behavior.
 
@@ -400,6 +385,6 @@ Set `STABLERAIL_E2E_KEEP_STACK=1` to retain its isolated containers. See the [lo
 
 ## Operational status
 
-The core payment, saga, managed-wallet payout, pay-in, merchant-issued refund, provider-return, webhook, reconciliation, and manual-review paths are implemented. Merchant refunds are linked payments and reuse the ordinary payout saga; provider-originated returns remain separate operations with reversal accounting. Remaining production work includes distributed tracing, alert integrations, credential rotation, provider rate limiting, rollout controls, direct quote-free pay-in APIs, and external-wallet payout submission.
+The core payment, saga, managed-wallet payout, pay-in, merchant-issued refund, provider-return, webhook, reconciliation, and manual-review paths are implemented. Merchant refunds are linked payments and reuse the ordinary payout saga; provider-originated returns remain separate operations with reversal accounting. Remaining production work includes distributed tracing, alert integrations, credential rotation, provider rate limiting, rollout controls, and external-wallet payout submission.
 
 The mock provider and local Compose environment are intended for development and verification. A production deployment still requires environment-specific security controls, topic provisioning, monitoring, and a limited provider pilot.

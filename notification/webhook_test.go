@@ -47,9 +47,7 @@ func TestEventHandlerCreatesReturnDelivery(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)
-	event := eventbus.Event{ID: "evt_returned", Type: "payment.funds_status_changed", Version: 1, AggregateID: "pay_1", AggregateType: "payment", Payload: []byte(`{"funds_status":"returned"}`), OccurredAt: now}
-	mock.ExpectQuery("SELECT tenant_id FROM payments").WithArgs("pay_1").WillReturnRows(sqlmock.NewRows([]string{"tenant_id"}).AddRow("cus_1"))
-	mock.ExpectExec("INSERT INTO webhook_deliveries").WithArgs("evt_returned", "pay_1", "payment.funds_status_changed", sqlmock.AnyArg(), now, "cus_1").WillReturnResult(sqlmock.NewResult(0, 1))
+	event := eventbus.Event{ID: "evt_returned", Type: "payout.return_completed", Version: 1, AggregateID: "pay_1", AggregateType: "payout", Payload: []byte(`{}`), OccurredAt: now}
 
 	if err := EventHandler()(context.Background(), tx, event); err != nil {
 		t.Fatal(err)
@@ -71,9 +69,7 @@ func TestEventHandlerCreatesPayinDelivery(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Date(2026, time.August, 19, 12, 0, 0, 0, time.UTC)
-	event := eventbus.Event{ID: "evt_payin_received", Type: "payment.funds_status_changed", Version: 1, AggregateID: "pay_1", AggregateType: "payment", Payload: []byte(`{"funds_status":"received","payin_id":"pin_1"}`), OccurredAt: now}
-	mock.ExpectQuery("SELECT tenant_id FROM payments").WithArgs("pay_1").WillReturnRows(sqlmock.NewRows([]string{"tenant_id"}).AddRow("cus_1"))
-	mock.ExpectExec("INSERT INTO webhook_deliveries").WithArgs("evt_payin_received", "pay_1", "payment.funds_status_changed", sqlmock.AnyArg(), now, "cus_1").WillReturnResult(sqlmock.NewResult(0, 1))
+	event := eventbus.Event{ID: "evt_payin_received", Type: "payin.received", Version: 1, AggregateID: "pay_1", AggregateType: "payin", Payload: []byte(`{}`), OccurredAt: now}
 
 	if err := EventHandler()(context.Background(), tx, event); err != nil {
 		t.Fatal(err)

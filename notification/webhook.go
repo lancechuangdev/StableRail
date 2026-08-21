@@ -83,7 +83,7 @@ func EventHandler() func(context.Context, *sql.Tx, eventbus.Event) error {
 			return errors.New("webhook transaction is required")
 		}
 		switch event.Type {
-		case "payment.created", "payment.processing", "payment.succeeded", "payment.failed", "payment.funds_status_changed":
+		case "payment.created", "payment.processing", "payment.succeeded", "payment.failed":
 		default:
 			return nil
 		}

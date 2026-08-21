@@ -43,9 +43,8 @@ func (s *Service) CreateRefund(ctx context.Context, paymentID, tenantID, idempot
 	var paymentTenant, externalReference, currency string
 	var paymentAmount int64
 	var paymentStatus PaymentStatus
-	var fundsStatus FundsStatus
-	err = tx.QueryRowContext(ctx, `SELECT tenant_id,external_reference,currency,amount_minor,payment_status,funds_status FROM payments WHERE id=$1 FOR UPDATE`, paymentID).
-		Scan(&paymentTenant, &externalReference, &currency, &paymentAmount, &paymentStatus, &fundsStatus)
+	err = tx.QueryRowContext(ctx, `SELECT tenant_id,external_reference,currency,amount_minor,payment_status FROM payments WHERE id=$1 FOR UPDATE`, paymentID).
+		Scan(&paymentTenant, &externalReference, &currency, &paymentAmount, &paymentStatus)
 	if errors.Is(err, sql.ErrNoRows) || (err == nil && paymentTenant != tenantID) {
 		return nil, fmt.Errorf("%w: %s", ErrPaymentNotFound, paymentID)
 	}
@@ -69,8 +68,12 @@ func (s *Service) CreateRefund(ctx context.Context, paymentID, tenantID, idempot
 	}
 
 	// Verify that the original payment is refundable
-	if paymentStatus != PaymentStatusSucceeded || fundsStatus != FundsStatusConsumed {
-		return nil, fmt.Errorf("%w: payment must be succeeded with consumed funds", ErrPaymentNotRefundable)
+	var settled bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM ledger_transactions WHERE payment_id=$1 AND event_type='payment.succeeded' AND ledger_status='posted')`, paymentID).Scan(&settled); err != nil {
+		return nil, fmt.Errorf("inspect settlement journal: %w", err)
+	}
+	if paymentStatus != PaymentStatusSucceeded || !settled {
+		return nil, fmt.Errorf("%w: payment must be succeeded with a posted settlement journal", ErrPaymentNotRefundable)
 	}
 
 	// Calculate the remaining refundable amount
@@ -112,7 +115,7 @@ func (s *Service) CreateRefund(ctx context.Context, paymentID, tenantID, idempot
 	}
 	now := s.now()
 	refundReference := externalReference + ":refund:" + refundID
-	if _, err := tx.ExecContext(ctx, `INSERT INTO payments(id,direction,external_reference,currency,amount_minor,tenant_id,payment_status,funds_status,idempotency_key,created_at,updated_at) VALUES($1,'payout',$2,$3,$4,$5,$6,$7,$8,$9,$9)`, refundPaymentID, refundReference, currency, amountMinor, tenantID, PaymentStatusCreated, FundsStatusAvailable, idempotencyKey, now); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO payments(id,direction,external_reference,currency,amount_minor,tenant_id,payment_status,idempotency_key,created_at,updated_at) VALUES($1,'payout',$2,$3,$4,$5,$6,$7,$8,$8)`, refundPaymentID, refundReference, currency, amountMinor, tenantID, PaymentStatusCreated, idempotencyKey, now); err != nil {
 		return nil, fmt.Errorf("insert refund payment: %w", err)
 	}
 
@@ -136,7 +139,7 @@ func (s *Service) CreateRefund(ctx context.Context, paymentID, tenantID, idempot
 		paymentcore.TimelineRecord{PaymentID: refundPaymentID, PaymentStatus: PaymentStatusCreated, Note: "refund payment created", At: now}); err != nil {
 		return nil, err
 	}
-	payload, err := json.Marshal(map[string]any{"external_reference": refundReference, "currency": currency, "amount_minor": amountMinor, "tenant_id": tenantID, "payment_status": PaymentStatusCreated, "funds_status": FundsStatusAvailable, "refund_id": refundID, "original_payment_id": paymentID})
+	payload, err := json.Marshal(map[string]any{"external_reference": refundReference, "currency": currency, "amount_minor": amountMinor, "tenant_id": tenantID, "payment_status": PaymentStatusCreated, "refund_id": refundID, "original_payment_id": paymentID})
 	if err != nil {
 		return nil, fmt.Errorf("encode refund payment event: %w", err)
 	}

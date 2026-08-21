@@ -29,7 +29,7 @@ func TestLOCAL001SuccessfulPaymentLifecycle(t *testing.T) {
 		t.Fatalf("create payment status=%d", status)
 	}
 	succeeded := tenant.WaitForPaymentStatus(t, payment.ID, "succeeded")
-	if succeeded.TenantID != tenant.ID || succeeded.AmountMinor != 2500 || succeeded.Currency != "USD" || succeeded.FundsStatus != "consumed" {
+	if succeeded.TenantID != tenant.ID || succeeded.AmountMinor != 2500 || succeeded.Currency != "USD" {
 		t.Fatalf("unexpected succeeded payment: %+v", succeeded)
 	}
 
@@ -164,9 +164,6 @@ func TestLOCAL005SettlementFailureKeepsFundsReserved(t *testing.T) {
 		t.Fatalf("create status=%d", status)
 	}
 	failed := tenant.WaitForPaymentStatus(t, payment.ID, "failed")
-	if failed.FundsStatus != "reserved" {
-		t.Fatalf("funds_status=%s, want reserved", failed.FundsStatus)
-	}
 	env.WaitForSagaState(t, payment.ID, "failed")
 	env.WaitForCount(t, `SELECT count(*) FROM ledger_transactions WHERE payment_id=$1 AND event_type='payment.processing'`, 1, payment.ID)
 	env.WaitForCount(t, `SELECT count(*) FROM ledger_transactions WHERE payment_id=$1 AND event_type='payment.released'`, 0, payment.ID)

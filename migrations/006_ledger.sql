@@ -12,6 +12,7 @@ CREATE TABLE ledger_transactions (
     id           TEXT PRIMARY KEY,
     payment_id   TEXT NOT NULL REFERENCES payments(id),
     event_type   TEXT NOT NULL,
+    ledger_status TEXT NOT NULL DEFAULT 'posted' CHECK (ledger_status IN ('pending','posted','failed')),
     occurred_at  TIMESTAMPTZ NOT NULL,
     UNIQUE (payment_id, event_type)
 );

@@ -37,7 +37,6 @@ type Payment struct {
 	AmountMinor       int64  `json:"amount_minor"`
 	TenantID          string `json:"tenant_id"`
 	PaymentStatus     string `json:"payment_status"`
-	FundsStatus       string `json:"funds_status"`
 }
 
 type TimelineEntry struct {

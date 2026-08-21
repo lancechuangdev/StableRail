@@ -24,9 +24,9 @@ func NewRepository(db *sql.DB) (*Repository, error) {
 func (r *Repository) GetPayment(ctx context.Context, paymentID string) (*Payment, error) {
 	p := &Payment{}
 	err := r.db.QueryRowContext(ctx, `SELECT id, direction, external_reference, currency, amount_minor,
-		tenant_id, payment_status, funds_status, idempotency_key, created_at, updated_at FROM payments WHERE id = $1`, paymentID).
+		tenant_id, payment_status, idempotency_key, created_at, updated_at FROM payments WHERE id = $1`, paymentID).
 		Scan(&p.ID, &p.Direction, &p.ExternalReference, &p.Currency, &p.AmountMinor, &p.TenantID,
-			&p.PaymentStatus, &p.FundsStatus, &p.IdempotencyKey, &p.CreatedAt, &p.UpdatedAt)
+			&p.PaymentStatus, &p.IdempotencyKey, &p.CreatedAt, &p.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("%w: %s", ErrPaymentNotFound, paymentID)
 	}
@@ -39,12 +39,12 @@ func (r *Repository) GetPayment(ctx context.Context, paymentID string) (*Payment
 	var operation SettlementOperation
 	if p.Direction == PaymentDirectionPayin {
 		var instructions []byte
-		err = r.db.QueryRowContext(ctx, `SELECT provider,COALESCE(provider_payin_id,''),status,instructions FROM payins WHERE payment_id=$1`, paymentID).Scan(&operation.Provider, &operation.ProviderReference, &operation.Status, &instructions)
+		err = r.db.QueryRowContext(ctx, `SELECT provider,COALESCE(provider_payin_id,''),settlement_status,reconciliation_status,instructions FROM payins WHERE payment_id=$1`, paymentID).Scan(&operation.Provider, &operation.ProviderReference, &operation.Status, &operation.ReconciliationStatus, &instructions)
 		if err == nil && len(instructions) > 0 {
 			_ = json.Unmarshal(instructions, &operation.Instructions)
 		}
 	} else {
-		err = r.db.QueryRowContext(ctx, `SELECT provider,COALESCE(provider_payout_id,''),provider_status FROM payouts WHERE payment_id=$1`, paymentID).Scan(&operation.Provider, &operation.ProviderReference, &operation.Status)
+		err = r.db.QueryRowContext(ctx, `SELECT provider,COALESCE(provider_payout_id,''),settlement_status,reconciliation_status FROM payouts WHERE payment_id=$1`, paymentID).Scan(&operation.Provider, &operation.ProviderReference, &operation.Status, &operation.ReconciliationStatus)
 	}
 	if err == nil {
 		p.Settlement = &operation

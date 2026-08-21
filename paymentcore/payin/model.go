@@ -15,7 +15,6 @@ const (
 	StatusProcessing PayinStatus = "processing"
 	StatusOnHold     PayinStatus = "on_hold"
 	StatusReceived   PayinStatus = "received"
-	StatusSucceeded  PayinStatus = "succeeded"
 	StatusFailed     PayinStatus = "failed"
 	StatusRefunded   PayinStatus = "refunded"
 )
@@ -51,7 +50,7 @@ type Payin struct {
 	SourceCurrency         string          `json:"source_currency"`
 	DestinationAmountMinor int64           `json:"destination_amount_minor"`
 	DestinationCurrency    string          `json:"destination_currency"`
-	Status                 PayinStatus     `json:"status"`
+	Status                 PayinStatus     `json:"settlement_status"`
 	Instructions           json.RawMessage `json:"instructions"`
 	CreatedAt              time.Time       `json:"created_at"`
 	UpdatedAt              time.Time       `json:"updated_at"`

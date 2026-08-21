@@ -164,11 +164,9 @@ func (h *CommandHandler) Handle(ctx context.Context, tx *sql.Tx, event eventbus.
 		}
 		return h.enqueueReply(ctx, tx, event, payload, "payout.completed")
 	case "payment.fail", "payment.fail_reserved", "payment.return":
-		status, fundsStatus, eventName, message := paymentcore.PaymentStatusFailed, paymentcore.FundsStatusAvailable, "failed", payload.Reason
-		if event.Type == "payment.fail_reserved" {
-			fundsStatus = paymentcore.FundsStatusReserved
-		} else if event.Type == "payment.return" {
-			fundsStatus, eventName = paymentcore.FundsStatusReturned, "returned"
+		status, eventName, message := paymentcore.PaymentStatusFailed, "failed", payload.Reason
+		if event.Type == "payment.return" {
+			eventName = "returned"
 			if message == "" {
 				message = "provider returned payout funds"
 			}
@@ -176,9 +174,9 @@ func (h *CommandHandler) Handle(ctx context.Context, tx *sql.Tx, event eventbus.
 		now := h.now()
 		predicate := "payment_status NOT IN ('succeeded','failed')"
 		if event.Type == "payment.return" {
-			predicate = "payment_status='failed' AND funds_status='reserved'"
+			predicate = "payment_status='failed' AND EXISTS (SELECT 1 FROM ledger_transactions WHERE payment_id=payments.id AND event_type='payment.released' AND ledger_status='posted')"
 		}
-		result, err := tx.ExecContext(ctx, `UPDATE payments SET payment_status=$1, funds_status=$2, updated_at=$3 WHERE id=$4 AND `+predicate, status, fundsStatus, now, payload.PaymentID)
+		result, err := tx.ExecContext(ctx, `UPDATE payments SET payment_status=$1, updated_at=$2 WHERE id=$3 AND `+predicate, status, now, payload.PaymentID)
 		if err != nil {
 			return fmt.Errorf("record payment outcome: %w", err)
 		}
@@ -234,16 +232,11 @@ func (h *CommandHandler) enqueueReply(ctx context.Context, tx *sql.Tx, caused ev
 	bodyFields := map[string]string{"correlation_id": p.CorrelationID, "caused_by_event_id": caused.ID, "reason": p.Reason}
 	switch reply {
 	case "payout.completed":
-		bodyFields["payment_status"], bodyFields["funds_status"] = "succeeded", "consumed"
+		bodyFields["payment_status"] = "succeeded"
 	case "payout.failed":
 		bodyFields["payment_status"] = "failed"
-		if caused.Type == "payment.fail_reserved" {
-			bodyFields["funds_status"] = "reserved"
-		} else {
-			bodyFields["funds_status"] = "available"
-		}
 	case "payout.funds_returned":
-		bodyFields["payment_status"], bodyFields["funds_status"] = "failed", "returned"
+		bodyFields["payment_status"] = "failed"
 	}
 	body, _ := json.Marshal(bodyFields)
 	version := map[string]int{"payout.policy.approved": eventbus.PayoutPolicyApprovedVersion, "payout.policy.rejected": eventbus.PayoutPolicyRejectedVersion, "payout.funds_reserved": eventbus.PayoutFundsReservedVersion, "payout.ledger_failed": eventbus.PayoutLedgerFailedVersion, "payout.funds_released": eventbus.PayoutFundsReleasedVersion, "payout.provider_completed": eventbus.PayoutProviderCompletedVersion, "payout.provider_failed": eventbus.PayoutProviderFailedVersion, "payout.provider_returned": eventbus.PayoutProviderReturnedVersion, "payout.on_hold": eventbus.PayoutOnHoldVersion, "payout.completed": eventbus.PayoutCompletedVersion, "payout.failed": eventbus.PayoutFailedVersion, "payout.funds_returned": eventbus.PayoutFundsReturnedVersion}[reply]
@@ -256,7 +249,6 @@ func (h *CommandHandler) enqueueReply(ctx context.Context, tx *sql.Tx, caused ev
 		"payout.funds_reserved": "payment.processing",
 		"payout.completed":      "payment.succeeded",
 		"payout.failed":         "payment.failed",
-		"payout.funds_returned": "payment.funds_status_changed",
 	}[reply]
 	if publicType == "" {
 		return nil
@@ -265,7 +257,7 @@ func (h *CommandHandler) enqueueReply(ctx context.Context, tx *sql.Tx, caused ev
 	if err != nil {
 		return err
 	}
-	publicVersion := map[string]int{"payment.processing": eventbus.PaymentProcessingVersion, "payment.succeeded": eventbus.PaymentSucceededVersion, "payment.failed": eventbus.PaymentFailedVersion, "payment.funds_status_changed": eventbus.PaymentFundsStatusChangedVersion}[publicType]
+	publicVersion := map[string]int{"payment.processing": eventbus.PaymentProcessingVersion, "payment.succeeded": eventbus.PaymentSucceededVersion, "payment.failed": eventbus.PaymentFailedVersion}[publicType]
 	if _, err := tx.ExecContext(ctx, `INSERT INTO outbox_events(id,topic,event_type,event_version,aggregate_id,aggregate_type,payload,occurred_at) VALUES($1,$2,$3,$4,$5,'payment',$6,$7)`, publicID, eventbus.PaymentEventsTopic, publicType, publicVersion, p.PaymentID, body, now); err != nil {
 		return fmt.Errorf("enqueue %s: %w", publicType, err)
 	}

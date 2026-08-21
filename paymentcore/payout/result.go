@@ -52,7 +52,7 @@ func (s *Service) ApplyResult(ctx context.Context, tx *sql.Tx, paymentID, comman
 }
 
 func (s *Service) recordError(ctx context.Context, paymentID, status string, cause error) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE payouts SET provider_status=$1,last_error=$2,updated_at=$3 WHERE payment_id=$4 AND provider_status IN ('submission_pending','unknown')`, status, cause.Error(), s.now(), paymentID)
+	_, err := s.db.ExecContext(ctx, `UPDATE payouts SET settlement_status=$1,last_error=$2,updated_at=$3 WHERE payment_id=$4 AND settlement_status IN ('submission_pending','unknown')`, status, cause.Error(), s.now(), paymentID)
 	return err
 }
 

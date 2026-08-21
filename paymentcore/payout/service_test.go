@@ -51,7 +51,6 @@ func TestServiceCommitsAttemptBeforeProviderExecution(t *testing.T) {
 	mock.ExpectExec("INSERT INTO payouts").WithArgs("pay_test", "quote_test", "tenant_test", "account_test", "instrument_test", "ach", int64(100), "USDB", int64(90), "USD", "blindpay", "idem_test", now).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 	mock.ExpectExec("UPDATE payouts SET provider_payout_id").WithArgs("po_test", "processing", []byte(`{"id":"po_test"}`), now, "pay_test").WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectExec("UPDATE payments SET funds_status").WithArgs("reserved", now, "pay_test").WillReturnResult(sqlmock.NewResult(0, 1))
 
 	_, err = service.ExecutePayout(context.Background(), "pay_test")
 	if err != nil {
@@ -154,7 +153,7 @@ func TestServiceRecordsAmbiguousProviderOutcome(t *testing.T) {
 	mock.ExpectQuery("SELECT q.id,q.provider_quote_id").WillReturnRows(quoteRows())
 	mock.ExpectExec("INSERT INTO payouts").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
-	mock.ExpectExec("UPDATE payouts SET provider_status").WithArgs("unknown", "connection reset", now, "pay_test").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("UPDATE payouts SET settlement_status").WithArgs("unknown", "connection reset", now, "pay_test").WillReturnResult(sqlmock.NewResult(0, 1))
 
 	_, err = service.executePayout(context.Background(), executionRequest{paymentID: "pay_test", idempotencyKey: "idem_test"})
 	if !errors.Is(err, ErrSubmissionUnknown) {

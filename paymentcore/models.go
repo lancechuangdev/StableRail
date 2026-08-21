@@ -22,9 +22,6 @@ const (
 	PaymentStatusFailed     PaymentStatus = "failed"
 )
 
-// FundsStatus represents the disposition of funds for a payment.
-type FundsStatus string
-
 type PaymentDirection string
 
 const (
@@ -32,16 +29,7 @@ const (
 	PaymentDirectionPayout PaymentDirection = "payout"
 )
 
-const (
-	FundsStatusAvailable FundsStatus = "available"
-	FundsStatusReserved  FundsStatus = "reserved"
-	FundsStatusConsumed  FundsStatus = "consumed"
-	FundsStatusReturned  FundsStatus = "returned"
-	FundsStatusPending   FundsStatus = "pending"
-	FundsStatusReceived  FundsStatus = "received"
-)
-
-// Payment represents a payment intent and its ledger state.
+// Payment represents the merchant-facing business outcome of a payment.
 type Payment struct {
 	ID                string               `json:"id"`
 	Direction         PaymentDirection     `json:"direction"`
@@ -50,7 +38,6 @@ type Payment struct {
 	AmountMinor       int64                `json:"amount_minor"` // The payment amount expressed in the currency’s smallest unit
 	TenantID          string               `json:"tenant_id"`
 	PaymentStatus     PaymentStatus        `json:"payment_status"`
-	FundsStatus       FundsStatus          `json:"funds_status"`
 	LedgerEntries     []LedgerEntry        `json:"ledger_entries,omitempty"`
 	AuditLog          []AuditEvent         `json:"audit_log,omitempty"`
 	Timeline          []TimelineEntry      `json:"timeline,omitempty"`
@@ -75,10 +62,11 @@ type Refund struct {
 // SettlementOperation exposes provider execution state without making payins
 // and payouts separate public resources.
 type SettlementOperation struct {
-	Provider          string `json:"provider"`
-	ProviderReference string `json:"provider_reference,omitempty"`
-	Status            string `json:"status"`
-	Instructions      any    `json:"instructions,omitempty"`
+	Provider             string `json:"provider"`
+	ProviderReference    string `json:"provider_reference,omitempty"`
+	Status               string `json:"settlement_status"`
+	ReconciliationStatus string `json:"reconciliation_status"`
+	Instructions         any    `json:"instructions,omitempty"`
 }
 
 type AccountType string

@@ -60,6 +60,12 @@ func (r *Reconciler) RunOnce(ctx context.Context) (int, error) {
 		_, _ = tx.ExecContext(ctx, `UPDATE reconciliation_runs SET completed_at=$1,error_message=$2 WHERE id=$3`, r.now(), err.Error(), runID)
 		return 0, err
 	}
+	if _, err = tx.ExecContext(ctx, `UPDATE payins SET reconciliation_status='matched'`); err != nil {
+		return 0, fmt.Errorf("mark payins reconciled: %w", err)
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE payouts SET reconciliation_status='matched'`); err != nil {
+		return 0, fmt.Errorf("mark payouts reconciled: %w", err)
+	}
 	for _, f := range findings {
 		details, e := json.Marshal(f.Details)
 		if e != nil {
@@ -69,6 +75,14 @@ func (r *Reconciler) RunOnce(ctx context.Context) (int, error) {
 		VALUES($1,$2,NULLIF($3,''),$4,'open',$5,$5,$6) ON CONFLICT(fingerprint) DO UPDATE SET kind=EXCLUDED.kind,payment_id=EXCLUDED.payment_id,details=EXCLUDED.details,status='open',last_detected_at=EXCLUDED.last_detected_at,last_seen_run_id=EXCLUDED.last_seen_run_id,resolved_at=NULL,resolved_by=NULL,resolution_note=NULL`, f.Fingerprint, f.Kind, f.PaymentID, details, now, runID)
 		if e != nil {
 			return 0, fmt.Errorf("record discrepancy: %w", e)
+		}
+		if f.PaymentID != "" {
+			if _, e = tx.ExecContext(ctx, `UPDATE payins SET reconciliation_status='exception' WHERE payment_id=$1`, f.PaymentID); e != nil {
+				return 0, e
+			}
+			if _, e = tx.ExecContext(ctx, `UPDATE payouts SET reconciliation_status='exception' WHERE payment_id=$1`, f.PaymentID); e != nil {
+				return 0, e
+			}
 		}
 	}
 	if _, err = tx.ExecContext(ctx, `UPDATE reconciliation_discrepancies SET status='resolved',resolved_at=$1,resolved_by='system',resolution_note='no longer detected' WHERE status='open' AND last_seen_run_id<>$2`, now, runID); err != nil {
@@ -128,7 +142,7 @@ func find(ctx context.Context, tx *sql.Tx) ([]Finding, error) {
 			rows.Close()
 			return nil, err
 		}
-		out = append(out, Finding{"settlement:" + payment, "settlement_status_mismatch", payment, map[string]any{"payment_status": paymentStatus, "provider_status": providerStatus, "provider_reference": reference}})
+		out = append(out, Finding{"settlement:" + payment, "settlement_status_mismatch", payment, map[string]any{"payment_status": paymentStatus, "settlement_status": providerStatus, "provider_reference": reference}})
 	}
 	if err := rows.Close(); err != nil {
 		return nil, err
@@ -136,16 +150,13 @@ func find(ctx context.Context, tx *sql.Tx) ([]Finding, error) {
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	rows, err = tx.QueryContext(ctx, `SELECT p.id,p.payment_status,b.provider_status,COALESCE(b.provider_payout_id,'')
+	rows, err = tx.QueryContext(ctx, `SELECT p.id,p.payment_status,b.settlement_status,COALESCE(b.provider_payout_id,'')
 		FROM payments p JOIN payouts b ON b.payment_id=p.id
-		WHERE (b.provider_status='completed' AND p.payment_status<>'succeeded')
-		   OR (b.provider_status='refunded' AND NOT (
-		       (p.payment_status='failed' AND p.funds_status='returned') OR
-		       (p.payment_status='succeeded' AND p.funds_status='consumed' AND EXISTS (
-		           SELECT 1 FROM payment_returns r WHERE r.payment_id=p.id AND r.status='succeeded'
-		       ))
+		WHERE (b.settlement_status='completed' AND p.payment_status<>'succeeded')
+		   OR (b.settlement_status='refunded' AND NOT EXISTS (
+		       SELECT 1 FROM payment_returns r WHERE r.payment_id=p.id AND r.status='succeeded'
 		   ))
-		   OR (b.provider_status='failed' AND p.payment_status<>'failed')`)
+		   OR (b.settlement_status='failed' AND p.payment_status<>'failed')`)
 	if err != nil {
 		return nil, fmt.Errorf("compare BlindPay payout states: %w", err)
 	}
@@ -155,7 +166,7 @@ func find(ctx context.Context, tx *sql.Tx) ([]Finding, error) {
 			rows.Close()
 			return nil, err
 		}
-		out = append(out, Finding{"blindpay:" + payment, "blindpay_status_mismatch", payment, map[string]any{"payment_status": paymentStatus, "provider_status": providerStatus, "provider_reference": reference}})
+		out = append(out, Finding{"blindpay:" + payment, "blindpay_status_mismatch", payment, map[string]any{"payment_status": paymentStatus, "settlement_status": providerStatus, "provider_reference": reference}})
 	}
 	if err := rows.Close(); err != nil {
 		return nil, err

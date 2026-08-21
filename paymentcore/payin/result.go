@@ -11,7 +11,7 @@ import (
 )
 
 func (s *Service) recordError(ctx context.Context, payinID, status string, cause error) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE payins SET status=$1,failure_reason=$2,updated_at=$3 WHERE id=$4 AND status='submission_pending'`, status, cause.Error(), s.now(), payinID)
+	_, err := s.db.ExecContext(ctx, `UPDATE payins SET settlement_status=$1,failure_reason=$2,updated_at=$3 WHERE id=$4 AND settlement_status='submission_pending'`, status, cause.Error(), s.now(), payinID)
 	return err
 }
 
@@ -34,7 +34,7 @@ func executionStatusFromPayin(status PayinStatus) paymentcore.ExecutionStatus {
 	switch status {
 	case StatusOnHold:
 		return paymentcore.ExecutionOnHold
-	case StatusReceived, StatusSucceeded:
+	case StatusReceived:
 		return paymentcore.ExecutionSucceeded
 	case StatusFailed:
 		return paymentcore.ExecutionFailed
@@ -45,16 +45,12 @@ func executionStatusFromPayin(status PayinStatus) paymentcore.ExecutionStatus {
 	}
 }
 
-func paymentStateForResult(status PayinStatus, currentFunds paymentcore.FundsStatus) (paymentcore.PaymentStatus, paymentcore.FundsStatus) {
+func paymentStateForResult(status PayinStatus) paymentcore.PaymentStatus {
 	switch status {
-	case StatusReceived:
-		return paymentcore.PaymentStatusProcessing, paymentcore.FundsStatusReceived
-	case StatusFailed:
-		return paymentcore.PaymentStatusFailed, currentFunds
-	case StatusRefunded:
-		return paymentcore.PaymentStatusFailed, paymentcore.FundsStatusReturned
+	case StatusFailed, StatusRefunded:
+		return paymentcore.PaymentStatusFailed
 	default:
-		return paymentcore.PaymentStatusProcessing, currentFunds
+		return paymentcore.PaymentStatusProcessing
 	}
 }
 
@@ -69,8 +65,7 @@ func (s *Service) ApplyResult(ctx context.Context, tx *sql.Tx, payinID, correlat
 		instructions = json.RawMessage(`{}`)
 	}
 	var paymentID string
-	var currentFunds paymentcore.FundsStatus
-	if err := tx.QueryRowContext(ctx, `SELECT p.payment_id,pm.funds_status FROM payins p JOIN payments pm ON pm.id=p.payment_id WHERE p.id=$1 FOR UPDATE OF p,pm`, payinID).Scan(&paymentID, &currentFunds); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT p.payment_id FROM payins p JOIN payments pm ON pm.id=p.payment_id WHERE p.id=$1 FOR UPDATE OF p,pm`, payinID).Scan(&paymentID); err != nil {
 		return err
 	}
 	lifecycleStatus := normalizeResultStatus(result.Status)
@@ -78,12 +73,12 @@ func (s *Service) ApplyResult(ctx context.Context, tx *sql.Tx, payinID, correlat
 	if failureReason == "" {
 		failureReason = result.FailureCode
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE payins SET provider_payin_id=NULLIF($1,''),status=$2,instructions=$3,provider_payload=$4,failure_reason=NULLIF($5,''),updated_at=$6 WHERE id=$7`, result.ProviderReference, lifecycleStatus, instructions, payload, failureReason, now, payinID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE payins SET provider_payin_id=NULLIF($1,''),settlement_status=$2,instructions=$3,provider_payload=$4,failure_reason=NULLIF($5,''),updated_at=$6 WHERE id=$7`, result.ProviderReference, lifecycleStatus, instructions, payload, failureReason, now, payinID); err != nil {
 		return err
 	}
-	paymentStatus, fundsStatus := paymentStateForResult(lifecycleStatus, currentFunds)
+	paymentStatus := paymentStateForResult(lifecycleStatus)
 	eventType, eventID := "payin."+string(lifecycleStatus), "evt_"+payinID+"_"+string(lifecycleStatus)
-	if _, err := tx.ExecContext(ctx, `UPDATE payments SET payment_status=$1,funds_status=$2,updated_at=$3 WHERE id=$4`, paymentStatus, fundsStatus, now, paymentID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE payments SET payment_status=$1,updated_at=$2 WHERE id=$3`, paymentStatus, now, paymentID); err != nil {
 		return err
 	}
 	if err := paymentcore.NewHistoryService().RecordTimeline(ctx, tx, paymentcore.TimelineRecord{PaymentID: paymentID, PaymentStatus: paymentStatus, Note: eventType, At: now}); err != nil {
@@ -94,13 +89,13 @@ func (s *Service) ApplyResult(ctx context.Context, tx *sql.Tx, payinID, correlat
 	if _, err := tx.ExecContext(ctx, `INSERT INTO outbox_events(id,topic,event_type,event_version,aggregate_id,aggregate_type,payload,occurred_at) VALUES($1,$2,$3,$4,$5,'payin',$6,$7) ON CONFLICT(id) DO NOTHING`, eventID, eventbus.PayinEventsTopic, eventType, version, paymentID, body, now); err != nil {
 		return err
 	}
-	publicType := map[PayinStatus]string{StatusProcessing: "payment.processing", StatusOnHold: "payment.processing", StatusReceived: "payment.funds_status_changed", StatusFailed: "payment.failed", StatusRefunded: "payment.failed"}[lifecycleStatus]
-	publicVersion := map[string]int{"payment.processing": eventbus.PaymentProcessingVersion, "payment.failed": eventbus.PaymentFailedVersion, "payment.funds_status_changed": eventbus.PaymentFundsStatusChangedVersion}[publicType]
+	publicType := map[PayinStatus]string{StatusProcessing: "payment.processing", StatusOnHold: "payment.processing", StatusFailed: "payment.failed", StatusRefunded: "payment.failed"}[lifecycleStatus]
+	if publicType == "" {
+		return nil
+	}
+	publicVersion := map[string]int{"payment.processing": eventbus.PaymentProcessingVersion, "payment.failed": eventbus.PaymentFailedVersion}[publicType]
 	if err := enqueuePublicPaymentEvent(ctx, tx, eventID+"_payment", paymentID, publicType, publicVersion, body, now); err != nil {
 		return err
-	}
-	if lifecycleStatus == StatusRefunded {
-		return enqueuePublicPaymentEvent(ctx, tx, eventID+"_funds", paymentID, "payment.funds_status_changed", eventbus.PaymentFundsStatusChangedVersion, body, now)
 	}
 	return nil
 }

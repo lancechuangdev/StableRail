@@ -11,10 +11,11 @@ CREATE TABLE payouts (
     destination_currency  TEXT NOT NULL,
     provider              TEXT NOT NULL,
     provider_payout_id    TEXT,
-    provider_status       TEXT NOT NULL CHECK (provider_status IN (
+    settlement_status     TEXT NOT NULL CHECK (settlement_status IN (
         'submission_pending', 'unknown', 'submission_failed', 'processing',
         'on_hold', 'completed', 'failed', 'refunded'
     )),
+    reconciliation_status TEXT NOT NULL DEFAULT 'unmatched' CHECK (reconciliation_status IN ('unmatched','matched','exception')),
     idempotency_key       TEXT NOT NULL,
     provider_payload      JSONB,
     last_error            TEXT,
@@ -25,5 +26,5 @@ CREATE TABLE payouts (
     UNIQUE (provider, idempotency_key)
 );
 
-CREATE INDEX payouts_status_idx ON payouts (provider_status, updated_at);
+CREATE INDEX payouts_status_idx ON payouts (settlement_status, updated_at);
 CREATE INDEX payouts_tenant_idx ON payouts (tenant_id, created_at, payment_id);

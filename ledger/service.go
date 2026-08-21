@@ -52,19 +52,19 @@ func NewPostgresService() *PostgresService { return &PostgresService{} }
 func (*PostgresService) Reserve(ctx context.Context, tx *sql.Tx, request ReservationRequest) error {
 	return post(ctx, tx, request.PaymentID, paymentcore.PaymentStatusCreated, paymentcore.PaymentStatusProcessing,
 		"payment.processing", "processing", paymentcore.CashOperatingAccount, paymentcore.SettlementAccount,
-		"payment processing started", "payment processing", paymentcore.FundsStatusReserved, request.At, true)
+		"payment processing started", "payment processing", request.At, true)
 }
 
 func (*PostgresService) Release(ctx context.Context, tx *sql.Tx, request ReleaseRequest) error {
 	return post(ctx, tx, request.PaymentID, paymentcore.PaymentStatusProcessing, paymentcore.PaymentStatusProcessing,
 		"payment.released", "released", paymentcore.SettlementAccount, paymentcore.CashOperatingAccount,
-		"ledger reservation released", "ledger reservation released", paymentcore.FundsStatusReserved, request.At, false)
+		"ledger reservation released", "ledger reservation released", request.At, false)
 }
 
 func (*PostgresService) Settle(ctx context.Context, tx *sql.Tx, request SettlementRequest) error {
 	return post(ctx, tx, request.PaymentID, paymentcore.PaymentStatusProcessing, paymentcore.PaymentStatusSucceeded,
 		"payment.succeeded", "succeeded", paymentcore.SettlementAccount, paymentcore.CashOperatingAccount,
-		"payment succeeded", "payment succeeded", paymentcore.FundsStatusConsumed, request.At, true)
+		"payment succeeded", "payment succeeded", request.At, true)
 }
 
 // RecordPayin recognizes provider-confirmed inbound funds and completes the
@@ -78,11 +78,8 @@ func (*PostgresService) RecordPayin(ctx context.Context, tx *sql.Tx, request Pay
 	}
 	var paymentID, status, currency string
 	var amount int64
-	if err := tx.QueryRowContext(ctx, `SELECT payment_id,status,destination_amount_minor,destination_currency FROM payins WHERE id=$1 FOR UPDATE`, request.PayinID).Scan(&paymentID, &status, &amount, &currency); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT payment_id,settlement_status,destination_amount_minor,destination_currency FROM payins WHERE id=$1 FOR UPDATE`, request.PayinID).Scan(&paymentID, &status, &amount, &currency); err != nil {
 		return fmt.Errorf("lock received payin: %w", err)
-	}
-	if status == "succeeded" {
-		return nil
 	}
 	if status != "received" {
 		return fmt.Errorf("%w: payin %s cannot record ledger from status %s", ErrInvalidPaymentStatus, request.PayinID, status)
@@ -103,10 +100,7 @@ func (*PostgresService) RecordPayin(ctx context.Context, tx *sql.Tx, request Pay
 			}
 		}
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE payins SET status='succeeded',updated_at=$1 WHERE id=$2`, request.At, request.PayinID); err != nil {
-		return fmt.Errorf("complete payin: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE payments SET payment_status='succeeded',funds_status='received',updated_at=$1 WHERE id=$2`, request.At, paymentID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE payments SET payment_status='succeeded',updated_at=$1 WHERE id=$2`, request.At, paymentID); err != nil {
 		return fmt.Errorf("complete payin payment: %w", err)
 	}
 	if err := paymentcore.NewHistoryService().RecordTimeline(ctx, tx, paymentcore.TimelineRecord{PaymentID: paymentID, PaymentStatus: paymentcore.PaymentStatusSucceeded, Note: "payin ledger recorded", At: request.At}); err != nil {
@@ -133,14 +127,17 @@ func (*PostgresService) RecordReturn(ctx context.Context, tx *sql.Tx, request Re
 		return errors.New("return ID, payment ID, provider, provider event ID, and reason are required")
 	}
 	var paymentStatus paymentcore.PaymentStatus
-	var fundsStatus paymentcore.FundsStatus
 	var amount int64
 	var currency string
-	if err := tx.QueryRowContext(ctx, `SELECT payment_status,funds_status,amount_minor,currency FROM payments WHERE id=$1 FOR UPDATE`, request.PaymentID).Scan(&paymentStatus, &fundsStatus, &amount, &currency); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT payment_status,amount_minor,currency FROM payments WHERE id=$1 FOR UPDATE`, request.PaymentID).Scan(&paymentStatus, &amount, &currency); err != nil {
 		return fmt.Errorf("lock returned payment: %w", err)
 	}
-	if paymentStatus != paymentcore.PaymentStatusSucceeded || fundsStatus != paymentcore.FundsStatusConsumed {
-		return fmt.Errorf("%w: post-success return requires succeeded/consumed payment %s", ErrInvalidPaymentStatus, request.PaymentID)
+	var settled bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM ledger_transactions WHERE payment_id=$1 AND event_type='payment.succeeded' AND ledger_status='posted')`, request.PaymentID).Scan(&settled); err != nil {
+		return fmt.Errorf("inspect settlement journal: %w", err)
+	}
+	if paymentStatus != paymentcore.PaymentStatusSucceeded || !settled {
+		return fmt.Errorf("%w: post-success return requires a succeeded payment with a posted settlement journal %s", ErrInvalidPaymentStatus, request.PaymentID)
 	}
 	journalID := "jrn_" + request.ID
 	result, err := tx.ExecContext(ctx, `INSERT INTO ledger_transactions(id,payment_id,event_type,occurred_at) VALUES($1,$2,'payment.return.succeeded',$3) ON CONFLICT(payment_id,event_type) DO NOTHING`, journalID, request.PaymentID, request.At)
@@ -170,11 +167,11 @@ func (*PostgresService) RecordReturn(ctx context.Context, tx *sql.Tx, request Re
 	return nil
 }
 
-func post(ctx context.Context, tx *sql.Tx, id string, from, to paymentcore.PaymentStatus, eventType, suffix, debit, credit, message, note string, fundsStatus paymentcore.FundsStatus, now time.Time, updateState bool) error {
-	return postFrom(ctx, tx, id, []paymentcore.PaymentStatus{from}, to, eventType, suffix, debit, credit, message, note, fundsStatus, now, updateState)
+func post(ctx context.Context, tx *sql.Tx, id string, from, to paymentcore.PaymentStatus, eventType, suffix, debit, credit, message, note string, now time.Time, updateState bool) error {
+	return postFrom(ctx, tx, id, []paymentcore.PaymentStatus{from}, to, eventType, suffix, debit, credit, message, note, now, updateState)
 }
 
-func postFrom(ctx context.Context, tx *sql.Tx, id string, from []paymentcore.PaymentStatus, to paymentcore.PaymentStatus, eventType, suffix, debit, credit, message, note string, fundsStatus paymentcore.FundsStatus, now time.Time, updateState bool) error {
+func postFrom(ctx context.Context, tx *sql.Tx, id string, from []paymentcore.PaymentStatus, to paymentcore.PaymentStatus, eventType, suffix, debit, credit, message, note string, now time.Time, updateState bool) error {
 	if tx == nil {
 		return errors.New("ledger transaction is required")
 	}
@@ -196,7 +193,7 @@ func postFrom(ctx context.Context, tx *sql.Tx, id string, from []paymentcore.Pay
 	}
 	journal := "jrn_" + id + "_" + suffix
 	if updateState {
-		if _, err := tx.ExecContext(ctx, `UPDATE payments SET payment_status=$1, funds_status=$2, updated_at=$3 WHERE id=$4`, to, fundsStatus, now, id); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE payments SET payment_status=$1, updated_at=$2 WHERE id=$3`, to, now, id); err != nil {
 			return fmt.Errorf("update payment: %w", err)
 		}
 	}
