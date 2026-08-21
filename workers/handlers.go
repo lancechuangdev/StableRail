@@ -156,7 +156,10 @@ func (h *CommandHandler) Handle(ctx context.Context, tx *sql.Tx, event eventbus.
 		}
 		reply = "payout.funds_released"
 	case "payment.settle":
-		if err := transitionPayment(ctx, tx, payload.PaymentID, paymentcore.PaymentStatusProcessing, paymentcore.PaymentStatusSucceeded, h.now()); err != nil {
+		if err := h.ledgerService.Settle(ctx, tx, ledger.SettlementRequest{PaymentID: payload.PaymentID, At: h.now()}); err != nil {
+			if errors.Is(err, ledger.ErrInvalidPaymentStatus) {
+				return consumer.Permanent(err)
+			}
 			return err
 		}
 		return h.enqueueReply(ctx, tx, event, payload, "payout.completed")
@@ -223,53 +226,6 @@ func loadPaymentAmount(ctx context.Context, tx *sql.Tx, paymentID string) (int64
 	}
 	return amount, currency, nil
 }
-
-func transitionPayment(ctx context.Context, tx *sql.Tx, id string, from, to paymentcore.PaymentStatus, now time.Time) error {
-	var amount int64
-	var currency string
-	var status paymentcore.PaymentStatus
-	if err := tx.QueryRowContext(ctx, `SELECT payment_status, amount_minor, currency FROM payments WHERE id=$1 FOR UPDATE`, id).Scan(&status, &amount, &currency); err != nil {
-		return fmt.Errorf("lock payment: %w", err)
-	}
-	if status == to {
-		return nil
-	}
-	if status != from {
-		return consumer.Permanent(fmt.Errorf("payment %s cannot transition from %s", id, status))
-	}
-	debit, credit := paymentcore.CashOperatingAccount, paymentcore.SettlementAccount
-	if to == paymentcore.PaymentStatusSucceeded {
-		debit, credit = credit, debit
-	}
-	journal := "jrn_" + eventSafeID(id, string(to))
-	fundsStatus := paymentcore.FundsStatusReserved
-	if to == paymentcore.PaymentStatusSucceeded {
-		fundsStatus = paymentcore.FundsStatusConsumed
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE payments SET payment_status=$1, funds_status=$2, updated_at=$3 WHERE id=$4`, to, fundsStatus, now, id); err != nil {
-		return fmt.Errorf("update payment: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO ledger_transactions(id,payment_id,event_type,occurred_at) VALUES($1,$2,$3,$4) ON CONFLICT(payment_id,event_type) DO NOTHING`, journal, id, "payment."+string(to), now); err != nil {
-		return fmt.Errorf("insert journal: %w", err)
-	}
-	for _, line := range []struct{ suffix, account, side string }{{"debit", debit, "debit"}, {"credit", credit, "credit"}} {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO ledger_entries(id,transaction_id,account_code,side,amount_minor,currency) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(id) DO NOTHING`, journal+":"+line.suffix, journal, line.account, line.side, amount, currency); err != nil {
-			return fmt.Errorf("insert ledger entry: %w", err)
-		}
-	}
-	message, note := "payment processing started", "payment processing"
-	if to == paymentcore.PaymentStatusSucceeded {
-		message, note = "payment succeeded", "payment succeeded"
-	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO payment_audit_events(payment_id,event,message,occurred_at) VALUES($1,$2,$3,$4)`, id, string(to), message, now); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO payment_timeline_entries(payment_id,payment_status,note,occurred_at) VALUES($1,$2,$3,$4)`, id, to, note, now); err != nil {
-		return err
-	}
-	return nil
-}
-func eventSafeID(id, state string) string { return id + "_" + state }
 
 func (h *CommandHandler) enqueueReply(ctx context.Context, tx *sql.Tx, caused eventbus.Event, p commandPayload, reply string) error {
 	id, err := h.newID()

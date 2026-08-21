@@ -57,6 +57,9 @@ func (unusedLedgerService) Reserve(context.Context, *sql.Tx, ledger.ReservationR
 	return nil
 }
 func (unusedLedgerService) Release(context.Context, *sql.Tx, ledger.ReleaseRequest) error { return nil }
+func (unusedLedgerService) Settle(context.Context, *sql.Tx, ledger.SettlementRequest) error {
+	return nil
+}
 func (unusedLedgerService) RecordPayin(context.Context, *sql.Tx, ledger.PayinReceiptRequest) error {
 	return nil
 }

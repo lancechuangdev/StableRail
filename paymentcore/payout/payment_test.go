@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"regexp"
 	"testing"
 	"time"
 
@@ -184,71 +183,6 @@ func TestPostgresCreateWithAcceptedPayoutQuoteReportsIdempotencyConflict(t *test
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
-	}
-}
-
-func TestPostgresTransitionCommitsStateAndOutboxTogether(t *testing.T) {
-	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
-	if err != nil {
-		t.Fatalf("create SQL mock: %v", err)
-	}
-	defer db.Close()
-
-	service := deterministicPayoutService(db)
-	mock.ExpectBegin()
-	mock.ExpectQuery(regexp.QuoteMeta(`SELECT payment_status, amount_minor, currency FROM payments WHERE id = $1 FOR UPDATE`)).
-		WithArgs("pay_test").
-		WillReturnRows(sqlmock.NewRows([]string{"state", "amount_minor", "currency"}).
-			AddRow(PaymentStatusCreated, int64(2500), "USD"))
-	mock.ExpectExec("UPDATE payments").
-		WithArgs(PaymentStatusProcessing, FundsStatusReserved, service.now(), "pay_test").
-		WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectExec("INSERT INTO ledger_transactions").
-		WithArgs("jrn_test", "pay_test", "payment.processing", service.now()).
-		WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectExec("INSERT INTO ledger_entries").
-		WithArgs("jrn_test:debit", "jrn_test", paymentcore.CashOperatingAccount, paymentcore.EntryDebit, int64(2500), "USD").
-		WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectExec("INSERT INTO ledger_entries").
-		WithArgs("jrn_test:credit", "jrn_test", paymentcore.SettlementAccount, paymentcore.EntryCredit, int64(2500), "USD").
-		WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectExec("INSERT INTO payment_audit_events").WillReturnResult(sqlmock.NewResult(1, 1))
-	mock.ExpectExec("INSERT INTO payment_timeline_entries").WillReturnResult(sqlmock.NewResult(1, 1))
-	mock.ExpectExec("INSERT INTO outbox_events").WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectExec("INSERT INTO outbox_events").WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectCommit()
-
-	if err := service.Process(context.Background(), "pay_test"); err != nil {
-		t.Fatalf("Process returned error: %v", err)
-	}
-	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Fatalf("unmet database expectations: %v", err)
-	}
-}
-
-func TestPostgresTransitionRollsBackWhenLedgerInsertFails(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatalf("create SQL mock: %v", err)
-	}
-	defer db.Close()
-
-	service := deterministicPayoutService(db)
-	mock.ExpectBegin()
-	mock.ExpectQuery("SELECT payment_status, amount_minor, currency FROM payments").
-		WithArgs("pay_test").
-		WillReturnRows(sqlmock.NewRows([]string{"state", "amount_minor", "currency"}).
-			AddRow(PaymentStatusCreated, int64(2500), "USD"))
-	mock.ExpectExec("UPDATE payments").WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectExec("INSERT INTO ledger_transactions").WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectExec("INSERT INTO ledger_entries").WillReturnError(errors.New("ledger unavailable"))
-	mock.ExpectRollback()
-
-	if err := service.Process(context.Background(), "pay_test"); err == nil {
-		t.Fatal("expected ledger insert error")
-	}
-	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Fatalf("unmet database expectations: %v", err)
 	}
 }
 

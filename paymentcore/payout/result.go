@@ -44,36 +44,11 @@ func (s *Service) ApplyResult(ctx context.Context, tx *sql.Tx, paymentID, comman
 			eventType = "payout.provider_failed"
 		}
 	case paymentcore.ExecutionSucceeded:
-		if err := s.completePayment(ctx, tx, paymentID, now); err != nil {
-			return err
-		}
 		eventType = "payout.provider_completed"
 	default:
 		return fmt.Errorf("unsupported payout result status %q", result.Status)
 	}
 	return enqueueProviderResult(ctx, tx, paymentID, commandEventID, correlationID, eventType, reason, now)
-}
-
-func (s *Service) completePayment(ctx context.Context, tx *sql.Tx, paymentID string, now time.Time) error {
-	var status paymentcore.PaymentStatus
-	var amount int64
-	var currency string
-	if err := tx.QueryRowContext(ctx, `SELECT payment_status,amount_minor,currency FROM payments WHERE id=$1 FOR UPDATE`, paymentID).Scan(&status, &amount, &currency); err != nil {
-		return fmt.Errorf("lock completed payout payment: %w", err)
-	}
-	if status == paymentcore.PaymentStatusSucceeded {
-		return nil
-	}
-	if status != paymentcore.PaymentStatusProcessing {
-		return fmt.Errorf("payment %s cannot complete from %s", paymentID, status)
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE payments SET payment_status='succeeded',funds_status='consumed',updated_at=$1 WHERE id=$2`, now, paymentID); err != nil {
-		return fmt.Errorf("complete payout payment: %w", err)
-	}
-	if err := s.insertJournal(ctx, tx, paymentID, "payment.succeeded", paymentcore.SettlementAccount, paymentcore.CashOperatingAccount, amount, currency, now); err != nil {
-		return err
-	}
-	return insertHistory(ctx, tx, paymentID, "succeeded", "payment succeeded", paymentcore.PaymentStatusSucceeded, "payment succeeded", now)
 }
 
 func (s *Service) recordError(ctx context.Context, paymentID, status string, cause error) error {
