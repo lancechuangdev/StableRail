@@ -187,6 +187,8 @@ func (c *SagaCoordinator) transition(state State, eventType, reason string) (Sta
 		return StateReturning, "ledger.release", c.ledgerTimeout, reasonOrDefault(reason, "settlement funds returned"), nil
 	case state == StateSettlingPayment && eventType == "payout.completed":
 		return StateCompleted, "", 0, "", nil
+	case state == StateSettlingPayment && eventType == "payout.provider_completed":
+		return StateSettlingPayment, "", c.ledgerTimeout, "", nil
 	case state == StateAwaitingSettlement && eventType == "payout.provider_failed":
 		if reason == "submission_failed" {
 			return StateFailed, "payment.fail", 0, reason, nil
@@ -196,6 +198,8 @@ func (c *SagaCoordinator) transition(state State, eventType, reason string) (Sta
 		return StateReturning, "ledger.release", c.ledgerTimeout, reasonOrDefault(reason, "settlement funds returned"), nil
 	case state == StateFailed && eventType == "payout.provider_returned":
 		return StateReturning, "ledger.release", c.ledgerTimeout, reasonOrDefault(reason, "settlement funds returned after payment failure"), nil
+	case state == StateFailed && eventType == "payout.failed":
+		return StateFailed, "", 0, reason, nil
 	case state == StateReleasingLedger && eventType == "payout.funds_released":
 		return StateLedgerReleased, "payment.fail", 0, reason, nil
 	case state == StateReturning && eventType == "payout.funds_released":

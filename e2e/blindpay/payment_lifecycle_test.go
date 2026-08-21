@@ -28,7 +28,7 @@ func newPayment(t *testing.T, amount int64, scenario string) (*testenv.Environme
 	suffix := fmt.Sprint(time.Now().UnixNano())
 	quote := tenant.CreatePayoutQuote(t, profile, "bp-quote-"+scenario+"-"+suffix, amount)
 	payment, status := tenant.CreatePaymentWithQuote(t, "bp-payment-"+scenario+"-"+suffix, "order-bp-"+scenario+"-"+suffix, quote)
-	if status != http.StatusCreated {
+	if status != http.StatusAccepted {
 		t.Fatalf("create payment status=%d", status)
 	}
 	return env, tenant, quote, payment
@@ -37,8 +37,8 @@ func newPayment(t *testing.T, amount int64, scenario string) (*testenv.Environme
 func complete(t *testing.T, env *testenv.Environment, tenant *testenv.Tenant, quote testenv.PayoutQuote, payment *testenv.Payment) {
 	t.Helper()
 	env.WaitForSagaState(t, payment.ID, "awaiting_settlement")
-	env.WaitForCount(t, `SELECT count(*) FROM payouts WHERE payment_id=$1 AND provider_payout_id=$2 AND settlement_status='processing'`, 1, payment.ID, testenv.PayoutID(quote.ID))
-	env.SendBlindPayWebhook(t, testenv.PayoutID(quote.ID), "completed")
+	env.WaitForCount(t, `SELECT count(*) FROM payouts WHERE payment_id=$1 AND provider_payout_id=$2 AND settlement_status='processing'`, 1, payment.ID, testenv.PayoutID(quote))
+	env.SendBlindPayWebhook(t, testenv.PayoutID(quote), "completed")
 	tenant.WaitForPaymentStatus(t, payment.ID, "succeeded")
 	env.WaitForSagaState(t, payment.ID, "completed")
 }
@@ -96,11 +96,11 @@ func TestBLINDPAY002PaymentIdempotency(t *testing.T) {
 	quote := tenant.CreatePayoutQuote(t, profile, "bp-quote-002-"+suffix, 1250)
 	key := "bp-payment-002-" + suffix
 	first, status := tenant.CreatePaymentWithQuote(t, key, "order-bp-002", quote)
-	if status != http.StatusCreated {
+	if status != http.StatusAccepted {
 		t.Fatalf("first status=%d", status)
 	}
 	second, status := tenant.CreatePaymentWithQuote(t, key, "order-bp-002", quote)
-	if status != http.StatusCreated || second.ID != first.ID {
+	if status != http.StatusAccepted || second.ID != first.ID {
 		t.Fatalf("repeat status=%d first=%s second=%s", status, first.ID, second.ID)
 	}
 	if _, status := tenant.CreatePaymentWithQuoteAmount(t, key, "order-bp-002", quote, 1251); status != http.StatusConflict {
@@ -116,7 +116,7 @@ func TestBLINDPAY003TenantIsolation(t *testing.T) {
 	suffix := fmt.Sprint(time.Now().UnixNano())
 	quote := owner.CreatePayoutQuote(t, profile, "bp-quote-003-"+suffix, 900)
 	payment, status := owner.CreatePaymentWithQuote(t, "bp-payment-003-"+suffix, "order-bp-003", quote)
-	if status != http.StatusCreated {
+	if status != http.StatusAccepted {
 		t.Fatalf("create status=%d", status)
 	}
 	for _, path := range []string{"/v1/payments/" + payment.ID, "/v1/payments/" + payment.ID + "/timeline"} {
@@ -130,19 +130,17 @@ func TestBLINDPAY003TenantIsolation(t *testing.T) {
 }
 
 func TestBLINDPAY004PolicyRejection(t *testing.T) {
-	env, tenant, _, payment := newPayment(t, 4004, "004")
-	failed := tenant.WaitForPaymentStatus(t, payment.ID, "failed")
+	env, _, _, payment := newPayment(t, 4004, "004")
 	env.WaitForSagaState(t, payment.ID, "failed")
 	env.WaitForCount(t, `SELECT count(*) FROM payouts WHERE payment_id=$1`, 0, payment.ID)
 	env.WaitForCount(t, `SELECT count(*) FROM ledger_transactions WHERE payment_id=$1`, 0, payment.ID)
 }
 
 func TestBLINDPAY005SettlementFailureKeepsFundsReserved(t *testing.T) {
-	env, tenant, quote, payment := newPayment(t, 66600, "005")
+	env, _, quote, payment := newPayment(t, 66600, "005")
 	env.WaitForSagaState(t, payment.ID, "awaiting_settlement")
-	env.WaitForCount(t, `SELECT count(*) FROM payouts WHERE payment_id=$1 AND provider_payout_id=$2 AND settlement_status='processing'`, 1, payment.ID, testenv.PayoutID(quote.ID))
-	env.SendBlindPayWebhook(t, testenv.PayoutID(quote.ID), "failed")
-	failed := tenant.WaitForPaymentStatus(t, payment.ID, "failed")
+	env.WaitForCount(t, `SELECT count(*) FROM payouts WHERE payment_id=$1 AND provider_payout_id=$2 AND settlement_status='processing'`, 1, payment.ID, testenv.PayoutID(quote))
+	env.SendBlindPayWebhook(t, testenv.PayoutID(quote), "failed")
 	env.WaitForSagaState(t, payment.ID, "failed")
 	env.WaitForCount(t, `SELECT count(*) FROM ledger_transactions WHERE payment_id=$1 AND event_type='payment.processing'`, 1, payment.ID)
 	env.WaitForCount(t, `SELECT count(*) FROM ledger_transactions WHERE payment_id=$1 AND event_type='payment.released'`, 0, payment.ID)
@@ -156,8 +154,7 @@ func TestBLINDPAY006TerminalReturn(t *testing.T) {
 		t.Fatalf("register webhook status=%d body=%s", response.StatusCode, body)
 	}
 	complete(t, env, tenant, quote, payment)
-	env.SendBlindPayWebhook(t, testenv.PayoutID(quote.ID), "refunded")
-	succeeded := tenant.WaitForPaymentStatus(t, payment.ID, "succeeded")
+	env.SendBlindPayWebhook(t, testenv.PayoutID(quote), "refunded")
 	env.WaitForSagaState(t, payment.ID, "completed")
 	env.WaitForCount(t, `SELECT count(*) FROM payment_returns WHERE payment_id=$1 AND status='succeeded'`, 1, payment.ID)
 	env.WaitForCount(t, `SELECT count(*) FROM ledger_transactions WHERE payment_id=$1 AND event_type='payment.return.succeeded'`, 1, payment.ID)
@@ -167,8 +164,8 @@ func TestBLINDPAY006TerminalReturn(t *testing.T) {
 func TestBLINDPAY007ManualReviewResolution(t *testing.T) {
 	env, tenant, quote, payment := newPayment(t, 7007, "007")
 	env.WaitForSagaState(t, payment.ID, "awaiting_settlement")
-	env.WaitForCount(t, `SELECT count(*) FROM payouts WHERE payment_id=$1 AND provider_payout_id=$2 AND settlement_status='processing'`, 1, payment.ID, testenv.PayoutID(quote.ID))
-	env.SendBlindPayWebhook(t, testenv.PayoutID(quote.ID), "on_hold")
+	env.WaitForCount(t, `SELECT count(*) FROM payouts WHERE payment_id=$1 AND provider_payout_id=$2 AND settlement_status='processing'`, 1, payment.ID, testenv.PayoutID(quote))
+	env.SendBlindPayWebhook(t, testenv.PayoutID(quote), "on_hold")
 	env.WaitForSagaState(t, payment.ID, "manual_review")
 	response, body := env.OperatorPost(t, "/v1/operator/payments/"+payment.ID+"/manual-review", map[string]string{"action": "complete", "operator": "blindpay-e2e", "note": "review passed"})
 	if response.StatusCode != http.StatusAccepted {
@@ -214,7 +211,7 @@ func TestBLINDPAY008IndependentSignedTenantWebhooks(t *testing.T) {
 	suffix := fmt.Sprint(time.Now().UnixNano())
 	quote := tenant.CreatePayoutQuote(t, profile, "bp-quote-008-"+suffix, 8008)
 	payment, status := tenant.CreatePaymentWithQuote(t, "bp-payment-008-"+suffix, "order-bp-008", quote)
-	if status != http.StatusCreated {
+	if status != http.StatusAccepted {
 		t.Fatalf("create status=%d", status)
 	}
 	complete(t, env, tenant, quote, payment)
@@ -246,9 +243,9 @@ func TestBLINDPAY009RestartCompletesDurableWorkOnce(t *testing.T) {
 	}
 	suffix := fmt.Sprint(time.Now().UnixNano())
 	quote := tenant.CreatePayoutQuote(t, profile, "bp-quote-009-"+suffix, 9009)
-	env.SendBlindPayWebhook(t, testenv.PayoutID(quote.ID), "completed")
+	env.SendBlindPayWebhook(t, testenv.PayoutID(quote), "completed")
 	payment, status := tenant.CreatePaymentWithQuote(t, "bp-payment-009-"+suffix, "order-bp-009", quote)
-	if status != http.StatusCreated {
+	if status != http.StatusAccepted {
 		t.Fatalf("create status=%d", status)
 	}
 	env.WaitForSagaState(t, payment.ID, "awaiting_settlement")

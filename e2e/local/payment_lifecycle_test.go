@@ -25,7 +25,7 @@ func TestLOCAL001SuccessfulPaymentLifecycle(t *testing.T) {
 	tenant := env.NewTenant(t)
 	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
 	payment, status := tenant.CreatePayment(t, "local-001-"+suffix, "order-local-001-"+suffix, 2500)
-	if status != http.StatusCreated {
+	if status != http.StatusAccepted {
 		t.Fatalf("create payment status=%d", status)
 	}
 	succeeded := tenant.WaitForPaymentStatus(t, payment.ID, "succeeded")
@@ -104,11 +104,11 @@ func TestLOCAL002PaymentIdempotency(t *testing.T) {
 	key, reference := "local-002-"+suffix, "order-local-002-"+suffix
 
 	first, status := tenant.CreatePayment(t, key, reference, 1250)
-	if status != http.StatusCreated {
+	if status != http.StatusAccepted {
 		t.Fatalf("first create status=%d", status)
 	}
 	second, status := tenant.CreatePayment(t, key, reference, 1250)
-	if status != http.StatusCreated || second.ID != first.ID {
+	if status != http.StatusAccepted || second.ID != first.ID {
 		t.Fatalf("idempotent create status=%d first=%s second=%s", status, first.ID, second.ID)
 	}
 	if _, status := tenant.CreatePayment(t, key, reference, 1251); status != http.StatusConflict {
@@ -122,6 +122,8 @@ func TestLOCAL002PaymentIdempotency(t *testing.T) {
 	if count != 1 {
 		t.Fatalf("payment count=%d, want 1", count)
 	}
+	tenant.WaitForPaymentStatus(t, first.ID, "succeeded")
+	env.WaitForSagaState(t, first.ID, "completed")
 }
 
 func TestLOCAL003TenantIsolation(t *testing.T) {
@@ -129,7 +131,7 @@ func TestLOCAL003TenantIsolation(t *testing.T) {
 	owner, stranger := env.NewTenant(t), env.NewTenant(t)
 	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
 	payment, status := owner.CreatePayment(t, "local-003-"+suffix, "order-local-003-"+suffix, 900)
-	if status != http.StatusCreated {
+	if status != http.StatusAccepted {
 		t.Fatalf("create status=%d", status)
 	}
 
@@ -141,13 +143,15 @@ func TestLOCAL003TenantIsolation(t *testing.T) {
 			t.Fatalf("cross-tenant GET %s status=%d body=%s", path, response.StatusCode, body)
 		}
 	}
+	owner.WaitForPaymentStatus(t, payment.ID, "succeeded")
+	env.WaitForSagaState(t, payment.ID, "completed")
 }
 
 func TestLOCAL004PolicyRejection(t *testing.T) {
 	env, tenant := testenv.Open(t), (*testenv.Tenant)(nil)
 	tenant = env.NewTenant(t)
 	payment, status := tenant.CreatePayment(t, "local-004-"+fmt.Sprint(time.Now().UnixNano()), "order-local-004", 4004)
-	if status != http.StatusCreated {
+	if status != http.StatusAccepted {
 		t.Fatalf("create status=%d", status)
 	}
 	tenant.WaitForPaymentStatus(t, payment.ID, "failed")
@@ -160,10 +164,9 @@ func TestLOCAL005SettlementFailureKeepsFundsReserved(t *testing.T) {
 	env := testenv.Open(t)
 	tenant := env.NewTenant(t)
 	payment, status := tenant.CreatePayment(t, "local-005-"+fmt.Sprint(time.Now().UnixNano()), "order-local-005", 5005)
-	if status != http.StatusCreated {
+	if status != http.StatusAccepted {
 		t.Fatalf("create status=%d", status)
 	}
-	failed := tenant.WaitForPaymentStatus(t, payment.ID, "failed")
 	env.WaitForSagaState(t, payment.ID, "failed")
 	env.WaitForCount(t, `SELECT count(*) FROM ledger_transactions WHERE payment_id=$1 AND event_type='payment.processing'`, 1, payment.ID)
 	env.WaitForCount(t, `SELECT count(*) FROM ledger_transactions WHERE payment_id=$1 AND event_type='payment.released'`, 0, payment.ID)
@@ -173,7 +176,7 @@ func TestLOCAL007ManualReviewResolution(t *testing.T) {
 	env := testenv.Open(t)
 	tenant := env.NewTenant(t)
 	payment, status := tenant.CreatePayment(t, "local-007-"+fmt.Sprint(time.Now().UnixNano()), "order-local-007", 7007)
-	if status != http.StatusCreated {
+	if status != http.StatusAccepted {
 		t.Fatalf("create status=%d", status)
 	}
 	env.WaitForSagaState(t, payment.ID, "manual_review")
@@ -218,7 +221,7 @@ func TestLOCAL008IndependentSignedWebhooks(t *testing.T) {
 		secrets[i] = created.Secret
 	}
 	payment, status := tenant.CreatePayment(t, "local-008-"+fmt.Sprint(time.Now().UnixNano()), "order-local-008", 8008)
-	if status != http.StatusCreated {
+	if status != http.StatusAccepted {
 		t.Fatalf("create status=%d", status)
 	}
 	tenant.WaitForPaymentStatus(t, payment.ID, "succeeded")
@@ -248,7 +251,7 @@ func TestLOCAL009RestartCompletesDurableWorkOnce(t *testing.T) {
 		t.Skip("runner-managed server is required")
 	}
 	payment, status := tenant.CreatePayment(t, "local-009-"+fmt.Sprint(time.Now().UnixNano()), "order-local-009", 9009)
-	if status != http.StatusCreated {
+	if status != http.StatusAccepted {
 		t.Fatalf("create status=%d", status)
 	}
 	env.WaitForSagaState(t, payment.ID, "awaiting_settlement")

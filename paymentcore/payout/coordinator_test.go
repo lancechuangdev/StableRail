@@ -30,9 +30,11 @@ func TestWorkflowTransitions(t *testing.T) {
 		{StateOnHold, "payout.provider_failed", StateFailed, "payment.fail_reserved"},
 		{StateOnHold, "payout.provider_returned", StateReturning, "ledger.release"},
 		{StateSettlingPayment, "payout.completed", StateCompleted, ""},
+		{StateSettlingPayment, "payout.provider_completed", StateSettlingPayment, ""},
 		{StateAwaitingSettlement, "payout.provider_failed", StateFailed, "payment.fail_reserved"},
 		{StateAwaitingSettlement, "payout.provider_returned", StateReturning, "ledger.release"},
 		{StateFailed, "payout.provider_returned", StateReturning, "ledger.release"},
+		{StateFailed, "payout.failed", StateFailed, ""},
 		{StateReleasingLedger, "payout.funds_released", StateLedgerReleased, "payment.fail"},
 		{StateReturning, "payout.funds_released", StateReturned, "payment.return"},
 	}

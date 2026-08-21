@@ -63,10 +63,12 @@ func persistedStatus(result paymentcore.ExecutionResult) string {
 	case paymentcore.ExecutionOnHold:
 		return "on_hold"
 	case paymentcore.ExecutionFailed:
-		if strings.TrimSpace(result.FailureCode) != "" {
+		switch strings.TrimSpace(result.FailureCode) {
+		case "refunded", "submission_failed":
 			return result.FailureCode
+		default:
+			return "failed"
 		}
-		return "failed"
 	default:
 		return "processing"
 	}

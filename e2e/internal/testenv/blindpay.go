@@ -19,6 +19,7 @@ const blindPayWebhookKey = "blindpay-e2e-secret"
 
 type PayoutQuote struct {
 	ID                string `json:"id"`
+	ProviderQuoteID   string `json:"provider_quote_id"`
 	SenderAmountMinor int64  `json:"sender_amount_minor"`
 }
 
@@ -38,7 +39,7 @@ func (e *Environment) SeedBlindPayProfile(t *testing.T, tenant *Tenant) BlindPay
 	if _, err := e.DB.Exec(`INSERT INTO blindpay_managed_wallets(provider_wallet_id,tenant_id,network,address,display_name,status,created_at,updated_at) VALUES($1,$2,'base_sepolia',$3,'E2E wallet','active',$4,$4)`, profile.WalletID, tenant.ID, "0x"+suffix, now); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := e.DB.Exec(`INSERT INTO provider_resources(id,tenant_id,provider,resource_type,provider_reference,metadata,created_at,updated_at) VALUES($1,$2,'blindpay','payment_instrument',$1,'{"kind":"bank_account"}',$3,$3),($4,$2,'blindpay','account',$4,'{"kind":"managed_wallet"}',$3,$3)`, profile.BankAccountID, tenant.ID, now, profile.WalletID); err != nil {
+	if _, err := e.DB.Exec(`INSERT INTO provider_resources(id,tenant_id,provider,resource_type,provider_reference,metadata,created_at,updated_at) VALUES($1,$2,'blindpay','payment_instrument',$1,'{"kind":"bank_account"}',$3,$3),($4,$2,'blindpay','account',$4,jsonb_build_object('kind','managed_wallet','network','base_sepolia','address',$5::text),$3,$3)`, profile.BankAccountID, tenant.ID, now, profile.WalletID, "0x"+suffix); err != nil {
 		t.Fatal(err)
 	}
 	return profile
@@ -46,8 +47,8 @@ func (e *Environment) SeedBlindPayProfile(t *testing.T, tenant *Tenant) BlindPay
 
 func (tenant *Tenant) CreatePayoutQuote(t *testing.T, profile BlindPayProfile, key string, amount int64) PayoutQuote {
 	t.Helper()
-	body := map[string]any{"source_account_id": profile.WalletID, "destination_instrument_id": profile.BankAccountID, "source_currency": "USDB", "destination_currency": "USD", "currency_type": "sender", "cover_fees": false, "request_amount_minor": amount}
-	response := tenant.Env.request(t, http.MethodPost, "/v1/blindpay/payout-quotes", tenant.APIKey, key, body)
+	body := map[string]any{"direction": "payout", "funding_method": "bank", "source_account_id": profile.WalletID, "destination_instrument_id": profile.BankAccountID, "source_currency": "USDB", "destination_currency": "USD", "currency_type": "sender", "cover_fees": false, "request_amount_minor": amount}
+	response := tenant.Env.request(t, http.MethodPost, "/v1/payment-quotes", tenant.APIKey, key, body)
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusCreated {
 		t.Fatalf("create payout quote status=%d body=%s", response.StatusCode, readBody(response.Body))
@@ -63,10 +64,10 @@ func (tenant *Tenant) CreatePaymentWithQuote(t *testing.T, key, reference string
 
 func (tenant *Tenant) CreatePaymentWithQuoteAmount(t *testing.T, key, reference string, quote PayoutQuote, amount int64) (*Payment, int) {
 	t.Helper()
-	body := map[string]any{"direction": "payout", "external_reference": reference, "currency": "USDB", "amount_minor": amount, "payout_quote_id": quote.ID}
+	body := map[string]any{"direction": "payout", "external_reference": reference, "currency": "USDB", "amount_minor": amount, "quote_id": quote.ID}
 	response := tenant.Env.request(t, http.MethodPost, "/v1/payments", tenant.APIKey, key, body)
 	defer response.Body.Close()
-	if response.StatusCode != http.StatusCreated {
+	if response.StatusCode != http.StatusAccepted {
 		return nil, response.StatusCode
 	}
 	var payment Payment
@@ -99,4 +100,6 @@ func (e *Environment) SendBlindPayWebhook(t *testing.T, payoutID, status string)
 	}
 }
 
-func PayoutID(quoteID string) string { return "po_" + strings.TrimPrefix(quoteID, "qu_") }
+func PayoutID(quote PayoutQuote) string {
+	return "po_" + strings.TrimPrefix(quote.ProviderQuoteID, "qu_")
+}

@@ -369,10 +369,14 @@ go test -race ./...
 go vet ./...
 ```
 
-Run the provider-free PostgreSQL and Kafka lifecycle suite:
+Run the end-to-end lifecycle suites:
 
 ```bash
+# Provider-free lifecycle tests using the mock settlement provider
 ./scripts/test-e2e-local.sh
+
+# BlindPay adapter lifecycle tests using the local BlindPay mock server
+./scripts/test-e2e-blindpay.sh
 ```
 
 Pass normal `go test` arguments to select a scenario:
@@ -381,7 +385,7 @@ Pass normal `go test` arguments to select a scenario:
 ./scripts/test-e2e-local.sh -run '^TestLOCAL001SuccessfulPaymentLifecycle$'
 ```
 
-Set `STABLERAIL_E2E_KEEP_STACK=1` to retain its isolated containers. See the [local lifecycle test guide](docs/testing/local-payment-lifecycle.md) for the executable scenario specification.
+Each script starts an isolated PostgreSQL and Kafka stack, applies migrations, builds StableRail, runs its suite, and removes the stack afterward. Set `STABLERAIL_E2E_KEEP_STACK=1` to retain the containers for inspection. See the [local lifecycle test guide](docs/testing/local-payment-lifecycle.md) and [BlindPay lifecycle test guide](docs/testing/blindpay-payment-lifecycle.md) for the executable scenario specifications.
 
 ## Operational status
 

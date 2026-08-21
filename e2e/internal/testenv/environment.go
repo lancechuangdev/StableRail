@@ -82,10 +82,30 @@ func (e *Environment) NewTenant(t *testing.T) *Tenant {
 
 func (tenant *Tenant) CreatePayment(t *testing.T, key, reference string, amount int64) (*Payment, int) {
 	t.Helper()
-	body := map[string]any{"direction": "payout", "external_reference": reference, "currency": "USD", "amount_minor": amount}
+	sourceAccountID := "acct_" + tenant.ID
+	destinationInstrumentID := "instrument_" + tenant.ID
+	if _, err := tenant.Env.DB.Exec(`
+		INSERT INTO provider_resources
+			(id, tenant_id, provider, resource_type, provider_reference, metadata, created_at, updated_at)
+		VALUES
+			($1, $3, 'mock', 'account', $1, '{"kind":"wallet"}', now(), now()),
+			($2, $3, 'mock', 'payment_instrument', $2, '{"kind":"bank_account"}', now(), now())
+		ON CONFLICT (id) DO NOTHING
+	`, sourceAccountID, destinationInstrumentID, tenant.ID); err != nil {
+		t.Fatal(err)
+	}
+	body := map[string]any{
+		"direction":                 "payout",
+		"external_reference":        reference,
+		"currency":                  "USD",
+		"amount_minor":              amount,
+		"funding_method":            "bank",
+		"source_account_id":         sourceAccountID,
+		"destination_instrument_id": destinationInstrumentID,
+	}
 	response := tenant.Env.request(t, http.MethodPost, "/v1/payments", tenant.APIKey, key, body)
 	defer response.Body.Close()
-	if response.StatusCode != http.StatusCreated {
+	if response.StatusCode != http.StatusAccepted {
 		return nil, response.StatusCode
 	}
 	var payment Payment
