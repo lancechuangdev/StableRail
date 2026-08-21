@@ -102,7 +102,7 @@ A bank or provider can return funds after a payout was already confirmed. Stable
 
 `payment_returns` contains only completed provider returns; it is an immutable record rather than a return lifecycle. Its required journal debits `cash:operating` for the asset received back and credits `settlement:payable` to restore the obligation. The original payment is not rewritten. StableRail emits `payment.return.succeeded`; return details are read from the separate return operation rather than encoded as payment state.
 
-Merchant-issued refunds are separate linked payments. `POST /v1/payments/{id}/refunds` accepts an idempotency key, a positive amount, a reason, and an optional fresh `payout_quote_id` for BlindPay routing. Partial refunds are supported up to the original payment amount. StableRail creates a new payment, links it through `payment_refunds.refund_payment_id`, binds the payout quote when supplied, and emits `payout.created` for workflow coordination and `payment.created` for merchant notification. From there, policy, ledger reservation, settlement, and failure handling use the ordinary payout workflow. Refund eligibility is established by the original payment outcome and its posted settlement journal. Provider-originated returns remain separate and continue to use `payment_returns` and reversal accounting.
+Merchant-issued refunds are separate linked payments. `POST /v1/payments/{id}/refunds` accepts an idempotency key, a positive amount, a reason, and an optional fresh `payout_quote_id` for BlindPay routing. Partial refunds are supported up to the original payment amount. StableRail creates a new payment and uses its ID as `payment_refunds.refund_payment_id`; `original_payment_id` links back to the payment being refunded. It binds the payout quote when supplied and emits `payout.created` for workflow coordination and `payment.created` for merchant notification. From there, policy, ledger reservation, settlement, and failure handling use the ordinary payout workflow. Refund eligibility is established by the original payment outcome and its posted settlement journal. Provider-originated returns remain separate and continue to use `payment_returns` and reversal accounting.
 
 ## Payout saga lifecycle
 
@@ -203,6 +203,12 @@ instrument_456 -> blindpay / bank account / ba_...
 ```
 
 Callers must treat resource IDs as opaque; the current BlindPay reference sync may reuse a provider reference as the local resource ID for compatibility, but the adapter still resolves it through `provider_resources`. Adding another provider requires new resource mappings and an adapter, not new columns in `payins`, `payouts`, or their quote tables. Raw provider responses are isolated in `provider_payload`, while raw webhook events remain adapter-owned data.
+
+## Database schema
+
+The schema separates payment workflow state, provider execution, double-entry accounting, event delivery, and reconciliation while linking each operation back to its payment.
+
+![StableRail database schema](docs/img/schema.png)
 
 ## Database migrations
 

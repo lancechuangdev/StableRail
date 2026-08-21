@@ -50,13 +50,12 @@ type Payment struct {
 
 // Refund is a merchant-issued payout linked to an original payment.
 type Refund struct {
-	ID              string    `json:"id"`
-	PaymentID       string    `json:"payment_id"`
-	RefundPaymentID string    `json:"refund_payment_id"`
-	Reason          string    `json:"reason"`
-	CreatedAt       time.Time `json:"created_at"`
-	UpdatedAt       time.Time `json:"updated_at"`
-	IdempotencyKey  string    `json:"-"`
+	RefundPaymentID   string    `json:"refund_payment_id"`
+	OriginalPaymentID string    `json:"original_payment_id"`
+	Reason            string    `json:"reason"`
+	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
+	IdempotencyKey    string    `json:"-"`
 }
 
 // SettlementOperation exposes provider execution state without making payins

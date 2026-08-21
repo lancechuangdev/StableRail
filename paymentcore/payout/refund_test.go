@@ -21,13 +21,13 @@ func TestCreateRefundCreatesLinkedPaymentAndPaymentCreatedEvent(t *testing.T) {
 	mock.ExpectBegin()
 	mock.ExpectQuery("SELECT tenant_id,external_reference,currency,amount_minor,payment_status FROM payments").WithArgs("pay_1").
 		WillReturnRows(sqlmock.NewRows([]string{"tenant_id", "external_reference", "currency", "amount_minor", "payment_status"}).AddRow("tenant_1", "order-1", "USD", int64(2500), PaymentStatusSucceeded))
-	mock.ExpectQuery("SELECT r.id,r.payment_id,r.refund_payment_id").WithArgs("tenant_1", "refund-key").
-		WillReturnRows(sqlmock.NewRows([]string{"id", "payment_id", "refund_payment_id", "amount_minor", "currency", "reason", "created_at", "updated_at", "payout_quote_id"}))
+	mock.ExpectQuery("SELECT r.refund_payment_id,r.original_payment_id").WithArgs("tenant_1", "refund-key").
+		WillReturnRows(sqlmock.NewRows([]string{"refund_payment_id", "original_payment_id", "reason", "created_at", "updated_at", "amount_minor", "payout_quote_id"}))
 	mock.ExpectQuery("SELECT EXISTS").WithArgs("pay_1").WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
 	mock.ExpectQuery("SELECT COALESCE\\(SUM\\(r.amount_minor\\),0\\) FROM payment_refunds").WithArgs("pay_1").
 		WillReturnRows(sqlmock.NewRows([]string{"sum"}).AddRow(int64(500)))
-	mock.ExpectExec("INSERT INTO payments").WithArgs("pay_test", "order-1:refund:ref_test", "USD", int64(1000), "tenant_1", PaymentStatusCreated, "refund-key", now).WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectExec("INSERT INTO payment_refunds").WithArgs("ref_test", "pay_1", "pay_test", "tenant_1", "refund-key", int64(1000), "USD", "duplicate order", now).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO payments").WithArgs("pay_test", "order-1:refund:pay_test", "USD", int64(1000), "tenant_1", PaymentStatusCreated, "refund-key", now).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO payment_refunds").WithArgs("pay_test", "pay_1", "tenant_1", "refund-key", int64(1000), "USD", "duplicate order", now).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO payment_audit_events").WithArgs("pay_test", "created", "merchant refund payment created: duplicate order", now).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO payment_timeline_entries").WithArgs("pay_test", PaymentStatusCreated, "refund payment created", now).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO outbox_events").WithArgs("evt_test", eventbus.PayoutEventsTopic, "payout.created", 1, "pay_test", "payout", sqlmock.AnyArg(), now).WillReturnResult(sqlmock.NewResult(0, 1))
@@ -38,7 +38,7 @@ func TestCreateRefundCreatesLinkedPaymentAndPaymentCreatedEvent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if refund.ID != "ref_test" || refund.RefundPaymentID != "pay_test" {
+	if refund.OriginalPaymentID != "pay_1" || refund.RefundPaymentID != "pay_test" {
 		t.Fatalf("unexpected refund: %+v", refund)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -52,7 +52,7 @@ func TestCreateRefundRejectsAmountAboveRemainingActiveRefunds(t *testing.T) {
 	service := deterministicPayoutService(db)
 	mock.ExpectBegin()
 	mock.ExpectQuery("SELECT tenant_id,external_reference,currency,amount_minor,payment_status FROM payments").WillReturnRows(sqlmock.NewRows([]string{"tenant_id", "external_reference", "currency", "amount_minor", "payment_status"}).AddRow("tenant_1", "order-1", "USD", int64(2500), PaymentStatusSucceeded))
-	mock.ExpectQuery("SELECT r.id,r.payment_id,r.refund_payment_id").WillReturnRows(sqlmock.NewRows([]string{"id", "payment_id", "refund_payment_id", "amount_minor", "currency", "reason", "created_at", "updated_at", "payout_quote_id"}))
+	mock.ExpectQuery("SELECT r.refund_payment_id,r.original_payment_id").WillReturnRows(sqlmock.NewRows([]string{"refund_payment_id", "original_payment_id", "reason", "created_at", "updated_at", "amount_minor", "payout_quote_id"}))
 	mock.ExpectQuery("SELECT EXISTS").WithArgs("pay_1").WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
 	mock.ExpectQuery("SELECT COALESCE\\(SUM\\(r.amount_minor\\),0\\) FROM payment_refunds").WillReturnRows(sqlmock.NewRows([]string{"sum"}).AddRow(int64(2000)))
 	mock.ExpectRollback()

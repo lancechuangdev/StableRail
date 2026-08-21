@@ -80,7 +80,7 @@ type fakeHealth struct{ err error }
 func (f fakeHealth) PingContext(context.Context) error { return f.err }
 
 func TestCreateRefundUsesAuthenticatedTenantAndIdempotency(t *testing.T) {
-	store := &fakeStore{refund: &paymentcore.Refund{ID: "ref_1", PaymentID: "pay_1", RefundPaymentID: "pay_refund_1"}}
+	store := &fakeStore{refund: &paymentcore.Refund{OriginalPaymentID: "pay_1", RefundPaymentID: "pay_refund_1"}}
 	h, _ := NewHandler(store, store, nil, fakeHealth{})
 	req := httptest.NewRequest(http.MethodPost, "/v1/payments/pay_1/refunds", strings.NewReader(`{"amount_minor":500,"reason":"duplicate order"}`))
 	req = req.WithContext(context.WithValue(req.Context(), tenantContextKey{}, "tenant_1"))
